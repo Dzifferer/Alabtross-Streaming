@@ -1212,10 +1212,12 @@
     const statusLabel = stream._customMode ? 'Connecting to torrent peers...' : 'Loading stream...';
     dom.playerOverlay.innerHTML = `
       ${poster ? `<img class="loading-poster" src="${poster}" alt="">` : ''}
-      ${title ? `<div class="loading-title">${escapeHTML(title)}</div>` : ''}
-      <div class="loading-bar-container"><div class="loading-bar"></div></div>
-      <div class="loading-status">${statusLabel}</div>
-      ${stream._customMode ? '<div class="loading-sub">This may take 30-60 seconds</div>' : ''}
+      <div class="loading-info">
+        ${title ? `<div class="loading-title">${escapeHTML(title)}</div>` : ''}
+        <div class="loading-bar-container"><div class="loading-bar"></div></div>
+        <div class="loading-status">${statusLabel}</div>
+        ${stream._customMode ? '<div class="loading-sub">This may take 30-60 seconds</div>' : ''}
+      </div>
     `;
 
     // Poll torrent status for custom mode streams

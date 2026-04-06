@@ -81,10 +81,14 @@ class TorrentEngine {
 
     console.log(`[TorrentEngine] Starting torrent: ${hash}`);
 
+    // Create placeholder entry before the promise so duplicate requests can find it
+    const placeholder = { pending: null, engine: null, lastAccess: Date.now(), timer: null };
+    this._active.set(hash, placeholder);
+
     const pending = new Promise((resolve, reject) => {
       const engine = torrentStream(uri, {
         connections: 100,
-        uploads: 0,       // don't upload — streaming only
+        uploads: 0,
         path: this._downloadPath,
         trackers: [
           'udp://open.demonii.com:1337/announce',
@@ -95,6 +99,8 @@ class TorrentEngine {
           'udp://tracker.leechers-paradise.org:6969',
         ],
       });
+
+      placeholder.engine = engine;
 
       const timeout = setTimeout(() => {
         if (!this._active.has(hash) || !this._active.get(hash).files) {
@@ -108,7 +114,6 @@ class TorrentEngine {
         clearTimeout(timeout);
         console.log(`[TorrentEngine] Torrent ready: "${engine.torrent.name}", ${engine.files.length} files`);
 
-        // Deselect non-video files
         for (const file of engine.files) {
           if (!this._isFileNameSafe(file.name)) {
             file.deselect();
@@ -136,10 +141,10 @@ class TorrentEngine {
         this._active.delete(hash);
         reject(err);
       });
-
-      // Store pending promise so duplicate requests wait for the same torrent
-      this._active.set(hash, { pending: pending, engine, lastAccess: Date.now(), timer: null });
     });
+
+    // Store the promise so duplicate requests wait for it
+    placeholder.pending = pending;
 
     return pending;
   }

@@ -96,14 +96,26 @@
       color: white; font-size: 14px; text-align: center;
       display: flex; align-items: center; justify-content: center; gap: 8px;
     `;
-    banner.innerHTML = `
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M12 9v4M12 17h.01"/>
-        <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
-      </svg>
-      <span>VPN not detected — connect to WireGuard for safe streaming</span>
-      <button onclick="this.parentElement.remove()" style="background:none;border:none;color:white;font-size:20px;margin-left:8px;cursor:pointer">&times;</button>
-    `;
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('width', '20');
+    svg.setAttribute('height', '20');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '2');
+    svg.innerHTML = '<path d="M12 9v4M12 17h.01"/><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>';
+
+    const msg = document.createElement('span');
+    msg.textContent = 'VPN not detected \u2014 connect to WireGuard for safe streaming';
+
+    const closeBtn = document.createElement('button');
+    closeBtn.textContent = '\u00d7';
+    closeBtn.style.cssText = 'background:none;border:none;color:white;font-size:20px;margin-left:8px;cursor:pointer';
+    closeBtn.addEventListener('click', () => banner.remove());
+
+    banner.appendChild(svg);
+    banner.appendChild(msg);
+    banner.appendChild(closeBtn);
     document.body.prepend(banner);
   }
 
@@ -281,12 +293,12 @@
   }
 
   function attachCardListeners(container) {
-    container.querySelectorAll('.card').forEach(card => {
-      card.addEventListener('click', () => {
-        const type = card.dataset.type;
-        const id = card.dataset.id;
-        openDetail(type, id);
-      });
+    // Use event delegation to avoid listener accumulation
+    container.addEventListener('click', (e) => {
+      const card = e.target.closest('.card');
+      if (card) {
+        openDetail(card.dataset.type, card.dataset.id);
+      }
     });
   }
 
@@ -567,6 +579,7 @@
       }
     }
 
+    _lastRankedStreams = ranked;
     const listEl = document.getElementById('stream-list');
     if (listEl) {
       listEl.innerHTML = ranked.map((r, i) => renderStreamItem(r.stream, i, 'done', r.responseTime)).join('');
@@ -644,24 +657,21 @@
     });
   }
 
+  // Store ranked results so stream items can reference them by index
+  let _lastRankedStreams = [];
+
   function attachStreamHandlers() {
-    document.querySelectorAll('.stream-item').forEach(item => {
-      item.addEventListener('click', () => {
-        // Find the stream data — we need to re-fetch from the ranked results
-        const index = parseInt(item.dataset.index);
-        playStreamByElement(item);
-      });
+    const list = document.getElementById('stream-list');
+    if (!list) return;
+    // Event delegation — single listener for all stream items
+    list.addEventListener('click', (e) => {
+      const item = e.target.closest('.stream-item');
+      if (!item) return;
+      const idx = parseInt(item.dataset.index);
+      if (idx >= 0 && idx < _lastRankedStreams.length) {
+        playStream(_lastRankedStreams[idx].stream);
+      }
     });
-  }
-
-  function playStreamByElement(element) {
-    // Get the stream from the current results by finding its title
-    const titleEl = element.querySelector('.stream-title');
-    if (!titleEl) return;
-
-    // We need to match back to the stream — use a data attribute approach
-    // For now, trigger playback on the fastest available stream
-    playFromDetail();
   }
 
   // ─── Playback ────────────────────────────────────
@@ -867,11 +877,9 @@
     loadHome();
 
     // VPN check
-    checkVPNStatus().then(result => {
-      if (!result.connected) {
-        showVPNWarning();
-      }
-    });
+    checkVPNStatus()
+      .then(result => { if (!result.connected) showVPNWarning(); })
+      .catch(() => showVPNWarning());
 
     // Expose for inline handlers
     window.app = { goBack };

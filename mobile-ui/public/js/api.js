@@ -1,27 +1,34 @@
 /**
  * Alabtross Mobile — Stremio API Layer
- *
- * Handles communication with:
- * - Stremio addons (Cinemeta for metadata, Torrentio for streams, etc.)
- * - Local Stremio streaming server (for actual playback URLs)
  */
 
 const CINEMETA_URL = 'https://v3-cinemeta.strem.io';
-const TORRENTIO_URL = 'https://torrentio.strem.io';
 
 class StremioAPI {
   constructor() {
     this.addons = this._loadAddons();
     this.serverUrl = localStorage.getItem('stremio_server') || '';
     this._manifestCache = new Map();
+    this._cacheTimestamps = new Map();
+    this._speedTestInProgress = false;
+    this._speedTestController = null;
   }
 
   // ─── Addon Management ────────────────────────────
 
   _loadAddons() {
-    const saved = localStorage.getItem('stremio_addons');
-    if (saved) return JSON.parse(saved);
-    // Default addons
+    try {
+      const saved = localStorage.getItem('stremio_addons');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed.filter(a => a && typeof a.url === 'string');
+        }
+      }
+    } catch (e) {
+      console.warn('Corrupted addon data — resetting', e);
+      localStorage.removeItem('stremio_addons');
+    }
     const defaults = [
       { url: CINEMETA_URL, name: 'Cinemeta', types: ['movie', 'series'] },
     ];
@@ -35,8 +42,17 @@ class StremioAPI {
   }
 
   async addAddon(url) {
+    // Validate URL
+    try {
+      const u = new URL(url);
+      if (u.protocol !== 'https:' && u.hostname !== 'localhost' && u.hostname !== '127.0.0.1') {
+        return { error: 'Only HTTPS addon URLs are allowed (or localhost)' };
+      }
+    } catch {
+      return { error: 'Invalid URL' };
+    }
+
     url = url.replace(/\/manifest\.json$/, '').replace(/\/$/, '');
-    // Check if already added
     if (this.addons.find(a => a.url === url)) {
       return { error: 'Addon already added' };
     }
@@ -53,13 +69,12 @@ class StremioAPI {
       this._saveAddons(updated);
       return addon;
     } catch (e) {
-      return { error: 'Failed to load addon manifest: ' + e.message };
+      return { error: 'Failed to load addon manifest' };
     }
   }
 
   removeAddon(url) {
-    const updated = this.addons.filter(a => a.url !== url);
-    this._saveAddons(updated);
+    this._saveAddons(this.addons.filter(a => a.url !== url));
   }
 
   getAddons() {
@@ -83,21 +98,28 @@ class StremioAPI {
       const resp = await fetch(url + '/stats.json', { signal: AbortSignal.timeout(5000) });
       if (resp.ok) return { ok: true };
       return { ok: false, error: 'Server responded with ' + resp.status };
-    } catch (e) {
-      return { ok: false, error: e.message };
+    } catch {
+      return { ok: false, error: 'Server unreachable' };
     }
   }
 
-  // ─── Manifest Fetching ───────────────────────────
+  // ─── Manifest Fetching (with TTL cache) ──────────
 
   async _fetchManifest(addonUrl) {
-    if (this._manifestCache.has(addonUrl)) {
-      return this._manifestCache.get(addonUrl);
+    const now = Date.now();
+    const cached = this._manifestCache.get(addonUrl);
+    const ts = this._cacheTimestamps.get(addonUrl) || 0;
+
+    // Cache for 5 minutes
+    if (cached && (now - ts) < 300000) {
+      return cached;
     }
+
     const resp = await fetch(addonUrl + '/manifest.json');
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const data = await resp.json();
     this._manifestCache.set(addonUrl, data);
+    this._cacheTimestamps.set(addonUrl, now);
     return data;
   }
 
@@ -105,13 +127,11 @@ class StremioAPI {
 
   async getCatalogs(type) {
     const results = [];
-
     for (const addon of this.addons) {
       try {
         const manifest = await this._fetchManifest(addon.url);
         if (!manifest.catalogs) continue;
-
-        const typeCatalogs = manifest.catalogs.filter(c => c.type === type);
+        const typeCatalogs = manifest.catalogs.filter(c => c.type === type).slice(0, 5);
         for (const catalog of typeCatalogs) {
           results.push({
             addon: addon.name,
@@ -138,9 +158,8 @@ class StremioAPI {
       const resp = await fetch(url);
       if (!resp.ok) return [];
       const data = await resp.json();
-      return data.metas || [];
-    } catch (e) {
-      console.warn('Failed to fetch catalog', url, e);
+      return (data.metas || []).slice(0, 50);
+    } catch {
       return [];
     }
   }
@@ -148,6 +167,8 @@ class StremioAPI {
   // ─── Search ──────────────────────────────────────
 
   async search(query, type) {
+    if (!query || query.length > 200) return [];
+
     const allResults = [];
     const types = type ? [type] : ['movie', 'series'];
 
@@ -158,8 +179,6 @@ class StremioAPI {
 
         for (const catalog of manifest.catalogs) {
           if (!types.includes(catalog.type)) continue;
-
-          // Check if this catalog supports search
           const hasSearch = catalog.extra &&
             catalog.extra.some(e => e.name === 'search');
           if (!hasSearch) continue;
@@ -175,14 +194,13 @@ class StremioAPI {
       }
     }
 
-    // Deduplicate by imdb_id
     const seen = new Set();
     return allResults.filter(item => {
       const id = item.imdb_id || item.id;
       if (seen.has(id)) return false;
       seen.add(id);
       return true;
-    });
+    }).slice(0, 100);
   }
 
   // ─── Metadata ────────────────────────────────────
@@ -195,7 +213,6 @@ class StremioAPI {
         const hasMeta = resources.includes('meta') ||
           resources.some(r => r.name === 'meta' &&
             (!r.types || r.types.includes(type)));
-
         if (!hasMeta) continue;
 
         const resp = await fetch(`${addon.url}/meta/${type}/${id}.json`);
@@ -213,7 +230,6 @@ class StremioAPI {
 
   async getStreams(type, id) {
     const allStreams = [];
-
     for (const addon of this.addons) {
       try {
         const manifest = await this._fetchManifest(addon.url);
@@ -221,14 +237,13 @@ class StremioAPI {
         const hasStream = resources.includes('stream') ||
           resources.some(r => r.name === 'stream' &&
             (!r.types || r.types.includes(type)));
-
         if (!hasStream) continue;
 
         const resp = await fetch(`${addon.url}/stream/${type}/${id}.json`);
         if (!resp.ok) continue;
         const data = await resp.json();
         if (data.streams) {
-          allStreams.push(...data.streams.map(s => ({
+          allStreams.push(...data.streams.slice(0, 50).map(s => ({
             ...s,
             addonName: addon.name,
           })));
@@ -243,42 +258,51 @@ class StremioAPI {
   // ─── Playback URL Resolution ─────────────────────
 
   getPlaybackUrl(stream) {
-    // Direct HTTP URL
-    if (stream.url) return stream.url;
+    if (stream.url) {
+      try {
+        const u = new URL(stream.url);
+        if (!['http:', 'https:'].includes(u.protocol)) return null;
+        return stream.url;
+      } catch { return null; }
+    }
 
-    // Torrent/infoHash — route through local Stremio server
     if (stream.infoHash) {
+      // Validate infoHash is a hex string
+      if (!/^[0-9a-f]{40}$/i.test(stream.infoHash)) return null;
+
       const server = this.serverUrl || '/stremio-api';
       let url = `${server}/hlsv2/${stream.infoHash}`;
       if (stream.fileIdx !== undefined) {
-        url += `/${stream.fileIdx}`;
+        const idx = parseInt(stream.fileIdx, 10);
+        if (isNaN(idx) || idx < 0) return null;
+        url += `/${idx}`;
       }
-      // Return master.m3u8 for HLS playback
       return url + '/master.m3u8';
     }
 
-    // YouTube
     if (stream.ytId) {
+      if (!/^[a-zA-Z0-9_-]{11}$/.test(stream.ytId)) return null;
       return `https://www.youtube.com/watch?v=${stream.ytId}`;
     }
 
-    // External URL (open in new tab)
-    if (stream.externalUrl) return stream.externalUrl;
+    if (stream.externalUrl) {
+      try {
+        const u = new URL(stream.externalUrl);
+        if (!['http:', 'https:'].includes(u.protocol)) return null;
+        return stream.externalUrl;
+      } catch { return null; }
+    }
 
     return null;
   }
 
   // ─── Stream Speed Testing ────────────────────────
 
-  /**
-   * Tests the response speed of a stream by measuring how quickly we get
-   * the first bytes back. Returns time in ms, or Infinity on failure.
-   */
-  async _testStreamSpeed(stream, timeoutMs = 8000) {
+  async _testStreamSpeed(stream, timeoutMs, signal) {
+    timeoutMs = timeoutMs || 8000;
     const url = this.getPlaybackUrl(stream);
     if (!url) return { stream, responseTime: Infinity, error: 'No URL' };
 
-    // Skip external URLs (YouTube etc) — we can't meaningfully test these
     if (stream.ytId || stream.externalUrl) {
       return { stream, responseTime: Infinity, error: 'External' };
     }
@@ -288,93 +312,80 @@ class StremioAPI {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
 
+      // Respect parent signal
+      if (signal) {
+        signal.addEventListener('abort', () => controller.abort(), { once: true });
+      }
+
       const resp = await fetch(url, {
         method: 'HEAD',
         signal: controller.signal,
-        mode: 'cors',
       });
       clearTimeout(timer);
 
-      const elapsed = performance.now() - start;
-
       if (!resp.ok) {
-        // Try GET with range header as fallback (some servers don't support HEAD)
+        // Fallback: GET with range
         const start2 = performance.now();
-        const controller2 = new AbortController();
-        const timer2 = setTimeout(() => controller2.abort(), timeoutMs);
+        const c2 = new AbortController();
+        const t2 = setTimeout(() => c2.abort(), timeoutMs);
+        if (signal) signal.addEventListener('abort', () => c2.abort(), { once: true });
 
-        const resp2 = await fetch(url, {
+        const r2 = await fetch(url, {
           method: 'GET',
           headers: { 'Range': 'bytes=0-1023' },
-          signal: controller2.signal,
-          mode: 'cors',
+          signal: c2.signal,
         });
-        clearTimeout(timer2);
-
-        if (resp2.body) {
-          const reader = resp2.body.getReader();
-          await reader.read();
-          reader.cancel();
-        }
-
+        clearTimeout(t2);
+        if (r2.body) { const reader = r2.body.getReader(); await reader.read(); reader.cancel(); }
         return { stream, responseTime: performance.now() - start2 };
       }
 
-      return { stream, responseTime: elapsed };
+      return { stream, responseTime: performance.now() - start };
     } catch (e) {
-      // On HEAD failure, try a quick GET with range
+      // Fallback GET on HEAD failure
       try {
         const start2 = performance.now();
-        const controller2 = new AbortController();
-        const timer2 = setTimeout(() => controller2.abort(), timeoutMs);
+        const c2 = new AbortController();
+        const t2 = setTimeout(() => c2.abort(), timeoutMs);
+        if (signal) signal.addEventListener('abort', () => c2.abort(), { once: true });
 
-        const resp = await fetch(url, {
+        const r = await fetch(url, {
           method: 'GET',
           headers: { 'Range': 'bytes=0-1023' },
-          signal: controller2.signal,
+          signal: c2.signal,
         });
-        clearTimeout(timer2);
-
-        if (resp.body) {
-          const reader = resp.body.getReader();
-          await reader.read();
-          reader.cancel();
-        }
-
+        clearTimeout(t2);
+        if (r.body) { const reader = r.body.getReader(); await reader.read(); reader.cancel(); }
         return { stream, responseTime: performance.now() - start2 };
       } catch {
-        return { stream, responseTime: Infinity, error: e.message };
+        return { stream, responseTime: Infinity, error: 'Timeout' };
       }
     }
   }
 
-  /**
-   * Tests all streams in parallel, returns them sorted fastest-first.
-   * Emits progress via the optional callback: (testedCount, total, currentResult)
-   */
   async testAndRankStreams(streams, onProgress) {
-    const total = streams.length;
+    // Cancel any in-progress test
+    if (this._speedTestController) {
+      this._speedTestController.abort();
+    }
+    this._speedTestController = new AbortController();
+    const signal = this._speedTestController.signal;
+
     let tested = 0;
+    const total = streams.length;
 
     const promises = streams.map(async (stream) => {
-      const result = await this._testStreamSpeed(stream);
+      const result = await this._testStreamSpeed(stream, 8000, signal);
       tested++;
       if (onProgress) onProgress(tested, total, result);
       return result;
     });
 
     const results = await Promise.all(promises);
-
-    // Sort by response time (fastest first), Infinity goes last
     results.sort((a, b) => a.responseTime - b.responseTime);
-
     return results;
   }
 
-  /**
-   * Gets streams and automatically tests + ranks them.
-   * Returns { streams: [...ranked], bestStream, testing: true }
-   */
   async getStreamsRanked(type, id, onProgress) {
     const streams = await this.getStreams(type, id);
     if (streams.length === 0) return { streams: [], bestStream: null };
@@ -389,5 +400,4 @@ class StremioAPI {
   }
 }
 
-// Global instance
 window.api = new StremioAPI();

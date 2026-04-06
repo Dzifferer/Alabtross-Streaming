@@ -157,7 +157,7 @@ class TorrentEngine {
         return null;
       }
     } else {
-      const videoFiles = files.filter(f => this._isFileNameSafe(f.name));
+      const videoFiles = files.filter(f => isFileNameSafe(f.name));
       if (videoFiles.length === 0) return null;
       if (videoFiles.length === 1) { file = videoFiles[0]; }
       else {
@@ -286,7 +286,7 @@ class TorrentEngine {
       uploadSpeed: sw ? sw.uploadSpeed() : 0,
       numPeers: sw ? sw.wires.length : 0,
       files: entry.files
-        .filter(f => this._isFileNameSafe(f.name))
+        .filter(f => isFileNameSafe(f.name))
         .map(f => ({ name: f.name, length: f.length })),
     };
   }

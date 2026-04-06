@@ -681,11 +681,27 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`Custom mode available at /api/streams/* and /api/play/*`);
 });
 
-// Graceful shutdown
+// Graceful shutdown with timeout to ensure metadata is saved even if engines hang
+let shuttingDown = false;
 function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log('[Server] Shutting down gracefully...');
+
+  // Force exit after 8s if cleanup hangs (Docker sends SIGKILL at 10s)
+  const forceExit = setTimeout(() => {
+    console.error('[Server] Shutdown timeout — forcing exit');
+    process.exit(1);
+  }, 8000);
+  forceExit.unref();
+
   clearInterval(rateLimitCleanupTimer);
-  if (engine) engine.destroy();
-  library.destroy();
+  try { library.destroy(); } catch (err) {
+    console.error(`[Server] Library shutdown error: ${err.message}`);
+  }
+  try { if (engine) engine.destroy(); } catch (err) {
+    console.error(`[Server] Engine shutdown error: ${err.message}`);
+  }
   process.exit(0);
 }
 

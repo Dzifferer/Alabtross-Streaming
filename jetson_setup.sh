@@ -802,6 +802,18 @@ fi
 # Allow port 8080 through firewall (same LAN-only binding as Stremio)
 ufw allow 8080/tcp comment "Alabtross Mobile UI" 2>/dev/null || true
 
+# Install systemd service for on-boot startup
+SETUP_DIR="$(cd "$(dirname "$0")" && pwd)"
+SERVICE_SRC="$SETUP_DIR/alabtross-mobile.service"
+if [[ -f "$SERVICE_SRC" ]]; then
+  cp "$SERVICE_SRC" /etc/systemd/system/alabtross-mobile.service
+  systemctl daemon-reload
+  systemctl enable alabtross-mobile.service
+  ok "Alabtross Mobile UI will start automatically on boot"
+else
+  info "Service file not found — on-boot startup not configured"
+fi
+
 
 # ---------------------------------------------------------------
 # STEP 8/9 — Tailscale VPN

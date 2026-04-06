@@ -14,7 +14,7 @@ const app = express();
 const PORT = process.env.PORT || 8080;
 const STREMIO_SERVER = process.env.STREMIO_SERVER || 'http://localhost:11470';
 const TORRENT_CACHE_PATH = process.env.TORRENT_CACHE || path.join(__dirname, '.torrent-cache');
-const LIBRARY_PATH = process.env.LIBRARY_PATH || path.join(__dirname, 'library');
+const LIBRARY_PATH = process.env.LIBRARY_PATH || path.join(TORRENT_CACHE_PATH, 'library');
 
 // JSON body parsing for library POST/DELETE requests
 app.use(express.json({ limit: '10kb' }));
@@ -314,7 +314,6 @@ app.get('/api/play/:infoHash/remux', rateLimit, (req, res) => {
   }
 
   getEngine().serveRemuxedStream(req, res, magnet, fileIdx);
-});
 });
 
 // GET /api/torrent-status/:infoHash — check download progress

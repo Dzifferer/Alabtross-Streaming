@@ -20,16 +20,36 @@ const DANGEROUS_EXTENSIONS = new Set([
 ]);
 
 const TRACKERS = [
+  // High-reliability public trackers
   'udp://tracker.opentrackr.org:1337/announce',
   'udp://open.stealth.si:80/announce',
   'udp://tracker.openbittorrent.com:6969/announce',
   'udp://exodus.desync.com:6969/announce',
   'udp://tracker.torrent.eu.org:451/announce',
   'udp://open.demonii.com:1337/announce',
-  'udp://tracker.coppersurfer.tk:6969',
-  'udp://p4p.arenabg.com:1337',
-  'udp://tracker.leechers-paradise.org:6969',
   'udp://explodie.org:6969/announce',
+  // Additional active trackers for better peer discovery
+  'udp://tracker.opentrackr.org:1337/announce',
+  'udp://opentracker.i2p.rocks:6969/announce',
+  'udp://tracker.internetwarriors.net:1337/announce',
+  'udp://tracker.leechers-paradise.org:6969/announce',
+  'udp://tracker.cyberia.is:6969/announce',
+  'udp://tracker.moeking.me:6969/announce',
+  'udp://tracker.tiny-vps.com:6969/announce',
+  'udp://tracker.dler.org:6969/announce',
+  'udp://open.tracker.cl:1337/announce',
+  'udp://tracker.altrosky.nl:6969/announce',
+  'udp://tracker.theoks.net:6969/announce',
+  'udp://tracker.monitorit4.me:6969/announce',
+  'udp://tracker.0x7c0.com:6969/announce',
+  'udp://retracker01-msk-virt.corbina.net:80/announce',
+  'udp://uploads.gamecoast.net:6969/announce',
+  'udp://tracker1.bt.moack.co.kr:80/announce',
+  'udp://tracker.dump.cl:6969/announce',
+  'https://tracker.tamersunion.org:443/announce',
+  'https://tracker.gbitt.info:443/announce',
+  'http://tracker.files.fm:6969/announce',
+  // WebSocket trackers for WebRTC peer discovery
   'wss://tracker.openwebtorrent.com',
   'wss://tracker.btorrent.xyz',
 ];

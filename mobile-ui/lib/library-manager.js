@@ -209,9 +209,10 @@ class LibraryManager {
     const itemDir = path.join(this._libraryPath, this._safeDirectoryName(item));
 
     const engine = torrentStream(item.magnetUri, {
-      connections: 200,
-      uploads: 0,
+      connections: 500,
+      uploads: 10,
       dht: true,
+      verify: true,
       path: itemDir,
       trackers: TRACKERS,
     });

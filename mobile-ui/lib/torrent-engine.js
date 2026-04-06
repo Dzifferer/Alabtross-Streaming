@@ -79,8 +79,8 @@ class TorrentEngine {
 
     const pending = new Promise((resolve, reject) => {
       const engine = torrentStream(uri, {
-        connections: 200,
-        uploads: 0,
+        connections: 500,
+        uploads: 10,
         dht: true,
         path: this._downloadPath,
         trackers: TRACKERS,

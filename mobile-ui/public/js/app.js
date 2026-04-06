@@ -47,6 +47,10 @@
     bottomNav: $('#bottom-nav'),
     navBtns: $$('.nav-btn'),
     // Settings
+    modeToggle: $('#mode-toggle'),
+    modeHint: $('#mode-hint'),
+    stremioSettings: $('#stremio-settings'),
+    customSettings: $('#custom-settings'),
     settingServer: $('#setting-server'),
     settingServerTest: $('#setting-server-test'),
     serverStatus: $('#server-status'),
@@ -55,6 +59,7 @@
     addonAddBtn: $('#addon-add-btn'),
     addonAddCinemeta: $('#addon-add-cinemeta'),
     addonAddTorrentio: $('#addon-add-torrentio'),
+    customAddCinemeta: $('#custom-add-cinemeta'),
   };
 
   // ─── VPN Safety Check ───────────────────────────
@@ -500,44 +505,55 @@
     document.querySelectorAll('.episode-item').forEach(ep => {
       ep.addEventListener('click', () => {
         const id = ep.dataset.id;
+        const season = parseInt(ep.dataset.season, 10);
+        const episode = parseInt(ep.dataset.episode, 10);
         const sc = document.getElementById('stream-container');
         if (sc) {
           sc.classList.remove('hidden');
           sc.innerHTML = `<div class="loading-state"><div class="spinner"></div><p>Finding streams & testing speeds...</p></div>`;
           sc.scrollIntoView({ behavior: 'smooth' });
         }
-        loadStreams('series', id);
+        // In custom mode, we need the show's IMDB ID + season/episode
+        const showId = state.currentMeta
+          ? (state.currentMeta.imdb_id || state.currentMeta.id)
+          : id;
+        loadStreams('series', showId, { season, episode });
       });
     });
   }
 
   // ─── Stream Loading with Speed Testing ───────────
 
-  async function loadStreams(type, id) {
+  async function loadStreams(type, id, seasonEpisode) {
     const container = document.getElementById('stream-container');
     if (!container) return;
 
-    // First, check VPN status
-    if (!state.vpnVerified) {
+    // First, check VPN status (Stremio mode only)
+    if (api.getMode() === 'stremio' && !state.vpnVerified) {
       const vpn = await checkVPNStatus();
       if (!vpn.connected) {
         showVPNWarning();
       }
     }
 
-    const streams = await api.getStreams(type, id);
+    const streams = await api.getStreams(type, id, seasonEpisode);
 
     if (streams.length === 0) {
+      const hint = api.getMode() === 'custom'
+        ? 'No torrents found on YTS, EZTV, or 1337x'
+        : 'Try adding more stream addons in Settings';
       container.innerHTML = `
         <div class="empty-state" style="padding:32px 0">
           <p>No streams found</p>
-          <p style="font-size:12px;color:var(--text-muted)">Try adding more stream addons in Settings</p>
+          <p style="font-size:12px;color:var(--text-muted)">${hint}</p>
         </div>
       `;
       return;
     }
 
     // Show streams with a "testing" state
+    const isCustom = api.getMode() === 'custom';
+    const statusLabel = isCustom ? 'Ranking by seeds...' : 'Testing stream speeds...';
     container.innerHTML = `
       <div class="stream-speed-status" style="
         text-align:center; padding:12px; margin-bottom:8px;
@@ -545,7 +561,7 @@
         background:var(--bg-card); border-radius:var(--radius-sm);
       ">
         <div class="spinner" style="width:20px;height:20px;margin:0 auto 8px;border-width:2px"></div>
-        Testing stream speeds... <span id="speed-progress">0/${streams.length}</span>
+        ${statusLabel} <span id="speed-progress">0/${streams.length}</span>
       </div>
       <div class="stream-list" id="stream-list">
         ${streams.map((s, i) => renderStreamItem(s, i, 'testing')).join('')}
@@ -566,11 +582,20 @@
     if (statusEl) {
       const fastest = ranked.find(r => r.responseTime < Infinity);
       if (fastest) {
-        statusEl.innerHTML = `
-          <span style="color:var(--success)">&#9889;</span>
-          Best stream: <strong>${Math.round(fastest.responseTime)}ms</strong> response time
-          <span style="color:var(--success)"> &mdash; Auto-selected</span>
-        `;
+        if (isCustom) {
+          const seeds = fastest.stream.seeds || 0;
+          statusEl.innerHTML = `
+            <span style="color:var(--success)">&#9889;</span>
+            Best stream: <strong>${seeds} seeds</strong>
+            <span style="color:var(--success)"> &mdash; ${fastest.stream.source || 'Custom'}</span>
+          `;
+        } else {
+          statusEl.innerHTML = `
+            <span style="color:var(--success)">&#9889;</span>
+            Best stream: <strong>${Math.round(fastest.responseTime)}ms</strong> response time
+            <span style="color:var(--success)"> &mdash; Auto-selected</span>
+          `;
+        }
       } else {
         statusEl.innerHTML = `
           <span style="color:var(--warning)">&#9888;</span>
@@ -595,7 +620,15 @@
     const addon = stream.addonName ? escapeHTML(stream.addonName) : '';
 
     let speedBadge = '';
-    if (status === 'testing') {
+    if (stream._customMode && status === 'done') {
+      // Custom mode: show seed count
+      const seeds = stream.seeds || 0;
+      let color = 'var(--success)';
+      let bg = 'rgba(0, 206, 201, 0.15)';
+      if (seeds < 5) { color = 'var(--danger)'; bg = 'rgba(255, 107, 107, 0.15)'; }
+      else if (seeds < 20) { color = 'var(--warning)'; bg = 'rgba(253, 203, 110, 0.15)'; }
+      speedBadge = `<span class="stream-quality" style="background:${bg};color:${color}">${seeds} seeds</span>`;
+    } else if (status === 'testing') {
       speedBadge = '<span class="stream-quality" style="background:rgba(255,255,255,0.05);color:var(--text-muted)">Testing...</span>';
     } else if (responseTime < Infinity) {
       const ms = Math.round(responseTime);
@@ -727,6 +760,40 @@
   // ─── Settings ────────────────────────────────────
 
   function initSettings() {
+    // ─── Mode Toggle ────────────────────────────────
+    const modeHints = {
+      stremio: 'Uses Stremio server + addons for streams',
+      custom: 'Uses YTS, EZTV, 1337x directly — no Stremio needed',
+    };
+
+    function updateModeUI(mode) {
+      const btns = dom.modeToggle.querySelectorAll('.mode-btn');
+      btns.forEach(btn => btn.classList.toggle('active', btn.dataset.mode === mode));
+
+      // Move slider
+      const slider = dom.modeToggle.querySelector('.mode-slider');
+      slider.style.transform = mode === 'custom' ? 'translateX(100%)' : 'translateX(0)';
+
+      // Show/hide mode-specific settings
+      dom.stremioSettings.classList.toggle('hidden', mode !== 'stremio');
+      dom.customSettings.classList.toggle('hidden', mode !== 'custom');
+      dom.modeHint.textContent = modeHints[mode];
+    }
+
+    // Init mode from saved state
+    updateModeUI(api.getMode());
+
+    dom.modeToggle.querySelectorAll('.mode-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const mode = btn.dataset.mode;
+        api.setMode(mode);
+        updateModeUI(mode);
+        showToast(mode === 'custom' ? 'Custom mode — direct sources' : 'Stremio mode');
+      });
+    });
+
+    // ─── Stremio Mode Settings ──────────────────────
+
     // Load saved server URL
     dom.settingServer.value = api.getServerUrl();
 
@@ -784,8 +851,17 @@
       else { renderAddonList(); showToast('Added Torrentio'); }
     });
 
+    // ─── Custom Mode Settings ───────────────────────
+
+    dom.customAddCinemeta.addEventListener('click', async () => {
+      const result = await api.addAddon('https://v3-cinemeta.strem.io');
+      if (result.error) showToast(result.error);
+      else { renderAddonList(); showToast('Added Cinemeta'); }
+    });
+
     dom.settingsToggle.addEventListener('click', () => {
       navigateTo('settings');
+      updateModeUI(api.getMode());
       renderAddonList();
     });
 

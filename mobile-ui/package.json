@@ -1,6 +1,6 @@
 {
   "name": "alabtross-mobile",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Mobile streaming interface for Alabtross Streaming Server",
   "main": "server.js",
   "scripts": {
@@ -8,7 +8,9 @@
     "dev": "node server.js"
   },
   "dependencies": {
+    "cheerio": "^1.0.0",
     "express": "^4.21.0",
-    "http-proxy-middleware": "^3.0.0"
+    "http-proxy-middleware": "^3.0.0",
+    "webtorrent": "^2.5.1"
   }
 }

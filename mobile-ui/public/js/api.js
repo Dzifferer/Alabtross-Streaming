@@ -1,17 +1,34 @@
 /**
  * Alabtross Mobile — Stremio API Layer
+ *
+ * Supports two modes:
+ *   - "stremio" : Original behavior — addons + Stremio server for streams
+ *   - "custom"  : Direct torrent sources (YTS/EZTV/1337x) + local WebTorrent engine
  */
 
 const CINEMETA_URL = 'https://v3-cinemeta.strem.io';
 
 class StremioAPI {
   constructor() {
+    this.mode = localStorage.getItem('streaming_mode') || 'stremio';
     this.addons = this._loadAddons();
     this.serverUrl = localStorage.getItem('stremio_server') || '';
     this._manifestCache = new Map();
     this._cacheTimestamps = new Map();
     this._speedTestInProgress = false;
     this._speedTestController = null;
+  }
+
+  // ─── Mode Management ─────────────────────────────
+
+  getMode() {
+    return this.mode;
+  }
+
+  setMode(mode) {
+    if (mode !== 'stremio' && mode !== 'custom') return;
+    this.mode = mode;
+    localStorage.setItem('streaming_mode', mode);
   }
 
   // ─── Addon Management ────────────────────────────
@@ -124,6 +141,7 @@ class StremioAPI {
   }
 
   // ─── Catalogs ────────────────────────────────────
+  // Catalogs always come from addons (Cinemeta) regardless of mode
 
   async getCatalogs(type) {
     const results = [];
@@ -165,6 +183,7 @@ class StremioAPI {
   }
 
   // ─── Search ──────────────────────────────────────
+  // Search always uses addon catalogs (Cinemeta) regardless of mode
 
   async search(query, type) {
     if (!query || query.length > 200) return [];
@@ -204,6 +223,7 @@ class StremioAPI {
   }
 
   // ─── Metadata ────────────────────────────────────
+  // Metadata always comes from addons (Cinemeta) regardless of mode
 
   async getMeta(type, id) {
     for (const addon of this.addons) {
@@ -228,7 +248,17 @@ class StremioAPI {
 
   // ─── Streams ─────────────────────────────────────
 
-  async getStreams(type, id) {
+  async getStreams(type, id, seasonEpisode) {
+    if (this.mode === 'custom') {
+      return this._getCustomStreams(type, id, seasonEpisode);
+    }
+    return this._getStremioStreams(type, id);
+  }
+
+  /**
+   * Stremio mode: fetch streams from all added addons.
+   */
+  async _getStremioStreams(type, id) {
     const allStreams = [];
     for (const addon of this.addons) {
       try {
@@ -255,9 +285,61 @@ class StremioAPI {
     return allStreams;
   }
 
+  /**
+   * Custom mode: fetch streams from our backend scrapers.
+   */
+  async _getCustomStreams(type, id, seasonEpisode) {
+    // Extract IMDB ID from the content ID
+    const imdbId = id.match(/^tt\d+/) ? id.match(/^(tt\d+)/)[1] : id;
+
+    let url;
+    if (type === 'movie') {
+      url = `/api/streams/movie/${imdbId}`;
+    } else {
+      url = `/api/streams/series/${imdbId}`;
+      // If seasonEpisode provided (e.g. from episode click), append query params
+      if (seasonEpisode && seasonEpisode.season !== undefined) {
+        const params = new URLSearchParams();
+        params.set('season', seasonEpisode.season);
+        if (seasonEpisode.episode !== undefined) params.set('episode', seasonEpisode.episode);
+        url += '?' + params.toString();
+      }
+    }
+
+    try {
+      const resp = await fetch(url);
+      if (!resp.ok) return [];
+      const data = await resp.json();
+      return (data.streams || []).map(s => ({
+        ...s,
+        addonName: s.source || 'Custom',
+        // In custom mode, streams have magnetUri and infoHash
+        _customMode: true,
+      }));
+    } catch (e) {
+      console.warn('Custom stream fetch failed:', e);
+      return [];
+    }
+  }
+
   // ─── Playback URL Resolution ─────────────────────
 
   getPlaybackUrl(stream) {
+    // Custom mode: use local streaming endpoint
+    if (stream._customMode && stream.infoHash) {
+      if (!/^[0-9a-f]{40}$/i.test(stream.infoHash)) return null;
+      let url = `/api/play/${stream.infoHash}`;
+      const params = new URLSearchParams();
+      if (stream.fileIdx !== undefined) {
+        params.set('fileIdx', stream.fileIdx);
+      }
+      if (stream.magnetUri) {
+        params.set('magnet', stream.magnetUri);
+      }
+      const qs = params.toString();
+      return qs ? url + '?' + qs : url;
+    }
+
     if (stream.url) {
       try {
         const u = new URL(stream.url);
@@ -305,6 +387,14 @@ class StremioAPI {
 
     if (stream.ytId || stream.externalUrl) {
       return { stream, responseTime: Infinity, error: 'External' };
+    }
+
+    // In custom mode, skip speed testing — rank by seeds instead
+    if (stream._customMode) {
+      const seeds = stream.seeds || 0;
+      // Simulate response time inversely proportional to seeds
+      const fakeTime = seeds > 0 ? Math.max(50, 5000 / seeds) : 9999;
+      return { stream, responseTime: fakeTime };
     }
 
     const start = performance.now();
@@ -386,8 +476,8 @@ class StremioAPI {
     return results;
   }
 
-  async getStreamsRanked(type, id, onProgress) {
-    const streams = await this.getStreams(type, id);
+  async getStreamsRanked(type, id, onProgress, seasonEpisode) {
+    const streams = await this.getStreams(type, id, seasonEpisode);
     if (streams.length === 0) return { streams: [], bestStream: null };
 
     const ranked = await this.testAndRankStreams(streams, onProgress);

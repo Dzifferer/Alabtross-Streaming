@@ -22,6 +22,7 @@
     searchTimeout: null,
     vpnVerified: false,
     activeFilter: '',     // currently selected filter chip value
+    playerStarted: false, // true after first 'playing' event, prevents overlay clobber during initial load
   };
 
   // ─── DOM Refs ────────────────────────────────────
@@ -233,6 +234,7 @@
 
     // Stop video if leaving player
     if (state.currentView !== 'player') {
+      state.playerStarted = false;
       dom.videoPlayer.pause();
       dom.videoPlayer.src = '';
       dom.videoPlayer.load();
@@ -2526,8 +2528,10 @@
     });
 
     // Video stall/buffering detection — re-show overlay during mid-playback stalls
+    // Only activate after the video has played at least once (playerStarted) to avoid
+    // clobbering the detailed loading overlay during initial torrent buffering.
     dom.videoPlayer.addEventListener('waiting', () => {
-      if (state.currentView === 'player' && dom.videoPlayer.src) {
+      if (state.currentView === 'player' && state.playerStarted && dom.videoPlayer.src) {
         dom.playerOverlay.classList.remove('hidden');
         dom.playerOverlay.innerHTML = `
           <div class="spinner"></div>
@@ -2536,7 +2540,7 @@
       }
     });
     dom.videoPlayer.addEventListener('stalled', () => {
-      if (state.currentView === 'player' && dom.videoPlayer.src) {
+      if (state.currentView === 'player' && state.playerStarted && dom.videoPlayer.src) {
         dom.playerOverlay.classList.remove('hidden');
         dom.playerOverlay.innerHTML = `
           <div class="spinner"></div>
@@ -2545,6 +2549,7 @@
       }
     });
     dom.videoPlayer.addEventListener('playing', () => {
+      state.playerStarted = true;
       dom.playerOverlay.classList.add('hidden');
     });
 

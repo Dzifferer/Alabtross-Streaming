@@ -67,7 +67,7 @@ app.use((req, res, next) => {
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Content-Security-Policy', [
     "default-src 'self'",
-    "script-src 'self'",
+    "script-src 'self' 'sha256-ZswfTY7H35rbv8WC7NXBoiC7WNu86vSzCDChNWwZZDM='",
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' https: data:",
     "connect-src 'self' https://v3-cinemeta.strem.io https://torrentio.strem.io https://*.strem.io https://*.stremio.com https://api.themoviedb.org",

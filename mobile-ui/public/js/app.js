@@ -57,6 +57,7 @@
     detailContent: $('#detail-content'),
     videoPlayer: $('#video-player'),
     playerOverlay: $('#player-overlay'),
+    playerBackBtn: $('#player-back-btn'),
     castBtn: $('#cast-btn'),
     castOverlay: $('#cast-overlay'),
     castDeviceName: $('#cast-device-name'),
@@ -1934,6 +1935,13 @@
 
     // Back button
     dom.backBtn.addEventListener('click', goBack);
+
+    // Player back button
+    dom.playerBackBtn.addEventListener('click', () => {
+      dom.videoPlayer.pause();
+      dom.videoPlayer.src = '';
+      goBack();
+    });
 
     // Search
     initSearch();

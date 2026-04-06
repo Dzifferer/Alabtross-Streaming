@@ -195,6 +195,10 @@
     updateNavUI(view);
     updateTopBar(view, opts);
 
+    // Clean up stream action bar when leaving detail view
+    const actionBar = document.querySelector('.stream-action-bar');
+    if (actionBar) actionBar.remove();
+
     // Scroll to top
     dom.content.scrollTop = 0;
   }
@@ -1037,6 +1041,8 @@
   // Store ranked results so stream items can reference them by index
   let _lastRankedStreams = [];
 
+  let _selectedStreamIndex = -1;
+
   function attachStreamHandlers() {
     const list = document.getElementById('stream-list');
     if (!list) return;
@@ -1046,8 +1052,47 @@
       if (!item) return;
       const idx = parseInt(item.dataset.index);
       if (idx >= 0 && idx < _lastRankedStreams.length) {
-        playStream(_lastRankedStreams[idx].stream);
+        selectStream(idx);
       }
+    });
+  }
+
+  function selectStream(idx) {
+    _selectedStreamIndex = idx;
+
+    // Highlight selected stream
+    document.querySelectorAll('.stream-item').forEach(el => el.classList.remove('selected'));
+    const selected = document.getElementById('stream-' + idx);
+    if (selected) selected.classList.add('selected');
+
+    // Remove existing action bar
+    const existing = document.querySelector('.stream-action-bar');
+    if (existing) existing.remove();
+
+    // Create floating action bar
+    const bar = document.createElement('div');
+    bar.className = 'stream-action-bar';
+    bar.innerHTML = `
+      <button class="btn-play" id="action-play">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        Play
+      </button>
+      <button class="btn-library" id="action-library">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Add to Library
+      </button>
+    `;
+    document.body.appendChild(bar);
+
+    bar.querySelector('#action-play').addEventListener('click', () => {
+      bar.remove();
+      playStream(_lastRankedStreams[idx].stream);
+    });
+
+    bar.querySelector('#action-library').addEventListener('click', () => {
+      addToLibrary(_lastRankedStreams[idx].stream);
+      bar.remove();
+      document.querySelectorAll('.stream-item').forEach(el => el.classList.remove('selected'));
     });
   }
 
@@ -1131,26 +1176,6 @@
       if (statusInterval) clearInterval(statusInterval);
       await dom.videoPlayer.play();
       dom.playerOverlay.classList.add('hidden');
-
-      // Auto-add to library when streaming starts
-      if (stream._customMode && stream.infoHash && stream.magnetUri && state.currentMeta) {
-        const meta = state.currentMeta;
-        fetch('/api/library/add', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            imdbId: meta.imdb_id || meta.id || '',
-            type: state.currentType || 'movie',
-            name: meta.name || '',
-            poster: meta.poster || '',
-            year: meta.releaseInfo || meta.year || '',
-            magnetUri: stream.magnetUri,
-            infoHash: stream.infoHash,
-            quality: stream.quality || '',
-            size: stream.size || '',
-          }),
-        }).catch(() => {});
-      }
     } catch (e) {
       if (statusInterval) clearInterval(statusInterval);
       let hint = escapeHTML(e.message);

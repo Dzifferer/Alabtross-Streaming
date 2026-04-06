@@ -1,5 +1,6 @@
 const express = require('express');
 const path = require('path');
+const fs = require('fs');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 const { getMovieStreams, getSeriesStreams } = require('./lib/stream-providers');
 const TorrentEngine = require('./lib/torrent-engine');
@@ -153,6 +154,37 @@ app.get('/api/torrent-status/:infoHash', (req, res) => {
     return res.status(404).json({ error: 'Torrent not active' });
   }
   res.json(status);
+});
+
+// ─── WireGuard VPN Profile API ─────────────────────────────────────
+const WG_CONFIGS_DIR = process.env.WG_CONFIGS_DIR || '/etc/wireguard/configs';
+
+app.get('/api/vpn/profiles', (req, res) => {
+  try {
+    if (!fs.existsSync(WG_CONFIGS_DIR)) {
+      return res.json({ profiles: [], error: 'WireGuard config directory not found' });
+    }
+    const files = fs.readdirSync(WG_CONFIGS_DIR)
+      .filter(f => f.endsWith('.conf'))
+      .map(f => f.replace(/\.conf$/, ''));
+    res.json({ profiles: files });
+  } catch (e) {
+    res.json({ profiles: [], error: 'Cannot read VPN profiles' });
+  }
+});
+
+app.get('/api/vpn/profile/:name', (req, res) => {
+  const name = req.params.name.replace(/[^a-zA-Z0-9_-]/g, '');
+  const confPath = path.join(WG_CONFIGS_DIR, `${name}.conf`);
+  try {
+    if (!fs.existsSync(confPath)) {
+      return res.status(404).json({ error: 'Profile not found' });
+    }
+    const config = fs.readFileSync(confPath, 'utf-8');
+    res.json({ name, config });
+  } catch (e) {
+    res.status(500).json({ error: 'Cannot read profile' });
+  }
 });
 
 // Serve static files

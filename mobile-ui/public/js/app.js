@@ -57,6 +57,7 @@
     detailContent: $('#detail-content'),
     videoPlayer: $('#video-player'),
     playerOverlay: $('#player-overlay'),
+    playerBackBtn: $('#player-back-btn'),
     castBtn: $('#cast-btn'),
     castOverlay: $('#cast-overlay'),
     castDeviceName: $('#cast-device-name'),
@@ -1301,22 +1302,55 @@
     `;
 
     try {
-      const resp = await fetch('/api/library');
-      const data = await resp.json();
-      const items = data.items || [];
+      // Fetch library items, cache items, and active torrents in parallel
+      const [libResp, cacheResp, torrentResp] = await Promise.all([
+        fetch('/api/library').then(r => r.json()).catch(() => ({ items: [] })),
+        fetch('/api/cache').then(r => r.json()).catch(() => ({ items: [] })),
+        fetch('/api/torrent-status').then(r => r.json()).catch(() => ({ torrents: [] })),
+      ]);
 
-      if (items.length === 0) {
+      const libraryItems = libResp.items || [];
+      const cacheItems = cacheResp.items || [];
+      const activeTorrents = torrentResp.torrents || [];
+
+      // Build a set of names already in library to avoid duplicates
+      const libraryNames = new Set(libraryItems.map(i => (i.name || '').toLowerCase()));
+
+      // Add cached items not in library
+      const cachedEntries = cacheItems
+        .filter(c => !libraryNames.has(c.name.toLowerCase()))
+        .map(c => {
+          // Check if this is actively streaming
+          const active = activeTorrents.find(t => t.name === c.name);
+          return {
+            id: 'cache_' + c.name,
+            name: c.name,
+            type: 'movie',
+            status: 'cached',
+            fileSize: c.videoSize || c.totalSize,
+            videoFile: c.videoFile,
+            downloadSpeed: active ? active.downloadSpeed : 0,
+            numPeers: active ? active.numPeers : 0,
+            poster: '',
+            year: '',
+            quality: '',
+          };
+        });
+
+      const allItems = [...libraryItems, ...cachedEntries];
+
+      if (allItems.length === 0) {
         dom.libraryContent.innerHTML = '';
         dom.libraryEmpty.classList.remove('hidden');
         return;
       }
 
-      dom.libraryContent.innerHTML = items.map(item => renderLibraryItem(item)).join('');
+      dom.libraryContent.innerHTML = allItems.map(item => renderLibraryItem(item)).join('');
       attachLibraryHandlers();
 
-      // Start progress polling for downloading items
-      const downloading = items.filter(i => i.status === 'downloading');
-      if (downloading.length > 0) {
+      // Start progress polling for downloading or active items
+      const needsPoll = allItems.some(i => i.status === 'downloading' || i.downloadSpeed > 0);
+      if (needsPoll) {
         startLibraryProgressPoll();
       }
     } catch (err) {
@@ -1349,6 +1383,12 @@
     } else if (item.status === 'complete') {
       const size = item.fileSize ? formatSize(item.fileSize) : item.size || '';
       statusBadge = `<div class="library-status complete">${size ? size + ' &middot; ' : ''}Ready to play</div>`;
+    } else if (item.status === 'cached') {
+      const size = item.fileSize ? formatSize(item.fileSize) : '';
+      const speed = item.downloadSpeed > 0 ? formatSpeed(item.downloadSpeed) : '';
+      const peers = item.numPeers > 0 ? item.numPeers + ' peers' : '';
+      const details = [size, speed, peers].filter(Boolean).join(' &middot; ');
+      statusBadge = `<div class="library-status cached" style="color:var(--text-muted)">${details || 'In cache'}</div>`;
     } else if (item.status === 'failed') {
       statusBadge = `<div class="library-status failed">${escapeHTML(item.error || 'Download failed')}</div>`;
     }
@@ -1946,6 +1986,13 @@
 
     // Back button
     dom.backBtn.addEventListener('click', goBack);
+
+    // Player back button
+    dom.playerBackBtn.addEventListener('click', () => {
+      dom.videoPlayer.pause();
+      dom.videoPlayer.src = '';
+      goBack();
+    });
 
     // Search
     initSearch();

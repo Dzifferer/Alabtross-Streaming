@@ -21,6 +21,7 @@
     currentSeason: 1,
     searchTimeout: null,
     vpnVerified: false,
+    activeFilter: '',     // currently selected filter chip value
   };
 
   // ─── DOM Refs ────────────────────────────────────
@@ -50,6 +51,9 @@
     castStopBtn: $('#cast-stop-btn'),
     bottomNav: $('#bottom-nav'),
     navBtns: $$('.nav-btn'),
+    // Filter bar
+    filterBar: $('#filter-bar'),
+    filterChips: $$('.filter-chip'),
     // Library
     libraryContent: $('#library-content'),
     libraryEmpty: $('#library-empty'),
@@ -252,6 +256,12 @@
     // Show/hide top bar in player
     const hideTop = view === 'player';
     $('#top-bar').style.display = hideTop ? 'none' : '';
+
+    // Show search bar and filter bar only on browsing views
+    const browsingViews = ['home', 'movies', 'series', 'search'];
+    const showSearchAndFilters = browsingViews.includes(view);
+    dom.searchBar.classList.toggle('search-bar--hidden', !showSearchAndFilters);
+    dom.filterBar.classList.toggle('filter-bar--hidden', !showSearchAndFilters);
   }
 
   // ─── Home / Catalog Loading ──────────────────────
@@ -536,11 +546,16 @@
   // ─── Search ──────────────────────────────────────
 
   function initSearch() {
+    // Search toggle now focuses the always-visible search input
     dom.searchToggle.addEventListener('click', () => {
-      const isHidden = dom.searchBar.classList.contains('hidden');
-      dom.searchBar.classList.toggle('hidden');
-      if (isHidden) {
-        dom.searchInput.focus();
+      dom.searchInput.focus();
+      if (state.currentView !== 'search') {
+        navigateTo('search');
+      }
+    });
+
+    dom.searchInput.addEventListener('focus', () => {
+      if (state.currentView !== 'search') {
         navigateTo('search');
       }
     });
@@ -551,8 +566,10 @@
 
       clearTimeout(state.searchTimeout);
       if (q.length >= 2) {
+        // Clear active filter when typing a manual search
+        clearActiveFilter();
         state.searchTimeout = setTimeout(() => performSearch(q), 400);
-      } else {
+      } else if (q.length === 0 && !state.activeFilter) {
         dom.searchResults.innerHTML = '';
         dom.searchEmpty.classList.remove('hidden');
       }
@@ -565,6 +582,72 @@
       dom.searchEmpty.classList.remove('hidden');
       dom.searchInput.focus();
     });
+  }
+
+  // ─── Filters ──────────────────────────────────────
+
+  function initFilters() {
+    dom.filterChips.forEach(chip => {
+      chip.addEventListener('click', () => {
+        const filter = chip.dataset.filter;
+
+        // Update active state
+        dom.filterChips.forEach(c => c.classList.remove('active'));
+        chip.classList.add('active');
+        state.activeFilter = filter;
+
+        if (!filter) {
+          // "All" selected — go back to home catalogs
+          dom.searchInput.value = '';
+          dom.searchClear.classList.add('hidden');
+          navigateTo('home');
+          loadHome(state.currentType);
+        } else {
+          // Filter selected — search for this term
+          dom.searchInput.value = '';
+          dom.searchClear.classList.add('hidden');
+          navigateTo('search');
+          performFilterSearch(filter);
+        }
+      });
+    });
+  }
+
+  function clearActiveFilter() {
+    state.activeFilter = '';
+    dom.filterChips.forEach(c => c.classList.remove('active'));
+    // Re-activate "All" chip
+    const allChip = document.querySelector('.filter-chip[data-filter=""]');
+    if (allChip) allChip.classList.add('active');
+  }
+
+  async function performFilterSearch(filter) {
+    dom.searchEmpty.classList.add('hidden');
+    dom.searchResults.innerHTML = `
+      <div class="loading-state" style="grid-column:1/-1">
+        <div class="spinner"></div>
+        <p>Finding ${escapeHTML(filter)} titles...</p>
+      </div>
+    `;
+
+    const typeFilter = state.currentType || null;
+    const results = await api.search(filter, typeFilter);
+
+    if (results.length === 0) {
+      dom.searchResults.innerHTML = `
+        <div class="empty-state" style="grid-column:1/-1">
+          <p>No results for "${escapeHTML(filter)}"</p>
+        </div>
+      `;
+      return;
+    }
+
+    dom.searchResults.innerHTML = results.map(item => {
+      const type = item.type || 'movie';
+      return cardHTML(item, type);
+    }).join('');
+
+    attachCardListeners(dom.searchResults);
   }
 
   async function performSearch(query) {
@@ -1780,6 +1863,9 @@
       btn.addEventListener('click', () => {
         const view = btn.dataset.view;
         state.viewHistory = [];
+        clearActiveFilter();
+        dom.searchInput.value = '';
+        dom.searchClear.classList.add('hidden');
         if (view === 'movies') {
           navigateTo('movies');
           loadHome('movie');
@@ -1804,6 +1890,9 @@
 
     // Search
     initSearch();
+
+    // Filters
+    initFilters();
 
     // Settings
     initSettings();

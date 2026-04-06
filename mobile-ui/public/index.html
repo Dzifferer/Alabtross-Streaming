@@ -31,14 +31,32 @@
       </div>
     </header>
 
-    <!-- Search Bar (hidden by default) -->
-    <div id="search-bar" class="hidden">
-      <div class="search-input-wrap">
+    <!-- Search Bar (always visible) -->
+    <div id="search-bar">
+      <div class="search-input-wrap search-input-wrap--prominent">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
         <input type="search" id="search-input" placeholder="Search movies, series..." autocomplete="off">
         <button id="search-clear" class="icon-btn-sm hidden">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
         </button>
+      </div>
+    </div>
+
+    <!-- Filter Bar -->
+    <div id="filter-bar">
+      <div class="filter-scroll">
+        <button class="filter-chip active" data-filter="">All</button>
+        <button class="filter-chip" data-filter="Netflix">Netflix</button>
+        <button class="filter-chip" data-filter="Disney">Disney</button>
+        <button class="filter-chip" data-filter="HBO">HBO</button>
+        <button class="filter-chip" data-filter="Amazon">Amazon</button>
+        <button class="filter-chip" data-filter="Apple">Apple TV+</button>
+        <button class="filter-chip" data-filter="Marvel">Marvel</button>
+        <button class="filter-chip" data-filter="Warner">Warner Bros</button>
+        <button class="filter-chip" data-filter="Universal">Universal</button>
+        <button class="filter-chip" data-filter="Paramount">Paramount</button>
+        <button class="filter-chip" data-filter="Sony">Sony</button>
+        <button class="filter-chip" data-filter="Lionsgate">Lionsgate</button>
       </div>
     </div>
 

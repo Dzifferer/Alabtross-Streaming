@@ -20,6 +20,9 @@ class StremioAPI {
     this._cacheTimestamps = new Map();
     this._speedTestInProgress = false;
     this._speedTestController = null;
+    this._searchController = null;
+    this._searchCache = new Map();
+    this._searchCacheTimestamps = new Map();
   }
 
   // ─── Mode Management ─────────────────────────────
@@ -191,54 +194,89 @@ class StremioAPI {
   async search(query, type) {
     if (!query || query.length > 200) return [];
 
+    // Abort any in-flight search request
+    if (this._searchController) this._searchController.abort();
+    this._searchController = new AbortController();
+    const signal = this._searchController.signal;
+
+    // Check cache (60-second TTL)
+    const cacheKey = `${query}:${type || ''}`;
+    const cachedTs = this._searchCacheTimestamps.get(cacheKey) || 0;
+    if (this._searchCache.has(cacheKey) && (Date.now() - cachedTs) < 60000) {
+      return this._searchCache.get(cacheKey);
+    }
+
+    let results;
+
     // Try TMDB first (better relevance and fuzzy matching)
     try {
       const params = new URLSearchParams({ q: query });
       if (type) params.set('type', type);
-      const resp = await fetch(`/api/search?${params}`);
+      const resp = await fetch(`/api/search?${params}`, { signal });
       if (resp.ok) {
         const data = await resp.json();
         if (data.results && data.results.length > 0) {
-          return data.results;
+          results = data.results;
         }
       }
     } catch (e) {
+      if (e.name === 'AbortError') return [];
       console.warn('TMDB search failed, falling back to Cinemeta', e);
     }
 
-    // Fallback to Cinemeta addon search
-    const allResults = [];
-    const types = type ? [type] : ['movie', 'series'];
+    // Fallback to Cinemeta addon search (parallel across all addons)
+    if (!results) {
+      const types = type ? [type] : ['movie', 'series'];
+      const searchPromises = [];
 
-    for (const addon of this.addons) {
-      try {
-        const manifest = await this._fetchManifest(addon.url);
-        if (!manifest.catalogs) continue;
+      for (const addon of this.addons) {
+        searchPromises.push((async () => {
+          try {
+            const manifest = await this._fetchManifest(addon.url);
+            if (!manifest.catalogs) return [];
 
-        for (const catalog of manifest.catalogs) {
-          if (!types.includes(catalog.type)) continue;
-          const hasSearch = catalog.extra &&
-            catalog.extra.some(e => e.name === 'search');
-          if (!hasSearch) continue;
+            const catalogPromises = [];
+            for (const catalog of manifest.catalogs) {
+              if (!types.includes(catalog.type)) continue;
+              const hasSearch = catalog.extra &&
+                catalog.extra.some(e => e.name === 'search');
+              if (!hasSearch) continue;
 
-          const items = await this.getCatalogItems(
-            addon.url, catalog.type, catalog.id,
-            `search=${encodeURIComponent(query)}`
-          );
-          allResults.push(...items);
-        }
-      } catch (e) {
-        console.warn('Search failed for addon', addon.url, e);
+              catalogPromises.push(
+                this.getCatalogItems(
+                  addon.url, catalog.type, catalog.id,
+                  `search=${encodeURIComponent(query)}`
+                )
+              );
+            }
+            const catalogResults = await Promise.all(catalogPromises);
+            return catalogResults.flat();
+          } catch (e) {
+            console.warn('Search failed for addon', addon.url, e);
+            return [];
+          }
+        })());
       }
+
+      if (signal.aborted) return [];
+
+      const allResultArrays = await Promise.all(searchPromises);
+      const allResults = allResultArrays.flat();
+
+      const seen = new Set();
+      results = allResults.filter(item => {
+        const id = item.imdb_id || item.id;
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      }).slice(0, 100);
     }
 
-    const seen = new Set();
-    return allResults.filter(item => {
-      const id = item.imdb_id || item.id;
-      if (seen.has(id)) return false;
-      seen.add(id);
-      return true;
-    }).slice(0, 100);
+    // Cache the results
+    this._searchCache.set(cacheKey, results);
+    this._searchCacheTimestamps.set(cacheKey, Date.now());
+
+    return results;
   }
 
   // ─── Metadata ────────────────────────────────────
@@ -501,15 +539,23 @@ class StremioAPI {
 
     let tested = 0;
     const total = streams.length;
+    const concurrency = 5;
+    const results = [];
+    let nextIdx = 0;
 
-    const promises = streams.map(async (stream) => {
-      const result = await this._testStreamSpeed(stream, 8000, signal);
-      tested++;
-      if (onProgress) onProgress(tested, total, result);
-      return result;
-    });
+    async function runNext(self) {
+      while (nextIdx < total) {
+        const i = nextIdx++;
+        const result = await self._testStreamSpeed(streams[i], 8000, signal);
+        result.index = i;
+        results.push(result);
+        tested++;
+        if (onProgress) onProgress(tested, total, result);
+      }
+    }
 
-    const results = await Promise.all(promises);
+    const workers = Array.from({ length: Math.min(concurrency, total) }, () => runNext(this));
+    await Promise.all(workers);
     results.sort((a, b) => a.responseTime - b.responseTime);
     return results;
   }

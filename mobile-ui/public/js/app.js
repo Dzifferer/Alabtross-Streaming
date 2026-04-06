@@ -205,6 +205,13 @@
     const actionBar = document.querySelector('.stream-action-bar');
     if (actionBar) actionBar.remove();
 
+    // Abort in-flight speed tests and clean up stale ranked streams when leaving detail
+    if (view !== 'detail') {
+      if (api._speedTestController) api._speedTestController.abort();
+      _lastRankedStreams = [];
+      _selectedStreamIndex = -1;
+    }
+
     // Scroll to top
     dom.content.scrollTop = 0;
   }
@@ -221,10 +228,14 @@
       updateTopBar(prev);
     }
 
+    // Abort in-flight speed tests when leaving detail
+    if (api._speedTestController) api._speedTestController.abort();
+
     // Stop video if leaving player
     if (state.currentView !== 'player') {
       dom.videoPlayer.pause();
       dom.videoPlayer.src = '';
+      dom.videoPlayer.load();
     }
   }
 
@@ -499,7 +510,7 @@
       <div class="card" data-type="${type}" data-id="${id}">
         <div class="card-poster">
           ${poster
-            ? `<img src="${poster}" alt="${title}" class="loading">`
+            ? `<img src="${poster}" alt="${title}" loading="lazy" class="loading">`
             : ''}
           <div class="poster-placeholder">${!poster ? title : ''}</div>
         </div>
@@ -544,7 +555,7 @@
            data-stremio-id="${escapeHTML(stremioId)}">
         <div class="channel-poster">
           ${logo
-            ? `<img src="${logo}" alt="${name}" class="loading">`
+            ? `<img src="${logo}" alt="${name}" loading="lazy" class="loading">`
             : ''}
           <div class="channel-placeholder">${!logo ? name.substring(0, 3).toUpperCase() : ''}</div>
           <span class="channel-live-badge">LIVE</span>
@@ -617,15 +628,7 @@
       await dom.videoPlayer.play();
       dom.playerOverlay.classList.add('hidden');
     } catch (e) {
-      dom.playerOverlay.innerHTML = `
-        <p style="color:var(--danger)">Channel unavailable</p>
-        <p style="font-size:13px;color:var(--text-muted)">${escapeHTML(e.message)}</p>
-        <button id="player-go-back" style="
-          margin-top:16px; padding:10px 24px; background:var(--accent);
-          border:none; border-radius:8px; color:white; font-size:14px; cursor:pointer;
-        ">Go Back</button>
-      `;
-      document.getElementById('player-go-back').addEventListener('click', () => goBack());
+      showPlayerError('Channel unavailable', escapeHTML(e.message));
     }
   }
 
@@ -1149,31 +1152,35 @@
   }
 
   function updateStreamItemSpeed(result) {
-    // Find the matching stream item by comparing stream objects
-    const items = document.querySelectorAll('.stream-item');
-    items.forEach(item => {
-      const title = item.querySelector('.stream-title');
-      const streamTitle = (result.stream.title || result.stream.name || 'Unknown Stream').split('\n')[0];
-      if (title && title.textContent === streamTitle) {
-        const badge = item.querySelector('.stream-quality');
-        if (badge && badge.textContent === 'Testing...') {
-          if (result.responseTime < Infinity) {
-            const ms = Math.round(result.responseTime);
-            let color = 'var(--success)';
-            let bg = 'rgba(0, 206, 201, 0.15)';
-            if (ms > 3000) { color = 'var(--danger)'; bg = 'rgba(255, 107, 107, 0.15)'; }
-            else if (ms > 1000) { color = 'var(--warning)'; bg = 'rgba(253, 203, 110, 0.15)'; }
-            badge.style.background = bg;
-            badge.style.color = color;
-            badge.textContent = ms + 'ms';
-          } else {
-            badge.style.background = 'rgba(255,107,107,0.1)';
-            badge.style.color = 'var(--danger)';
-            badge.textContent = 'Timeout';
-          }
-        }
-      }
-    });
+    const item = document.getElementById('stream-' + result.index);
+    if (!item) return;
+    const badge = item.querySelector('.stream-quality');
+    if (!badge || badge.textContent !== 'Testing...') return;
+
+    if (result.stream._customMode) {
+      // Custom mode: show seed count instead of fake ms
+      const seeds = result.stream.seeds || 0;
+      let color = 'var(--success)';
+      let bg = 'rgba(0, 206, 201, 0.15)';
+      if (seeds < 5) { color = 'var(--danger)'; bg = 'rgba(255, 107, 107, 0.15)'; }
+      else if (seeds < 20) { color = 'var(--warning)'; bg = 'rgba(253, 203, 110, 0.15)'; }
+      badge.style.background = bg;
+      badge.style.color = color;
+      badge.textContent = seeds + ' seeds';
+    } else if (result.responseTime < Infinity) {
+      const ms = Math.round(result.responseTime);
+      let color = 'var(--success)';
+      let bg = 'rgba(0, 206, 201, 0.15)';
+      if (ms > 3000) { color = 'var(--danger)'; bg = 'rgba(255, 107, 107, 0.15)'; }
+      else if (ms > 1000) { color = 'var(--warning)'; bg = 'rgba(253, 203, 110, 0.15)'; }
+      badge.style.background = bg;
+      badge.style.color = color;
+      badge.textContent = ms + 'ms';
+    } else {
+      badge.style.background = 'rgba(255,107,107,0.1)';
+      badge.style.color = 'var(--danger)';
+      badge.textContent = 'Timeout';
+    }
   }
 
   // Store ranked results so stream items can reference them by index
@@ -1322,15 +1329,7 @@
       if (e.message.includes('Media error') || e.message.includes('no supported source')) {
         hint += '<br><span style="font-size:12px">The file format may not be supported by your browser</span>';
       }
-      dom.playerOverlay.innerHTML = `
-        <p style="color:var(--danger)">Playback failed</p>
-        <p style="font-size:13px;color:var(--text-muted)">${hint}</p>
-        <button id="player-go-back" style="
-          margin-top:16px; padding:10px 24px; background:var(--accent);
-          border:none; border-radius:8px; color:white; font-size:14px; cursor:pointer;
-        ">Go Back</button>
-      `;
-      document.getElementById('player-go-back').addEventListener('click', () => goBack());
+      showPlayerError('Playback failed', hint);
     }
   }
 
@@ -1627,15 +1626,7 @@
       } else if (e.message.includes('timed out')) {
         hint += '<br><span style="font-size:12px">Try again — playback may work on a second attempt</span>';
       }
-      dom.playerOverlay.innerHTML = `
-        <p style="color:var(--danger)">Playback failed</p>
-        <p style="font-size:13px;color:var(--text-muted)">${hint}</p>
-        <button id="player-go-back" style="
-          margin-top:16px; padding:10px 24px; background:var(--accent);
-          border:none; border-radius:8px; color:white; font-size:14px; cursor:pointer;
-        ">Go Back</button>
-      `;
-      document.getElementById('player-go-back').addEventListener('click', () => goBack());
+      showPlayerError('Playback failed', hint);
     }
   }
 
@@ -2198,11 +2189,26 @@
     app.classList.toggle('theme-custom', mode === 'custom');
   }
 
+  // ─── Player Error Helper ──────────────────────────
+
+  function showPlayerError(title, hint) {
+    dom.playerOverlay.innerHTML = `
+      <p style="color:var(--danger)">${escapeHTML(title)}</p>
+      <p style="font-size:13px;color:var(--text-muted)">${hint}</p>
+      <button id="player-go-back" style="
+        margin-top:16px; padding:10px 24px; background:var(--accent);
+        border:none; border-radius:8px; color:white; font-size:14px; cursor:pointer;
+      ">Go Back</button>
+    `;
+    document.getElementById('player-go-back').addEventListener('click', () => goBack());
+  }
+
   // ─── Utility ─────────────────────────────────────
 
+  const _escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
   function escapeHTML(str) {
     if (!str) return '';
-    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    return str.replace(/[&<>"]/g, ch => _escapeMap[ch]);
   }
 
   // ─── Casting ─────────────────────────────────────
@@ -2515,7 +2521,84 @@
     dom.playerBackBtn.addEventListener('click', () => {
       dom.videoPlayer.pause();
       dom.videoPlayer.src = '';
+      dom.videoPlayer.load();
       goBack();
+    });
+
+    // Video stall/buffering detection — re-show overlay during mid-playback stalls
+    dom.videoPlayer.addEventListener('waiting', () => {
+      if (state.currentView === 'player' && dom.videoPlayer.src) {
+        dom.playerOverlay.classList.remove('hidden');
+        dom.playerOverlay.innerHTML = `
+          <div class="spinner"></div>
+          <p>Buffering...</p>
+        `;
+      }
+    });
+    dom.videoPlayer.addEventListener('stalled', () => {
+      if (state.currentView === 'player' && dom.videoPlayer.src) {
+        dom.playerOverlay.classList.remove('hidden');
+        dom.playerOverlay.innerHTML = `
+          <div class="spinner"></div>
+          <p>Stream stalled — waiting for data...</p>
+        `;
+      }
+    });
+    dom.videoPlayer.addEventListener('playing', () => {
+      dom.playerOverlay.classList.add('hidden');
+    });
+
+    // Keyboard controls for video player
+    document.addEventListener('keydown', (e) => {
+      if (state.currentView !== 'player') return;
+      const v = dom.videoPlayer;
+      switch (e.key) {
+        case ' ':
+        case 'k':
+          e.preventDefault();
+          v.paused ? v.play() : v.pause();
+          break;
+        case 'ArrowLeft':
+          e.preventDefault();
+          v.currentTime = Math.max(0, v.currentTime - 10);
+          break;
+        case 'ArrowRight':
+          e.preventDefault();
+          v.currentTime = Math.min(v.duration || Infinity, v.currentTime + 10);
+          break;
+        case 'ArrowUp':
+          e.preventDefault();
+          v.volume = Math.min(1, v.volume + 0.1);
+          break;
+        case 'ArrowDown':
+          e.preventDefault();
+          v.volume = Math.max(0, v.volume - 0.1);
+          break;
+        case 'f':
+        case 'F':
+          e.preventDefault();
+          if (document.fullscreenElement) {
+            document.exitFullscreen();
+          } else if (v.requestFullscreen) {
+            v.requestFullscreen();
+          } else if (v.webkitEnterFullscreen) {
+            v.webkitEnterFullscreen();
+          }
+          break;
+        case 'm':
+        case 'M':
+          e.preventDefault();
+          v.muted = !v.muted;
+          break;
+        case 'Escape':
+          if (!document.fullscreenElement) {
+            v.pause();
+            v.src = '';
+            v.load();
+            goBack();
+          }
+          break;
+      }
     });
 
     // Search

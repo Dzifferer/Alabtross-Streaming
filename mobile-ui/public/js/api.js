@@ -8,23 +8,8 @@
 
 const CINEMETA_URL = 'https://v3-cinemeta.strem.io';
 
-// Torrentio requires a config prefix to return results from all providers.
-// We try multiple configs since the API format may have changed.
-const TORRENTIO_BASE = 'https://torrentio.strem.io';
-const TORRENTIO_CONFIGS = [
-  'providers=yts,eztv,rarbg,1337x,thepiratebay,kickasstorrents,torrentgalaxy|sort=qualitysize|qualityfilter=other',
-  'sort=qualitysize|qualityfilter=other',
-  '',
-];
-
-// Common trackers for building magnet URIs (Torrentio returns bare infoHash)
-const MAGNET_TRACKERS = [
-  'udp://tracker.opentrackr.org:1337/announce',
-  'udp://open.stealth.si:80/announce',
-  'udp://tracker.openbittorrent.com:6969/announce',
-  'udp://exodus.desync.com:6969/announce',
-  'udp://tracker.torrent.eu.org:451/announce',
-];
+// Torrentio is now fetched server-side via the backend /api/streams/* endpoints
+// to avoid browser DNS resolution issues with torrentio.strem.io.
 
 class StremioAPI {
   constructor() {
@@ -324,17 +309,10 @@ class StremioAPI {
   }
 
   /**
-   * Custom mode: fetch streams from Torrentio (browser-side) + backend scrapers.
-   * Torrentio is called directly from the browser to avoid Jetson DNS issues.
+   * Custom mode: fetch streams from the backend, which queries Torrentio + scrapers server-side.
    */
   async _getCustomStreams(type, id, seasonEpisode) {
     const imdbId = id.match(/^tt\d+/) ? id.match(/^(tt\d+)/)[1] : id;
-
-    // Build Torrentio stream ID
-    let torrentioId = imdbId;
-    if (type === 'series' && seasonEpisode && seasonEpisode.season !== undefined && seasonEpisode.episode !== undefined) {
-      torrentioId = `${imdbId}:${seasonEpisode.season}:${seasonEpisode.episode}`;
-    }
 
     // Build backend scraper URL
     let backendUrl;
@@ -352,83 +330,15 @@ class StremioAPI {
     const qs = params.toString();
     if (qs) backendUrl += '?' + qs;
 
-    // Fetch Torrentio (browser-side, tries multiple configs) + backend in parallel
-    const [torrentioStreams, backendStreams] = await Promise.all([
-      this._fetchTorrentioWithFallback(type, torrentioId),
-      this._fetchBackendStreams(backendUrl),
-    ]);
-
-    // Deduplicate by infoHash, prefer Torrentio
-    const seen = new Set();
-    const combined = [];
-    for (const s of [...torrentioStreams, ...backendStreams]) {
-      if (s.infoHash && !seen.has(s.infoHash)) {
-        seen.add(s.infoHash);
-        combined.push(s);
-      }
-    }
+    const streams = await this._fetchBackendStreams(backendUrl);
 
     // Filter out truly unplayable formats — keep x265/HEVC since server can remux
-    return combined.filter(s => {
+    return streams.filter(s => {
       const t = s.title || '';
       if (/\.avi\b/i.test(t) || /\bXviD\b/i.test(t) || /\bDivX\b/i.test(t)) return false;
       if (/\.wmv\b/i.test(t)) return false;
       return true;
     });
-  }
-
-  /**
-   * Try Torrentio with multiple config variations until one returns results.
-   */
-  async _fetchTorrentioWithFallback(type, torrentioId) {
-    for (const config of TORRENTIO_CONFIGS) {
-      const url = config
-        ? `${TORRENTIO_BASE}/${config}/stream/${type}/${torrentioId}.json`
-        : `${TORRENTIO_BASE}/stream/${type}/${torrentioId}.json`;
-      const streams = await this._fetchTorrentioStreams(url);
-      if (streams.length > 0) {
-        console.log(`[Torrentio] Browser: config "${config || '(bare)'}" returned ${streams.length} results`);
-        return streams;
-      }
-    }
-    console.warn('[Torrentio] Browser: all configs returned empty');
-    return [];
-  }
-
-  async _fetchTorrentioStreams(url) {
-    try {
-      const resp = await fetch(url, { signal: AbortSignal.timeout(10000) });
-      if (!resp.ok) return [];
-      const data = await resp.json();
-      if (!data.streams || !Array.isArray(data.streams)) return [];
-
-      return data.streams.map(s => {
-        if (!s.infoHash) return null;
-        const titleParts = (s.title || '').split('\n');
-        const seedMatch = (s.title || '').match(/(?:👤|⬆️|⬆|seeders?|peers?|S)\s*[:：]?\s*(\d+)/i);
-        const seeds = seedMatch ? parseInt(seedMatch[1], 10) : 0;
-        const sizeMatch = (s.title || '').match(/([\d.]+\s*(?:GB|MB))/i);
-        const qualityMatch = (s.title || '').match(/\b(2160p|1080p|720p|480p)\b/i);
-
-        const trackerParams = MAGNET_TRACKERS.map(t => `&tr=${encodeURIComponent(t)}`).join('');
-        return {
-          infoHash: s.infoHash.toLowerCase(),
-          title: s.title || s.name || 'Unknown',
-          name: s.name || 'Torrentio',
-          magnetUri: `magnet:?xt=urn:btih:${s.infoHash}${trackerParams}`,
-          quality: qualityMatch ? qualityMatch[1] : '',
-          size: sizeMatch ? sizeMatch[1] : '',
-          seeds,
-          fileIdx: s.fileIdx,
-          source: 'Torrentio',
-          addonName: 'Torrentio',
-          _customMode: true,
-        };
-      }).filter(Boolean);
-    } catch (e) {
-      console.warn('Torrentio fetch failed:', e);
-      return [];
-    }
   }
 
   async _fetchBackendStreams(url) {

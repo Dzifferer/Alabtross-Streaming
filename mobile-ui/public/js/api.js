@@ -351,21 +351,14 @@ class StremioAPI {
       }
     }
 
-    // Filter to browser-playable formats only (MP4/WebM)
+    // Filter out formats that definitely won't play in browsers
     return combined.filter(s => {
       const t = s.title || '';
-      // MP4 indicators
-      if (/\.mp4\b/i.test(t) || /\bx264\b/i.test(t) || /\bH\.?264\b/i.test(t)) return true;
-      if (/\bWEB-?DL\b/i.test(t) || /\bWEB-?Rip\b/i.test(t) || /\bWEBRip\b/i.test(t)) return true;
-      if (/\bHDRip\b/i.test(t)) return true;
-      // WebM
-      if (/\.webm\b/i.test(t)) return true;
-      // MKV/AVI/WMV — not browser-playable
-      if (/\.mkv\b/i.test(t) || /\bx265\b/i.test(t) || /\bH\.?265\b/i.test(t) || /\bHEVC\b/i.test(t)) return false;
+      // Definitely not browser-playable
+      if (/\.mkv\b/i.test(t)) return false;
+      if (/\bx265\b/i.test(t) || /\bH\.?265\b/i.test(t) || /\bHEVC\b/i.test(t)) return false;
       if (/\.avi\b/i.test(t) || /\bXviD\b/i.test(t) || /\bDivX\b/i.test(t)) return false;
       if (/\.wmv\b/i.test(t)) return false;
-      if (/\bBluRay\b/i.test(t) || /\bBDRip\b/i.test(t)) return false;
-      // Unknown format — include it (might work)
       return true;
     });
   }

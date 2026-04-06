@@ -753,8 +753,17 @@
     const qualityMatch = title.match(/\b(4K|2160p|1080p|720p|480p|HDR|HEVC|H\.265|H\.264)\b/i);
     if (qualityMatch) quality = qualityMatch[1].toUpperCase();
 
+    // Format badge for custom mode
+    let formatBadge = '';
+    if (stream._customMode && stream.format) {
+      const playable = stream.browserPlayable;
+      const fColor = playable ? 'var(--success)' : 'var(--warning)';
+      const fBg = playable ? 'rgba(0,206,201,0.1)' : 'rgba(253,203,110,0.1)';
+      formatBadge = `<span class="stream-quality" style="background:${fBg};color:${fColor};margin-right:4px">${escapeHTML(stream.format)}</span>`;
+    }
+
     return `
-      <div class="stream-item" data-index="${index}" id="stream-${index}">
+      <div class="stream-item${stream._customMode && !stream.browserPlayable ? ' stream-non-playable' : ''}" data-index="${index}" id="stream-${index}">
         <div class="stream-icon">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polygon points="5 3 19 12 5 21 5 3"/>

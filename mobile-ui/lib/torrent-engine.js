@@ -87,32 +87,49 @@ class TorrentEngine {
 
     const pending = new Promise((resolve, reject) => {
       const engine = torrentStream(uri, {
-        connections: 100,
+        connections: 200,
         uploads: 0,
+        dht: true,
         path: this._downloadPath,
         trackers: [
-          'udp://open.demonii.com:1337/announce',
-          'udp://tracker.openbittorrent.com:80',
-          'udp://tracker.coppersurfer.tk:6969',
           'udp://tracker.opentrackr.org:1337/announce',
+          'udp://open.stealth.si:80/announce',
+          'udp://tracker.openbittorrent.com:6969/announce',
+          'udp://exodus.desync.com:6969/announce',
+          'udp://tracker.torrent.eu.org:451/announce',
+          'udp://open.demonii.com:1337/announce',
+          'udp://tracker.coppersurfer.tk:6969',
           'udp://p4p.arenabg.com:1337',
           'udp://tracker.leechers-paradise.org:6969',
+          'udp://explodie.org:6969/announce',
+          'wss://tracker.openwebtorrent.com',
+          'wss://tracker.btorrent.xyz',
         ],
       });
 
       placeholder.engine = engine;
 
+      // Log peer count periodically
+      const peerLog = setInterval(() => {
+        if (engine.swarm) {
+          console.log(`[TorrentEngine] ${hash.slice(0,8)}... peers: ${engine.swarm.wires.length}, queued: ${engine.swarm.queued}`);
+        }
+      }, 10000);
+
       const timeout = setTimeout(() => {
+        clearInterval(peerLog);
         if (!this._active.has(hash) || !this._active.get(hash).files) {
           engine.destroy();
           this._active.delete(hash);
-          reject(new Error('Torrent metadata timeout (60s) — try a torrent with more seeds'));
+          reject(new Error('Torrent metadata timeout (90s) — try a torrent with more seeds'));
         }
-      }, 60000);
+      }, 90000);
 
       engine.on('ready', () => {
         clearTimeout(timeout);
-        console.log(`[TorrentEngine] Torrent ready: "${engine.torrent.name}", ${engine.files.length} files`);
+        clearInterval(peerLog);
+        const peerCount = engine.swarm ? engine.swarm.wires.length : 0;
+        console.log(`[TorrentEngine] Torrent ready: "${engine.torrent.name}", ${engine.files.length} files, ${peerCount} peers`);
 
         for (const file of engine.files) {
           if (!this._isFileNameSafe(file.name)) {
@@ -137,6 +154,7 @@ class TorrentEngine {
 
       engine.on('error', (err) => {
         clearTimeout(timeout);
+        clearInterval(peerLog);
         console.error(`[TorrentEngine] Engine error for ${hash}: ${err.message}`);
         this._active.delete(hash);
         reject(err);

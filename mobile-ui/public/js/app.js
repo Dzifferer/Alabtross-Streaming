@@ -84,10 +84,13 @@
     addonAddCinemeta: $('#addon-add-cinemeta'),
     addonAddTorrentio: $('#addon-add-torrentio'),
     customAddCinemeta: $('#custom-add-cinemeta'),
-    // IPTV
+    // IPTV / Live TV
     iptvUrlInput: $('#setting-iptv-url'),
     iptvSaveBtn: $('#setting-iptv-save'),
     iptvStatus: $('#iptv-status'),
+    liveTvAddonInput: $('#setting-livetv-addon-url'),
+    liveTvAddonAddBtn: $('#setting-livetv-addon-add'),
+    liveTvAddonStatus: $('#livetv-addon-status'),
   };
 
   // ─── Recently Played ─────────────────────────────
@@ -361,16 +364,17 @@
       }
     }
 
-    // Row 4: Live TV — from M3U playlist
-    const channels = await api.getChannels();
-    if (channels.length > 0) {
+    // Row 4+: Live TV — from all configured sources (playlists + Stremio TV addons)
+    const tvGroups = await api.getAllLiveTVChannels();
+    for (const group of tvGroups) {
       const tvRow = document.createElement('div');
       tvRow.className = 'catalog-row fade-in';
       tvRow.innerHTML = `
         <div class="catalog-row-header">
-          <h3 class="catalog-row-title">Live TV</h3>
+          <h3 class="catalog-row-title">${escapeHTML(group.sourceName)}</h3>
+          <span class="catalog-row-badge">LIVE</span>
         </div>
-        <div class="catalog-scroll">${channels.slice(0, 30).map(ch => channelCardHTML(ch)).join('')}</div>
+        <div class="catalog-scroll">${group.channels.slice(0, 30).map(ch => channelCardHTML(ch)).join('')}</div>
       `;
       dom.homeCatalogs.appendChild(tvRow);
       attachChannelListeners(tvRow);
@@ -466,9 +470,14 @@
     const logo = channel.logo || '';
     const group = escapeHTML(channel.group || '');
     const url = channel.url || '';
+    const sourceType = channel._sourceType || 'playlist';
+    const addonUrl = channel._addonUrl || '';
+    const stremioId = channel._stremioId || '';
 
     return `
-      <div class="channel-card" data-url="${escapeHTML(url)}" data-name="${name}">
+      <div class="channel-card" data-url="${escapeHTML(url)}" data-name="${name}"
+           data-source-type="${sourceType}" data-addon-url="${escapeHTML(addonUrl)}"
+           data-stremio-id="${escapeHTML(stremioId)}">
         <div class="channel-poster">
           ${logo
             ? `<img src="${logo}" alt="${name}" class="loading">`
@@ -488,9 +497,14 @@
     container.addEventListener('click', (e) => {
       const card = e.target.closest('.channel-card');
       if (card) {
-        const url = card.dataset.url;
-        const name = card.dataset.name;
-        if (url) playChannel(url, name);
+        const channel = {
+          url: card.dataset.url || '',
+          name: card.dataset.name || 'Channel',
+          _sourceType: card.dataset.sourceType || 'playlist',
+          _addonUrl: card.dataset.addonUrl || '',
+          _stremioId: card.dataset.stremioId || '',
+        };
+        playChannel(channel);
       }
     });
 
@@ -500,8 +514,9 @@
     });
   }
 
-  async function playChannel(streamUrl, name) {
-    const proxyUrl = api.getChannelStreamUrl({ url: streamUrl });
+  async function playChannel(channel) {
+    const name = channel.name || 'Channel';
+    const proxyUrl = await api.getChannelStreamUrl(channel);
     if (!proxyUrl) {
       showToast('Cannot play this channel');
       return;
@@ -1855,27 +1870,100 @@
 
     // ─── Custom Mode Settings ───────────────────────
 
-    // IPTV playlist URL
-    dom.iptvUrlInput.value = api.getPlaylistUrl();
+    // ─── Live TV Sources ───────────────────────────
+    renderLiveTVSources();
 
+    // Add M3U playlist
     dom.iptvSaveBtn.addEventListener('click', async () => {
       const url = dom.iptvUrlInput.value.trim();
-      api.setPlaylistUrl(url);
       if (!url) {
-        dom.iptvStatus.textContent = 'Playlist URL cleared';
+        dom.iptvStatus.textContent = 'Enter a playlist URL';
         dom.iptvStatus.className = 'setting-hint';
         return;
       }
       dom.iptvStatus.textContent = 'Testing playlist...';
       dom.iptvStatus.className = 'setting-hint';
-      const channels = await api.getChannels();
-      if (channels.length > 0) {
-        dom.iptvStatus.textContent = `Found ${channels.length} channels`;
-        dom.iptvStatus.className = 'setting-hint success';
-      } else {
-        dom.iptvStatus.textContent = 'No channels found — check the URL';
+      try {
+        const resp = await fetch('/api/iptv/channels?url=' + encodeURIComponent(url));
+        const data = resp.ok ? await resp.json() : { channels: [] };
+        const count = (data.channels || []).length;
+        if (count > 0) {
+          const result = api.addLiveTVSource({ type: 'playlist', url, name: 'Playlist' });
+          if (result.error) {
+            dom.iptvStatus.textContent = result.error;
+            dom.iptvStatus.className = 'setting-hint error';
+          } else {
+            dom.iptvStatus.textContent = `Added — ${count} channels found`;
+            dom.iptvStatus.className = 'setting-hint success';
+            dom.iptvUrlInput.value = '';
+            renderLiveTVSources();
+          }
+        } else {
+          dom.iptvStatus.textContent = 'No channels found — check the URL';
+          dom.iptvStatus.className = 'setting-hint error';
+        }
+      } catch {
+        dom.iptvStatus.textContent = 'Failed to fetch playlist';
         dom.iptvStatus.className = 'setting-hint error';
       }
+    });
+
+    // Add Stremio TV addon
+    if (dom.liveTvAddonInput && dom.liveTvAddonAddBtn) {
+      dom.liveTvAddonAddBtn.addEventListener('click', async () => {
+        const url = dom.liveTvAddonInput.value.trim().replace(/\/manifest\.json$/, '').replace(/\/$/, '');
+        if (!url) return;
+        dom.liveTvAddonStatus.textContent = 'Checking addon...';
+        dom.liveTvAddonStatus.className = 'setting-hint';
+        try {
+          const resp = await fetch(url + '/manifest.json', { signal: AbortSignal.timeout(10000) });
+          if (!resp.ok) throw new Error('HTTP ' + resp.status);
+          const manifest = await resp.json();
+          const hasTv = manifest.catalogs && manifest.catalogs.some(c => c.type === 'tv');
+          if (!hasTv) {
+            dom.liveTvAddonStatus.textContent = 'This addon has no TV catalogs';
+            dom.liveTvAddonStatus.className = 'setting-hint error';
+            return;
+          }
+          const result = api.addLiveTVSource({
+            type: 'stremio-tv',
+            url,
+            name: manifest.name || 'TV Addon',
+          });
+          if (result.error) {
+            dom.liveTvAddonStatus.textContent = result.error;
+            dom.liveTvAddonStatus.className = 'setting-hint error';
+          } else {
+            dom.liveTvAddonStatus.textContent = `Added ${manifest.name || 'addon'}`;
+            dom.liveTvAddonStatus.className = 'setting-hint success';
+            dom.liveTvAddonInput.value = '';
+            renderLiveTVSources();
+          }
+        } catch {
+          dom.liveTvAddonStatus.textContent = 'Failed to load addon manifest';
+          dom.liveTvAddonStatus.className = 'setting-hint error';
+        }
+      });
+    }
+
+    // Quick-add known TV addons
+    document.querySelectorAll('.livetv-quick-add').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const url = btn.dataset.url;
+        const name = btn.dataset.name;
+        btn.disabled = true;
+        btn.textContent = 'Adding...';
+        const result = api.addLiveTVSource({ type: 'stremio-tv', url, name });
+        if (result.error) {
+          showToast(result.error);
+          btn.textContent = `Add ${name}`;
+          btn.disabled = false;
+        } else {
+          showToast(`Added ${name}`);
+          btn.textContent = 'Added';
+          renderLiveTVSources();
+        }
+      });
     });
 
     dom.customAddCinemeta.addEventListener('click', async () => {
@@ -1888,6 +1976,7 @@
       navigateTo('settings');
       updateModeUI(api.getMode());
       renderAddonList();
+      renderLiveTVSources();
     });
 
     renderAddonList();
@@ -1919,6 +2008,44 @@
         api.removeAddon(btn.dataset.url);
         renderAddonList();
         showToast('Addon removed');
+      });
+    });
+  }
+
+  function renderLiveTVSources() {
+    const container = document.getElementById('livetv-source-list');
+    if (!container) return;
+
+    const sources = api.getLiveTVSources();
+    if (sources.length === 0) {
+      container.innerHTML = '<p class="setting-hint">No live TV sources configured</p>';
+      return;
+    }
+
+    container.innerHTML = sources.map(s => {
+      const icon = s.type === 'playlist' ? 'M3U' : 'TV';
+      const typeLabel = s.type === 'playlist' ? 'M3U Playlist' : 'Stremio TV Addon';
+      return `
+        <div class="source-item">
+          <div class="source-icon">${icon}</div>
+          <div class="source-info">
+            <div class="source-name">${escapeHTML(s.name || s.url)}</div>
+            <div class="source-desc">${typeLabel}</div>
+          </div>
+          <button class="livetv-source-remove" data-url="${escapeHTML(s.url)}" title="Remove">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M18 6L6 18M6 6l12 12"/>
+            </svg>
+          </button>
+        </div>
+      `;
+    }).join('');
+
+    container.querySelectorAll('.livetv-source-remove').forEach(btn => {
+      btn.addEventListener('click', () => {
+        api.removeLiveTVSource(btn.dataset.url);
+        renderLiveTVSources();
+        showToast('Source removed');
       });
     });
   }

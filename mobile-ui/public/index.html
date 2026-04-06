@@ -172,12 +172,35 @@
             </div>
 
             <div class="setting-group">
-              <label>Live TV Playlist</label>
+              <label>Live TV Sources</label>
+              <div id="livetv-source-list" class="source-list">
+                <p class="setting-hint">No live TV sources configured</p>
+              </div>
+            </div>
+
+            <div class="setting-group">
+              <label>Add M3U Playlist</label>
               <div class="setting-row">
                 <input type="text" id="setting-iptv-url" placeholder="M3U playlist URL...">
-                <button id="setting-iptv-save" class="btn-sm">Save</button>
+                <button id="setting-iptv-save" class="btn-sm">Add</button>
               </div>
-              <span id="iptv-status" class="setting-hint">Paste an M3U/M3U8 playlist URL to add live TV channels</span>
+              <span id="iptv-status" class="setting-hint">Paste an M3U/M3U8 playlist URL for live TV channels</span>
+            </div>
+
+            <div class="setting-group">
+              <label>Add Stremio TV Addon</label>
+              <div class="setting-row">
+                <input type="text" id="setting-livetv-addon-url" placeholder="Addon URL (e.g. https://usatv.click)...">
+                <button id="setting-livetv-addon-add" class="btn-sm">Add</button>
+              </div>
+              <span id="livetv-addon-status" class="setting-hint">Add a Stremio addon that provides live TV channels</span>
+            </div>
+
+            <div class="setting-group">
+              <label>Quick Add TV Sources</label>
+              <button class="btn-block livetv-quick-add" data-url="https://www.usatv.click" data-name="USA TV">Add USA TV (US Channels)</button>
+              <button class="btn-block livetv-quick-add" data-url="https://iptv-addon.fly.dev" data-name="IPTV Addon">Add IPTV Addon (International)</button>
+              <span class="setting-hint">Popular Stremio addons for live TV streams</span>
             </div>
 
             <div class="setting-group">

@@ -248,6 +248,50 @@ app.get('/api/play/:infoHash', rateLimit, (req, res) => {
   getEngine().serveStream(req, res, magnet, fileIdx);
 });
 
+// GET /api/cache — list items in torrent cache on disk
+app.get('/api/cache', rateLimit, async (req, res) => {
+  try {
+    const cacheDir = TORRENT_CACHE_PATH;
+    if (!fs.existsSync(cacheDir)) return res.json({ items: [] });
+
+    const entries = await fs.promises.readdir(cacheDir, { withFileTypes: true });
+    const items = [];
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const dirPath = path.join(cacheDir, entry.name);
+      const files = await fs.promises.readdir(dirPath).catch(() => []);
+      let totalSize = 0;
+      let videoFile = null;
+      for (const f of files) {
+        try {
+          const stat = await fs.promises.stat(path.join(dirPath, f));
+          totalSize += stat.size;
+          if (/\.(mp4|mkv|avi|webm|mov)$/i.test(f) && (!videoFile || stat.size > videoFile.size)) {
+            videoFile = { name: f, size: stat.size };
+          }
+        } catch {}
+      }
+      items.push({
+        name: entry.name,
+        totalSize,
+        videoFile: videoFile ? videoFile.name : null,
+        videoSize: videoFile ? videoFile.size : 0,
+      });
+    }
+
+    res.json({ items });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/torrent-status — list all active torrents
+app.get('/api/torrent-status', (req, res) => {
+  const eng = getEngine();
+  res.json({ torrents: eng.getAllStatus() });
+});
+
 // GET /api/torrent-status/:infoHash — check download progress
 app.get('/api/torrent-status/:infoHash', (req, res) => {
   const { infoHash } = req.params;

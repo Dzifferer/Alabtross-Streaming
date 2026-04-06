@@ -291,6 +291,28 @@ class TorrentEngine {
     };
   }
 
+  /**
+   * Get status info for all active torrents.
+   */
+  getAllStatus() {
+    const results = [];
+    for (const [hash, entry] of this._active) {
+      if (!entry.files) continue;
+      const sw = entry.engine.swarm;
+      results.push({
+        infoHash: hash,
+        name: entry.name,
+        downloadSpeed: sw ? sw.downloadSpeed() : 0,
+        uploadSpeed: sw ? sw.uploadSpeed() : 0,
+        numPeers: sw ? sw.wires.length : 0,
+        files: entry.files
+          .filter(f => isFileNameSafe(f.name))
+          .map(f => ({ name: f.name, length: f.length })),
+      });
+    }
+    return results;
+  }
+
   destroy() {
     for (const [hash, entry] of this._active) {
       clearTimeout(entry.timer);

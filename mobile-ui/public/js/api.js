@@ -238,7 +238,11 @@ class StremioAPI {
         const resp = await fetch(`${addon.url}/meta/${type}/${id}.json`);
         if (!resp.ok) continue;
         const data = await resp.json();
-        if (data.meta) return data.meta;
+        if (data.meta) {
+          // Cache the title for custom mode stream searches (TPB needs name, not IMDB ID)
+          this._lastTitle = data.meta.name || null;
+          return data.meta;
+        }
       } catch (e) {
         console.warn('Meta fetch failed for', addon.url, e);
       }
@@ -293,18 +297,22 @@ class StremioAPI {
     const imdbId = id.match(/^tt\d+/) ? id.match(/^(tt\d+)/)[1] : id;
 
     let url;
+    const params = new URLSearchParams();
+
+    // Pass the title so TPB can search by name (it doesn't index by IMDB ID)
+    if (this._lastTitle) params.set('title', this._lastTitle);
+
     if (type === 'movie') {
       url = `/api/streams/movie/${imdbId}`;
     } else {
       url = `/api/streams/series/${imdbId}`;
-      // If seasonEpisode provided (e.g. from episode click), append query params
       if (seasonEpisode && seasonEpisode.season !== undefined) {
-        const params = new URLSearchParams();
         params.set('season', seasonEpisode.season);
         if (seasonEpisode.episode !== undefined) params.set('episode', seasonEpisode.episode);
-        url += '?' + params.toString();
       }
     }
+    const qs = params.toString();
+    if (qs) url += '?' + qs;
 
     try {
       const resp = await fetch(url);

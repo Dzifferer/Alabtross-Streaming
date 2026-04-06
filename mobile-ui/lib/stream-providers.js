@@ -117,47 +117,6 @@ async function searchTPB(query) {
   return streams;
 }
 
-/**
- * Search TPB specifically by IMDB ID.
- * TPB supports searching by imdb tag.
- */
-async function searchTPBByImdb(imdbId) {
-  // Try direct IMDB search first
-  let streams = await searchTPB(imdbId);
-  if (streams.length > 0) return streams;
-
-  // Also try the IMDB-specific endpoint
-  const data = await fetchJSON(
-    `https://apibay.org/q.php?q=${imdbId}`
-  );
-  if (!data || !Array.isArray(data)) return [];
-
-  for (const t of data) {
-    if (!t.info_hash || t.info_hash === '0' || t.id === '0') continue;
-    const hash = t.info_hash.toLowerCase();
-    const seeds = parseInt(t.seeders, 10) || 0;
-    const sizeBytes = parseInt(t.size || '0', 10);
-    const sizeMB = sizeBytes > 0 ? (sizeBytes / (1024 * 1024)).toFixed(0) + ' MB' : '';
-    const sizeGB = sizeBytes > 1e9 ? (sizeBytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB' : '';
-    const sizeStr = sizeGB || sizeMB;
-    const name = t.name || 'Unknown';
-    const quality = name.match(/\b(2160p|1080p|720p|480p)\b/i);
-
-    streams.push({
-      infoHash: hash,
-      title: `${name}\n${quality ? quality[1] + ' ' : ''}${sizeStr} | Seeds: ${seeds}`,
-      magnetUri: buildMagnet(hash, name),
-      quality: quality ? quality[1] : '',
-      size: sizeStr,
-      seeds,
-      source: 'TPB',
-    });
-  }
-
-  console.log(`[TPB/IMDB] Found ${streams.length} results for "${imdbId}"`);
-  return streams;
-}
-
 // ─── YTS Provider (Movies) ──────────────────────────
 
 async function searchYTS(imdbId) {
@@ -300,17 +259,19 @@ async function search1337x(query) {
  * Get streams for a movie by IMDB ID.
  * Queries TPB first, then YTS and 1337x in parallel.
  */
-async function getMovieStreams(imdbId) {
+async function getMovieStreams(imdbId, title) {
   const id = sanitizeImdbId(imdbId);
   if (!id) return [];
 
-  console.log(`[Streams] Searching movie streams for ${id}`);
+  console.log(`[Streams] Searching movie streams for ${id} (title: "${title || 'unknown'}")`);
 
-  // Query all sources in parallel — TPB first priority
+  // TPB searches by title (it doesn't index by IMDB ID)
+  // YTS and 1337x search by IMDB ID
+  const tpbQuery = title || id;
   const [tpbStreams, ytsStreams, fallbackStreams] = await Promise.all([
-    searchTPBByImdb(id).catch(e => { console.log(`[TPB] Error: ${e.message}`); return []; }),
+    searchTPB(tpbQuery).catch(e => { console.log(`[TPB] Error: ${e.message}`); return []; }),
     searchYTS(id).catch(e => { console.log(`[YTS] Error: ${e.message}`); return []; }),
-    search1337x(id).catch(e => { console.log(`[1337x] Error: ${e.message}`); return []; }),
+    search1337x(title || id).catch(e => { console.log(`[1337x] Error: ${e.message}`); return []; }),
   ]);
 
   // Deduplicate by infoHash, prefer TPB > YTS > 1337x
@@ -333,7 +294,7 @@ async function getMovieStreams(imdbId) {
  * Get streams for a TV episode by IMDB ID + season/episode.
  * Queries TPB and EZTV first, then 1337x as fallback.
  */
-async function getSeriesStreams(imdbId, season, episode) {
+async function getSeriesStreams(imdbId, season, episode, title) {
   const id = sanitizeImdbId(imdbId);
   if (!id) return [];
 
@@ -342,15 +303,15 @@ async function getSeriesStreams(imdbId, season, episode) {
     ? `S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`
     : '';
 
-  console.log(`[Streams] Searching series streams for ${id} ${seTag}`);
+  console.log(`[Streams] Searching series streams for ${id} ${seTag} (title: "${title || 'unknown'}")`);
 
-  // Build TPB search query with season/episode tag
-  const tpbQuery = se ? `${id} ${seTag}` : id;
+  // TPB searches by title + S01E01 tag
+  const tpbQuery = se ? `${title || id} ${seTag}` : (title || id);
 
   const [tpbStreams, eztvStreams, fallbackStreams] = await Promise.all([
     searchTPB(tpbQuery).catch(e => { console.log(`[TPB] Error: ${e.message}`); return []; }),
     searchEZTV(id).catch(e => { console.log(`[EZTV] Error: ${e.message}`); return []; }),
-    se ? search1337x(`${id} ${seTag}`).catch(e => { console.log(`[1337x] Error: ${e.message}`); return []; }) : Promise.resolve([]),
+    se ? search1337x(`${title || id} ${seTag}`).catch(e => { console.log(`[1337x] Error: ${e.message}`); return []; }) : Promise.resolve([]),
   ]);
 
   // Filter EZTV results to matching season/episode if specified

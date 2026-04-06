@@ -783,10 +783,13 @@ if [[ "$MOBILE_ALREADY_OK" != "true" ]]; then
     mkdir -p "$LIBRARY_HOST_DIR"
 
     info "Starting Alabtross Mobile UI..."
+    # --net=host is required for SSDP multicast (local device discovery for
+    # casting over VPN). Port 8080 is exposed directly on the host.
     docker run -d \
       --name alabtross-mobile \
       --restart unless-stopped \
-      -p "${STREMIO_BIND_IP}:8080:8080" \
+      --net=host \
+      -e PORT=8080 \
       -e STREMIO_SERVER="http://${STREMIO_BIND_IP}:11470" \
       -e LIBRARY_PATH="/app/library" \
       -v "${LIBRARY_HOST_DIR}:/app/library" \

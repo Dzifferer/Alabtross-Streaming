@@ -1,6 +1,8 @@
 FROM node:20-alpine
 
 # Install FFmpeg for MKV→MP4 remuxing (container-level copy, no re-encoding)
+# Note: For local device discovery (casting via VPN), the container should be
+# run with --net=host so SSDP multicast can reach LAN devices.
 RUN apk add --no-cache ffmpeg
 
 WORKDIR /app

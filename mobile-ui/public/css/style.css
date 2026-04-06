@@ -968,12 +968,21 @@ html, body {
 /* ===== Player ===== */
 #view-player {
   background: #000;
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: none;
+  min-height: 0;
+}
+
+#view-player.active {
+  display: block;
 }
 
 .player-back-btn {
   position: absolute;
-  top: 16px;
-  left: 16px;
+  top: max(12px, env(safe-area-inset-top, 0px));
+  left: max(12px, env(safe-area-inset-left, 0px));
   z-index: 20;
   width: 40px;
   height: 40px;
@@ -993,9 +1002,8 @@ html, body {
 }
 
 #player-container {
-  position: relative;
-  width: 100%;
-  height: 100%;
+  position: absolute;
+  inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1004,7 +1012,8 @@ html, body {
 
 #video-player {
   width: 100%;
-  max-height: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 
 #player-overlay {
@@ -1018,15 +1027,34 @@ html, body {
   color: white;
   gap: 12px;
   padding: 24px;
+  padding: 24px max(24px, env(safe-area-inset-right, 0px)) 24px max(24px, env(safe-area-inset-left, 0px));
   overflow: hidden;
   z-index: 10;
+}
+
+/* Landscape: horizontal layout for loading screen */
+@media (orientation: landscape) and (max-height: 500px) {
+  #player-overlay {
+    flex-direction: row;
+    gap: 24px;
+  }
+  #player-overlay .loading-poster {
+    max-width: 120px;
+    max-height: 70vh;
+  }
+  #player-overlay .loading-info {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+  }
 }
 
 /* ===== Cast Button & Overlay ===== */
 .cast-btn {
   position: absolute;
   top: max(12px, env(safe-area-inset-top, 0px));
-  right: 12px;
+  right: max(12px, env(safe-area-inset-right, 0px));
   z-index: 20;
   width: 44px;
   height: 44px;
@@ -1089,6 +1117,13 @@ html, body {
 
 .cast-stop-btn:active {
   opacity: 0.8;
+}
+
+.loading-info {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
 }
 
 .loading-poster {

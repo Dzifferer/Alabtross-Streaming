@@ -4,10 +4,12 @@ A fully automated setup that turns an NVIDIA Jetson Orin Nano into a secure home
 
 ## What You Get
 
+- **Alabtross Mobile UI** — a lightweight, mobile-first web interface with dual streaming modes, built-in video player, live TV, and a download library
 - **Stremio Server** — stream movies and TV shows from anywhere, with content cached to local or external storage
-- **Alabtross Mobile UI** — a lightweight, mobile-first web interface (replaces web.stremio.com) with auto stream speed testing
 - **WireGuard VPN** — secure tunnel so your streaming server is never exposed to the public internet
+- **UPnP Auto Port Forwarding** — automatically configures your router (no manual port forwarding needed)
 - **DuckDNS** (optional) — keeps your server reachable when your home IP changes
+- **Health Monitoring** — auto-restarts crashed containers every 5 minutes
 
 ## Requirements
 
@@ -82,11 +84,13 @@ On your laptop:
     git clone https://github.com/Dzifferer/Alabtross-Streaming.git
     cd Alabtross-Streaming
 
-    # With external drive + DuckDNS:
+    # Full setup with external drive, DuckDNS, auto VPN profiles, and UPnP:
     sudo HEADLESS=1 \
          DRIVE_PARTITION=sda1 \
          DUCKDNS_SUBDOMAIN=myserver \
          DUCKDNS_AUTH_TOKEN=your-token-here \
+         VPN_PROFILE_NAMES=myphone,laptop \
+         ENABLE_UPNP=yes \
          bash jetson_setup.sh
 
     # Or minimal (no drive, no DuckDNS):
@@ -101,30 +105,34 @@ On your laptop:
     ```
     It skips completed steps and picks up where it left off.
 
-### Step 5 — Router + VPN Profiles
+### Step 5 — Connect Your Devices
 
-All from your laptop over SSH:
+If you used `VPN_PROFILE_NAMES`, the script already created profiles and showed QR codes. Scan them with the WireGuard app.
 
-14. **Port forward** on your router: `51820 UDP` to the Jetson's IP
+If you didn't, create profiles manually over SSH:
 
-15. Create a VPN profile for your phone:
+14. Create a VPN profile for your phone:
     ```bash
     pivpn add
     ```
 
-16. Get the QR code:
+15. Get the QR code:
     ```bash
     pivpn -qr myphone
     ```
     Scan it with the WireGuard app on your phone.
 
+**Router port forwarding:**
+- If `ENABLE_UPNP=yes` (the default in headless mode), the script auto-forwards port 51820 via UPnP — no router login needed
+- If UPnP isn't available on your router, you'll need to manually forward `51820 UDP` to the Jetson's IP
+
 ### Step 6 — Done
 
-17. The Jetson is now running headless. Disconnect the USB cable if you want — everything runs over ethernet.
+16. The Jetson is now running headless. Disconnect the USB cable if you want — everything runs over ethernet.
 
-18. On your phone: connect WireGuard, open `http://<jetson-ip>:8080`
+17. On your phone: connect WireGuard, open `http://<jetson-ip>:8080`
 
-19. To SSH in anytime:
+18. To SSH in anytime:
     ```bash
     ssh jetson@192.168.1.XX      # from home network
     ssh jetson@10.6.0.1          # from VPN
@@ -141,7 +149,7 @@ cd Alabtross-Streaming
 sudo bash jetson_setup.sh
 ```
 
-The script asks a few questions upfront (external drive, DuckDNS credentials) then runs fully automatically.
+The script asks a few questions upfront (external drive, DuckDNS credentials, VPN profiles, UPnP) then runs fully automatically.
 
 ## Headless Mode Environment Variables
 
@@ -152,22 +160,44 @@ The script asks a few questions upfront (external drive, DuckDNS credentials) th
 | `FORMAT_DRIVE` | No | `yes` | Auto-format unformatted drives as ext4 |
 | `DUCKDNS_SUBDOMAIN` | No | `myserver` | DuckDNS subdomain (omit to skip DuckDNS) |
 | `DUCKDNS_AUTH_TOKEN` | No | `abc123...` | DuckDNS token |
+| `VPN_PROFILE_NAMES` | No | `myphone,laptop` | Comma-separated VPN client profiles to auto-create |
+| `ENABLE_UPNP` | No | `yes` | Auto-forward port 51820 via UPnP (default: `yes`) |
+| `ENABLE_HEALTH` | No | `yes` | Auto-restart crashed containers every 5 min (default: `yes`) |
+| `DISABLE_GUI` | No | `yes` | Disable desktop GUI for headless operation (default: `yes`) |
+
+## Streaming Modes
+
+The Mobile UI supports two streaming modes, switchable in Settings:
+
+### Custom Mode (default)
+
+Streams are fetched directly from torrent sources — no Stremio addons needed:
+
+| Source | Type | Method |
+|--------|------|--------|
+| The Pirate Bay | Movies & Series | JSON API (fastest) |
+| YTS | Movies | JSON API (high quality, small files) |
+| EZTV | TV Series | JSON API (episode-level results) |
+| 1337x | Both | HTML scraping (general fallback) |
+
+Streams are ranked by format (browser-playable MP4/WebM first) then by seed count. Dead torrents (< 3 seeds) are filtered out.
+
+### Stremio Mode
+
+Uses the Stremio addon ecosystem. After switching to Stremio mode in Settings:
+
+1. Set the server URL to `http://<jetson-ip>:11470`
+2. Add the **Torrentio** addon for stream sources
+3. Streams are auto speed-tested and ranked by response time
+
+Metadata (movie info, posters, search) always comes from **Cinemeta** regardless of mode.
 
 ## After Setup
 
-1. **Router:** Forward port `51820 UDP` to your Jetson's LAN IP
-2. **Create a VPN profile:**
-   ```bash
-   pivpn add
-   ```
-3. **Get QR code for your phone:**
-   ```bash
-   pivpn -qr <profilename>
-   ```
-4. **Connect** with the WireGuard app on your phone
-5. **Open** `http://<jetson-ip>:8080` in your mobile browser
-6. **Add to Home Screen** for an app-like experience
-7. In the mobile UI, go to **Settings** and add the **Torrentio** addon for streams
+1. **Connect** your phone/laptop to WireGuard VPN
+2. **Open** `http://<jetson-ip>:8080` in your mobile browser
+3. **Add to Home Screen** for an app-like experience (it's a PWA)
+4. Browse, search, and stream — the default Custom mode works immediately with no extra configuration
 
 ## Ports
 
@@ -180,12 +210,16 @@ The script asks a few questions upfront (external drive, DuckDNS credentials) th
 
 ## Mobile UI Features
 
+- **Dual streaming modes** — Custom (direct torrent sources) or Stremio (addon-based)
 - Browse catalogs, search movies and series
 - Season/episode navigation for TV shows
 - Auto speed-tests all available streams and picks the fastest source
+- **Library** — download movies/episodes to the server for offline playback
+- **Live TV** — paste an M3U/M3U8 playlist URL in Settings to browse IPTV channels
+- **Share** — generate a QR code so other devices on your VPN can connect
 - VPN detection — warns if you're not connected through WireGuard
 - PWA installable — add to home screen for a native app feel
-- Built-in video player
+- Built-in video player with range-request support
 
 ## Useful Commands
 
@@ -193,11 +227,13 @@ The script asks a few questions upfront (external drive, DuckDNS credentials) th
 docker logs stremio-server        # View Stremio logs
 docker restart stremio-server     # Restart Stremio
 docker stats stremio-server       # CPU/RAM usage
+docker logs alabtross-mobile      # View Mobile UI logs
 docker restart alabtross-mobile   # Restart Mobile UI
 pivpn -c                          # List VPN connections
 pivpn add                         # Add a new VPN client
 pivpn -qr <name>                  # Show QR code for a client
 df -h /mnt/movies                 # Check external drive space
+cat /var/log/alabtross-health.log # View health monitor log
 ```
 
 ## Architecture
@@ -211,13 +247,22 @@ Jetson Orin Nano (home network)
     |
     +-- Alabtross Mobile UI (port 8080, Docker)
     |       |
-    |       +-- Proxies API requests to Stremio
+    |       +-- Custom Mode: scrapes TPB/YTS/EZTV/1337x directly
+    |       +-- Stremio Mode: proxies API requests to Stremio
+    |       +-- Library: downloads torrents to server storage
+    |       +-- Live TV: proxies M3U/IPTV streams
     |
     +-- Stremio Server (port 11470, Docker)
-            |
-            +-- Fetches streams via addons (Torrentio, etc.)
-            +-- Caches content to external drive
-            +-- Serves HLS video to your device
+    |       |
+    |       +-- Fetches streams via addons (Torrentio, etc.)
+    |       +-- Caches content to external drive
+    |       +-- Serves HLS video to your device
+    |
+    +-- Health Monitor (cron, every 5 min)
+    |       +-- Auto-restarts crashed containers
+    |
+    +-- DuckDNS (cron, every 5 min, optional)
+            +-- Updates dynamic DNS record
 ```
 
 ## Troubleshooting
@@ -229,7 +274,8 @@ docker restart stremio-server
 ```
 
 **Can't connect via VPN from outside home:**
-- Confirm port 51820 UDP is forwarded on your router
+- If UPnP was used, verify it worked: `upnpc -s` (look for ExternalIPAddress)
+- Otherwise, confirm port 51820 UDP is forwarded on your router
 - Check your DuckDNS hostname resolves: `ping yourdomain.duckdns.org`
 - Check WireGuard is running: `sudo systemctl status wg-quick@wg0`
 
@@ -249,4 +295,9 @@ sudo systemctl status systemd-fsck@dev-sdX.service
 ```bash
 sudo systemctl set-default graphical.target
 sudo reboot
+```
+
+**View health monitor activity:**
+```bash
+cat /var/log/alabtross-health.log
 ```

@@ -1,7 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="192" height="192" viewBox="0 0 192 192">
-  <rect width="192" height="192" rx="40" fill="#0a0a0f"/>
+  <rect width="192" height="192" rx="40" fill="#ffffff"/>
   <!-- Z shape -->
-  <path d="M58 52 L134 52 L58 140 L134 140" fill="none" stroke="#6c5ce7" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
-  <!-- Vertical line through Z (money sign style) -->
-  <line x1="96" y1="34" x2="96" y2="158" stroke="#6c5ce7" stroke-width="8" stroke-linecap="round"/>
+  <path d="M58 52 L134 52 L58 140 L134 140" fill="none" stroke="#b87333" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Two vertical lines through Z -->
+  <line x1="88" y1="34" x2="88" y2="158" stroke="#b87333" stroke-width="7" stroke-linecap="round"/>
+  <line x1="104" y1="34" x2="104" y2="158" stroke="#b87333" stroke-width="7" stroke-linecap="round"/>
 </svg>

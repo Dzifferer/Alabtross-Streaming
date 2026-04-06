@@ -731,15 +731,51 @@
     navigateTo('player');
     dom.playerOverlay.classList.remove('hidden');
 
+    // Custom mode torrents need time to connect — show status
+    if (stream._customMode) {
+      dom.playerOverlay.innerHTML = `
+        <div class="spinner"></div>
+        <p>Connecting to torrent peers...</p>
+        <p style="font-size:12px;color:var(--text-muted)">This may take 30-60 seconds</p>
+      `;
+    }
+
     try {
       dom.videoPlayer.src = url;
       dom.videoPlayer.load();
+
+      // Wait for enough data before trying to play
+      await new Promise((resolve, reject) => {
+        const onCanPlay = () => { cleanup(); resolve(); };
+        const onError = () => {
+          cleanup();
+          const err = dom.videoPlayer.error;
+          reject(new Error(err ? `Media error (code ${err.code})` : 'Failed to load video'));
+        };
+        const cleanup = () => {
+          dom.videoPlayer.removeEventListener('canplay', onCanPlay);
+          dom.videoPlayer.removeEventListener('error', onError);
+          clearTimeout(timer);
+        };
+        // 2 minute timeout for torrent to buffer enough
+        const timer = setTimeout(() => {
+          cleanup();
+          reject(new Error('Torrent buffering timed out — try a stream with more seeds'));
+        }, 120000);
+        dom.videoPlayer.addEventListener('canplay', onCanPlay, { once: true });
+        dom.videoPlayer.addEventListener('error', onError, { once: true });
+      });
+
       await dom.videoPlayer.play();
       dom.playerOverlay.classList.add('hidden');
     } catch (e) {
+      let hint = escapeHTML(e.message);
+      if (e.message.includes('Media error') || e.message.includes('no supported source')) {
+        hint += '<br><span style="font-size:12px">The file may be MKV format — browsers only support MP4/WebM</span>';
+      }
       dom.playerOverlay.innerHTML = `
         <p style="color:var(--danger)">Playback failed</p>
-        <p style="font-size:13px;color:var(--text-muted)">${escapeHTML(e.message)}</p>
+        <p style="font-size:13px;color:var(--text-muted)">${hint}</p>
         <button id="player-go-back" style="
           margin-top:16px; padding:10px 24px; background:var(--accent);
           border:none; border-radius:8px; color:white; font-size:14px; cursor:pointer;

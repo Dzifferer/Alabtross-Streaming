@@ -290,30 +290,90 @@ class StremioAPI {
   }
 
   /**
-   * Custom mode: fetch streams from our backend scrapers.
+   * Custom mode: fetch streams from Torrentio (browser-side) + backend scrapers.
+   * Torrentio is called directly from the browser to avoid Jetson DNS issues.
    */
   async _getCustomStreams(type, id, seasonEpisode) {
-    // Extract IMDB ID from the content ID
     const imdbId = id.match(/^tt\d+/) ? id.match(/^(tt\d+)/)[1] : id;
 
-    let url;
+    // Build Torrentio URL (browser fetches directly — no Jetson DNS needed)
+    let torrentioId = imdbId;
+    if (type === 'series' && seasonEpisode && seasonEpisode.season !== undefined && seasonEpisode.episode !== undefined) {
+      torrentioId = `${imdbId}:${seasonEpisode.season}:${seasonEpisode.episode}`;
+    }
+    const torrentioUrl = `https://torrentio.strem.io/stream/${type}/${torrentioId}.json`;
+
+    // Build backend scraper URL
+    let backendUrl;
     const params = new URLSearchParams();
-
-    // Pass the title so TPB can search by name (it doesn't index by IMDB ID)
     if (this._lastTitle) params.set('title', this._lastTitle);
-
     if (type === 'movie') {
-      url = `/api/streams/movie/${imdbId}`;
+      backendUrl = `/api/streams/movie/${imdbId}`;
     } else {
-      url = `/api/streams/series/${imdbId}`;
+      backendUrl = `/api/streams/series/${imdbId}`;
       if (seasonEpisode && seasonEpisode.season !== undefined) {
         params.set('season', seasonEpisode.season);
         if (seasonEpisode.episode !== undefined) params.set('episode', seasonEpisode.episode);
       }
     }
     const qs = params.toString();
-    if (qs) url += '?' + qs;
+    if (qs) backendUrl += '?' + qs;
 
+    // Fetch Torrentio + backend in parallel
+    const [torrentioStreams, backendStreams] = await Promise.all([
+      this._fetchTorrentioStreams(torrentioUrl),
+      this._fetchBackendStreams(backendUrl),
+    ]);
+
+    // Deduplicate by infoHash, prefer Torrentio
+    const seen = new Set();
+    const combined = [];
+    for (const s of [...torrentioStreams, ...backendStreams]) {
+      if (s.infoHash && !seen.has(s.infoHash)) {
+        seen.add(s.infoHash);
+        combined.push(s);
+      }
+    }
+
+    return combined;
+  }
+
+  async _fetchTorrentioStreams(url) {
+    try {
+      const resp = await fetch(url, { signal: AbortSignal.timeout(10000) });
+      if (!resp.ok) return [];
+      const data = await resp.json();
+      if (!data.streams || !Array.isArray(data.streams)) return [];
+
+      return data.streams.map(s => {
+        if (!s.infoHash) return null;
+        const titleParts = (s.title || '').split('\n');
+        const seedMatch = (s.title || '').match(/👤\s*(\d+)/);
+        const seeds = seedMatch ? parseInt(seedMatch[1], 10) : 0;
+        const sizeMatch = (s.title || '').match(/([\d.]+\s*(?:GB|MB))/i);
+        const qualityMatch = (s.title || '').match(/\b(2160p|1080p|720p|480p)\b/i);
+
+        return {
+          infoHash: s.infoHash.toLowerCase(),
+          title: s.title || s.name || 'Unknown',
+          name: s.name || 'Torrentio',
+          magnetUri: `magnet:?xt=urn:btih:${s.infoHash}`,
+          quality: qualityMatch ? qualityMatch[1] : '',
+          size: sizeMatch ? sizeMatch[1] : '',
+          seeds,
+          fileIdx: s.fileIdx,
+          source: 'Torrentio',
+          addonName: 'Torrentio',
+          _customMode: true,
+        };
+      }).filter(Boolean);
+    } catch (e) {
+      console.warn('Torrentio fetch failed:', e);
+      return [];
+    }
+  }
+
+  async _fetchBackendStreams(url) {
     try {
       const resp = await fetch(url);
       if (!resp.ok) return [];
@@ -321,11 +381,10 @@ class StremioAPI {
       return (data.streams || []).map(s => ({
         ...s,
         addonName: s.source || 'Custom',
-        // In custom mode, streams have magnetUri and infoHash
         _customMode: true,
       }));
     } catch (e) {
-      console.warn('Custom stream fetch failed:', e);
+      console.warn('Backend stream fetch failed:', e);
       return [];
     }
   }

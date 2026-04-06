@@ -18,10 +18,12 @@
 
 const torrentStream = require('torrent-stream');
 const { spawn } = require('child_process');
+const fs = require('fs');
 const path = require('path');
 const { TRACKERS, isFileNameSafe, getMimeType, sanitizeFilename } = require('./file-safety');
 
 const IDLE_TIMEOUT = 30 * 60 * 1000; // 30 minutes
+const ACTIVE_DL_RECHECK = 10 * 60 * 1000; // re-check in 10 min if still downloading
 const MAX_CONCURRENT = 5;
 const MAX_FILE_SIZE = 20 * 1024 * 1024 * 1024; // 20 GB
 const MAGIC_READ_SIZE = 16;
@@ -480,6 +482,34 @@ class TorrentEngine {
   _removeTorrent(hash) {
     const entry = this._active.get(hash);
     if (!entry) return;
+
+    // Don't remove if the torrent is still actively downloading
+    if (entry.engine && entry.engine.swarm) {
+      const sw = entry.engine.swarm;
+      const speed = sw.downloadSpeed();
+      const peers = sw.wires.length;
+
+      // Check if any selected file is still incomplete
+      const hasIncomplete = entry.files && entry.files.some(f => {
+        // torrent-stream file objects don't expose a simple "complete" flag,
+        // but we can check via the on-disk file size vs declared length
+        try {
+          const fullPath = path.join(this._downloadPath, f.path);
+          if (!fs.existsSync(fullPath)) return true; // not even started
+          const stat = fs.statSync(fullPath);
+          return stat.size < f.length;
+        } catch {
+          return true;
+        }
+      });
+
+      if (hasIncomplete && (speed > 0 || peers > 0)) {
+        console.log(`[TorrentEngine] Torrent ${hash.slice(0,8)}... still downloading (${(speed / 1024).toFixed(0)} KB/s, ${peers} peers) — extending lifetime`);
+        entry.timer = setTimeout(() => this._removeTorrent(hash), ACTIVE_DL_RECHECK);
+        return;
+      }
+    }
+
     clearTimeout(entry.timer);
     if (entry.engine) entry.engine.destroy();
     this._active.delete(hash);

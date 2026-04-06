@@ -258,6 +258,14 @@ class LibraryManager {
       console.log(`[Library] Downloading: "${file.name}" (${(file.length / 1e9).toFixed(2)} GB)`);
 
       // Track progress
+      const expectedSize = file.length;
+      console.log(`[Library] Expected file size: ${expectedSize} bytes (${(expectedSize / 1e9).toFixed(2)} GB)`);
+
+      // Guard against nonsensical file sizes (< 50MB for a movie is almost certainly wrong)
+      if (expectedSize < 50 * 1024 * 1024) {
+        console.warn(`[Library] Suspiciously small file size (${(expectedSize / 1e6).toFixed(1)} MB) — may be corrupt torrent metadata`);
+      }
+
       const progressTimer = setInterval(() => {
         if (!this._engines.has(id)) {
           clearInterval(progressTimer);
@@ -267,26 +275,35 @@ class LibraryManager {
         item.downloadSpeed = sw ? sw.downloadSpeed() : 0;
         item.numPeers = sw ? sw.wires.length : 0;
 
-        // Calculate progress from downloaded bytes
-        const downloaded = sw ? sw.downloaded : 0;
-        // torrent-stream tracks total bytes received since engine start
-        // For progress, check how much of the file has been written
+        // Calculate progress from on-disk file size vs expected torrent file size
         const fullPath = path.join(this._libraryPath, item.filePath);
         try {
           if (fs.existsSync(fullPath)) {
             const stat = fs.statSync(fullPath);
-            item.progress = Math.min(100, Math.round((stat.size / file.length) * 100));
+            item.progress = Math.min(100, Math.round((stat.size / expectedSize) * 100));
           }
         } catch {
           // File might not exist yet
         }
 
-        // Check if download is complete
+        // Check if download is complete — require file size to match expected size
+        // (not just progress >= 100) to guard against sparse files or rounding
         if (item.progress >= 100) {
+          const fullPath2 = path.join(this._libraryPath, item.filePath);
+          try {
+            const finalSize = fs.statSync(fullPath2).size;
+            if (finalSize < expectedSize * 0.99) {
+              // File is not actually complete despite rounding to 100%
+              console.warn(`[Library] Progress shows 100% but file size ${finalSize} < expected ${expectedSize} — continuing download`);
+              item.progress = Math.round((finalSize / expectedSize) * 100);
+              return;
+            }
+          } catch { /* ignore */ }
+
           item.status = 'complete';
           item.completedAt = Date.now();
           item.downloadSpeed = 0;
-          console.log(`[Library] Download complete: "${item.name}"`);
+          console.log(`[Library] Download complete: "${item.name}" (${(expectedSize / 1e9).toFixed(2)} GB)`);
           this._stopDownload(id);
           this._saveMetadata();
         }

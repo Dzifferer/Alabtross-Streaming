@@ -15,6 +15,7 @@ const PORT = process.env.PORT || 8080;
 const STREMIO_SERVER = process.env.STREMIO_SERVER || 'http://localhost:11470';
 const TORRENT_CACHE_PATH = process.env.TORRENT_CACHE || path.join(__dirname, '.torrent-cache');
 const LIBRARY_PATH = process.env.LIBRARY_PATH || path.join(TORRENT_CACHE_PATH, 'library');
+let MAX_CONCURRENT_STREAMS = parseInt(process.env.MAX_CONCURRENT_STREAMS, 10) || 5;
 
 // JSON body parsing for library POST/DELETE requests
 app.use(express.json({ limit: '10kb' }));
@@ -51,14 +52,14 @@ const rateLimitCleanupTimer = setInterval(() => {
 let engine = null;
 function getEngine() {
   if (!engine) {
-    engine = new TorrentEngine({ downloadPath: TORRENT_CACHE_PATH });
+    engine = new TorrentEngine({ downloadPath: TORRENT_CACHE_PATH, maxConcurrent: MAX_CONCURRENT_STREAMS });
     console.log(`[TorrentEngine] Initialized, cache path: ${TORRENT_CACHE_PATH}`);
   }
   return engine;
 }
 
 // ─── Library Manager (initialized on startup) ─────────────────────────
-const library = new LibraryManager({ libraryPath: LIBRARY_PATH });
+const library = new LibraryManager({ libraryPath: LIBRARY_PATH, maxConcurrentDownloads: MAX_CONCURRENT_STREAMS });
 
 // Security headers
 app.use((req, res, next) => {
@@ -775,6 +776,24 @@ app.get('/api/vpn/profile/:name', (req, res) => {
   } catch (e) {
     res.status(500).json({ error: 'Cannot read profile' });
   }
+});
+
+// ─── Concurrent Streams Settings API ──────────────────────────────────
+app.get('/api/settings/max-streams', (req, res) => {
+  res.json({ maxConcurrentStreams: MAX_CONCURRENT_STREAMS });
+});
+
+app.post('/api/settings/max-streams', (req, res) => {
+  const value = parseInt(req.body.maxConcurrentStreams, 10);
+  if (!value || value < 1 || value > 20) {
+    return res.status(400).json({ error: 'maxConcurrentStreams must be between 1 and 20' });
+  }
+  MAX_CONCURRENT_STREAMS = value;
+  // Update running engines
+  if (engine) engine._maxConcurrent = value;
+  library._maxConcurrentDownloads = value;
+  console.log(`[Settings] Max concurrent streams updated to ${value}`);
+  res.json({ maxConcurrentStreams: value });
 });
 
 // Serve static files (no caching for JS/CSS to avoid stale code)

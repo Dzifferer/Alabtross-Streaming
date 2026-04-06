@@ -665,7 +665,7 @@ class StremioAPI {
       const saved = localStorage.getItem('livetv_sources');
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) return parsed;
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
       }
     } catch {
       localStorage.removeItem('livetv_sources');
@@ -679,7 +679,7 @@ class StremioAPI {
       return sources;
     }
 
-    // First launch — add default TV source
+    // First launch or empty — add default TV source
     const defaults = [{ ...StremioAPI.DEFAULT_TV_SOURCE }];
     this._saveLiveTVSources(defaults);
     return defaults;

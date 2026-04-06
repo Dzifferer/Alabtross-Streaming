@@ -355,8 +355,17 @@ class LibraryManager {
 
     console.log(`[Library] Found ${toResume.length} interrupted download(s) — resuming...`);
 
+    let started = 0;
     for (const item of toResume) {
       delete item._needsResume;
+
+      // Respect concurrent download limit
+      if (started >= MAX_CONCURRENT_DOWNLOADS) {
+        console.log(`[Library] Queued "${item.name}" — concurrent limit reached, marked for retry`);
+        item.status = 'failed';
+        item.error = 'Queued — re-add to resume (concurrent limit reached during restart)';
+        continue;
+      }
 
       // Check if partial file exists on disk to log resume progress
       if (item.filePath) {
@@ -380,6 +389,7 @@ class LibraryManager {
       }
 
       this._startDownload(item.id);
+      started++;
     }
 
     this._saveMetadata();
@@ -387,7 +397,10 @@ class LibraryManager {
 
   _saveMetadata() {
     try {
-      const data = [...this._items.values()];
+      const data = [...this._items.values()].map(item => {
+        const { _needsResume, ...clean } = item;
+        return clean;
+      });
       const json = JSON.stringify(data, null, 2);
       // Atomic write: write to temp file then rename to prevent corruption
       const tmpFile = this._metadataFile + '.tmp.' + process.pid;

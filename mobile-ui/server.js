@@ -742,8 +742,14 @@ app.get('/api/vpn/profile/:name', (req, res) => {
   }
 });
 
-// Serve static files
-app.use(express.static(path.join(__dirname, 'public')));
+// Serve static files (no caching for JS/CSS to avoid stale code)
+app.use(express.static(path.join(__dirname, 'public'), {
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('.js') || filePath.endsWith('.css') || filePath.endsWith('.html')) {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    }
+  },
+}));
 
 // SPA fallback
 app.get('*', (req, res) => {

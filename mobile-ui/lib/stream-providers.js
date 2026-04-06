@@ -1,14 +1,12 @@
 /**
  * Alabtross — Custom Stream Providers
  *
- * Scrapes popular torrent sources directly, removing the need for
- * Torrentio or any Stremio addon for stream discovery.
- *
  * Providers (in priority order):
- *   - The Pirate Bay  — tried first, JSON API, fast
- *   - YTS (yts.mx)    — Movies with quality/size metadata
- *   - EZTV (eztv.re)  — TV series episodes
- *   - 1337x           — General fallback for both
+ *   - Torrentio       — Primary, pre-indexed torrent database (no Cloudflare)
+ *   - The Pirate Bay   — Fallback, JSON API
+ *   - YTS (yts.mx)    — Fallback, movies with quality/size metadata
+ *   - EZTV (eztv.re)  — Fallback, TV series episodes
+ *   - 1337x           — Fallback, general
  */
 
 const cheerio = require('cheerio');
@@ -79,7 +77,63 @@ function buildMagnet(infoHash, name) {
   return `magnet:?xt=urn:btih:${infoHash}&dn=${encoded}${tr}`;
 }
 
-// ─── The Pirate Bay Provider (Primary) ──────────────
+// ─── Torrentio Provider (Primary) ───────────────────
+
+const TORRENTIO_BASE = 'https://torrentio.strem.io';
+
+async function searchTorrentio(type, imdbId, season, episode) {
+  const streams = [];
+  let stremioId = imdbId;
+  if (type === 'series' && season !== undefined && episode !== undefined) {
+    stremioId = `${imdbId}:${season}:${episode}`;
+  }
+
+  const data = await fetchJSON(`${TORRENTIO_BASE}/stream/${type}/${stremioId}.json`);
+  if (!data || !Array.isArray(data.streams)) {
+    console.log(`[Torrentio] No results for ${type}/${stremioId}`);
+    return streams;
+  }
+
+  for (const s of data.streams) {
+    if (!s.infoHash) continue;
+    const hash = s.infoHash.toLowerCase();
+
+    // Parse title lines from Torrentio format:
+    // Line 1: source + quality info
+    // Line 2: size, seeds, etc.
+    const titleParts = (s.title || '').split('\n');
+    const displayName = s.name || titleParts[0] || 'Unknown';
+    const details = titleParts.slice(1).join(' ').trim();
+
+    // Extract seeds from Torrentio's title (e.g., "👤 45")
+    const seedMatch = details.match(/👤\s*(\d+)/);
+    const seeds = seedMatch ? parseInt(seedMatch[1], 10) : 0;
+
+    // Extract size
+    const sizeMatch = details.match(/([\d.]+\s*(?:GB|MB))/i);
+    const sizeStr = sizeMatch ? sizeMatch[1] : '';
+
+    // Extract quality
+    const qualityMatch = (s.title || '').match(/\b(2160p|1080p|720p|480p)\b/i);
+    const quality = qualityMatch ? qualityMatch[1] : '';
+
+    streams.push({
+      infoHash: hash,
+      title: `${displayName}\n${quality ? quality + ' ' : ''}${sizeStr}${seeds ? ' | Seeds: ' + seeds : ''}${details ? '\n' + details : ''}`,
+      magnetUri: buildMagnet(hash, displayName),
+      quality,
+      size: sizeStr,
+      seeds,
+      fileIdx: s.fileIdx,
+      source: 'Torrentio',
+    });
+  }
+
+  console.log(`[Torrentio] Found ${streams.length} results for ${type}/${stremioId}`);
+  return streams;
+}
+
+// ─── The Pirate Bay Provider (Fallback) ─────────────
 
 async function searchTPB(query) {
   const streams = [];
@@ -319,17 +373,28 @@ async function getMovieStreams(imdbId, title) {
 
   console.log(`[Streams] Searching movie streams for ${id} (title: "${title || 'unknown'}")`);
 
-  const tpbQuery = title || id;
-  const [tpbStreams, ytsStreams, fallbackStreams] = await Promise.all([
-    searchTPB(tpbQuery).catch(e => { console.log(`[TPB] Error: ${e.message}`); return []; }),
-    searchYTS(id).catch(e => { console.log(`[YTS] Error: ${e.message}`); return []; }),
-    search1337x(title || id).catch(e => { console.log(`[1337x] Error: ${e.message}`); return []; }),
-  ]);
+  // Torrentio first (most reliable), then fallback scrapers in parallel
+  const torrentioStreams = await searchTorrentio('movie', id).catch(e => {
+    console.log(`[Torrentio] Error: ${e.message}`);
+    return [];
+  });
 
-  // Deduplicate by infoHash, prefer TPB > YTS > 1337x
+  // If Torrentio returned enough results, skip flaky scrapers
+  let fallbackStreams = [];
+  if (torrentioStreams.length < 3) {
+    const tpbQuery = title || id;
+    const [tpb, yts, x1337] = await Promise.all([
+      searchTPB(tpbQuery).catch(e => { console.log(`[TPB] Error: ${e.message}`); return []; }),
+      searchYTS(id).catch(e => { console.log(`[YTS] Error: ${e.message}`); return []; }),
+      search1337x(title || id).catch(e => { console.log(`[1337x] Error: ${e.message}`); return []; }),
+    ]);
+    fallbackStreams = [...tpb, ...yts, ...x1337];
+  }
+
+  // Deduplicate by infoHash, prefer Torrentio > fallbacks
   const seen = new Set();
   const combined = [];
-  for (const s of [...tpbStreams, ...ytsStreams, ...fallbackStreams]) {
+  for (const s of [...torrentioStreams, ...fallbackStreams]) {
     if (!seen.has(s.infoHash)) {
       seen.add(s.infoHash);
       combined.push(s);
@@ -356,32 +421,42 @@ async function getSeriesStreams(imdbId, season, episode, title) {
 
   console.log(`[Streams] Searching series streams for ${id} ${seTag} (title: "${title || 'unknown'}")`);
 
-  // TPB searches by title + S01E01 tag
-  const tpbQuery = se ? `${title || id} ${seTag}` : (title || id);
+  // Torrentio first (most reliable)
+  const torrentioStreams = await searchTorrentio('series', id, season, episode).catch(e => {
+    console.log(`[Torrentio] Error: ${e.message}`);
+    return [];
+  });
 
-  const [tpbStreams, eztvStreams, fallbackStreams] = await Promise.all([
-    searchTPB(tpbQuery).catch(e => { console.log(`[TPB] Error: ${e.message}`); return []; }),
-    searchEZTV(id).catch(e => { console.log(`[EZTV] Error: ${e.message}`); return []; }),
-    se ? search1337x(`${title || id} ${seTag}`).catch(e => { console.log(`[1337x] Error: ${e.message}`); return []; }) : Promise.resolve([]),
-  ]);
+  // If Torrentio returned enough results, skip flaky scrapers
+  let fallbackCombined = [];
+  if (torrentioStreams.length < 3) {
+    const tpbQuery = se ? `${title || id} ${seTag}` : (title || id);
 
-  // Filter EZTV results to matching season/episode if specified
-  let filteredEztv = eztvStreams;
-  if (se) {
-    filteredEztv = eztvStreams.filter(s =>
-      s.season === season && s.episode === episode
-    );
-    // If exact match fails, try title matching
-    if (filteredEztv.length === 0) {
+    const [tpbStreams, eztvStreams, x1337Streams] = await Promise.all([
+      searchTPB(tpbQuery).catch(e => { console.log(`[TPB] Error: ${e.message}`); return []; }),
+      searchEZTV(id).catch(e => { console.log(`[EZTV] Error: ${e.message}`); return []; }),
+      se ? search1337x(`${title || id} ${seTag}`).catch(e => { console.log(`[1337x] Error: ${e.message}`); return []; }) : Promise.resolve([]),
+    ]);
+
+    // Filter EZTV results to matching season/episode if specified
+    let filteredEztv = eztvStreams;
+    if (se) {
       filteredEztv = eztvStreams.filter(s =>
-        s.title && s.title.toUpperCase().includes(seTag)
+        s.season === season && s.episode === episode
       );
+      if (filteredEztv.length === 0) {
+        filteredEztv = eztvStreams.filter(s =>
+          s.title && s.title.toUpperCase().includes(seTag)
+        );
+      }
     }
+
+    fallbackCombined = [...tpbStreams, ...filteredEztv, ...x1337Streams];
   }
 
   const seen = new Set();
   const combined = [];
-  for (const s of [...tpbStreams, ...filteredEztv, ...fallbackStreams]) {
+  for (const s of [...torrentioStreams, ...fallbackCombined]) {
     if (!seen.has(s.infoHash)) {
       seen.add(s.infoHash);
       combined.push(s);

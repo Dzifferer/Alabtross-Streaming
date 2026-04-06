@@ -62,6 +62,31 @@
     customAddCinemeta: $('#custom-add-cinemeta'),
   };
 
+  // ─── Recently Played ─────────────────────────────
+
+  function getRecentlyPlayed() {
+    try {
+      const saved = localStorage.getItem('recently_played');
+      return saved ? JSON.parse(saved) : [];
+    } catch { return []; }
+  }
+
+  function addRecentlyPlayed(type, meta) {
+    const items = getRecentlyPlayed();
+    const id = meta.imdb_id || meta.id;
+    // Remove duplicate if exists
+    const filtered = items.filter(i => i.id !== id);
+    filtered.unshift({
+      id,
+      type,
+      name: meta.name,
+      poster: meta.poster || '',
+      releaseInfo: meta.releaseInfo || meta.year || '',
+    });
+    // Keep last 20
+    localStorage.setItem('recently_played', JSON.stringify(filtered.slice(0, 20)));
+  }
+
   // ─── VPN Safety Check ───────────────────────────
 
   async function checkVPNStatus() {
@@ -220,6 +245,12 @@
     dom.homeCatalogs.innerHTML = '';
     dom.homeLoading.classList.remove('hidden');
 
+    // Custom mode: simple 3-row layout
+    if (api.getMode() === 'custom' && !type) {
+      await loadHomeCustom();
+      return;
+    }
+
     const types = type ? [type] : ['movie', 'series'];
     const allCatalogs = [];
 
@@ -247,6 +278,73 @@
     // Load each catalog row
     for (const catalog of allCatalogs) {
       await loadCatalogRow(catalog);
+    }
+  }
+
+  async function loadHomeCustom() {
+    // Row 1: Recently Played
+    const recent = getRecentlyPlayed();
+    dom.homeLoading.classList.add('hidden');
+
+    if (recent.length > 0) {
+      const recentRow = document.createElement('div');
+      recentRow.className = 'catalog-row fade-in';
+      recentRow.innerHTML = `
+        <div class="catalog-row-header">
+          <h3 class="catalog-row-title">Recently Played</h3>
+        </div>
+        <div class="catalog-scroll">${recent.slice(0, 20).map(item => cardHTML(item, item.type)).join('')}</div>
+      `;
+      dom.homeCatalogs.appendChild(recentRow);
+      attachCardListeners(recentRow);
+    }
+
+    // Row 2: Movies — first movie catalog from addons
+    const movieCatalogs = await api.getCatalogs('movie');
+    if (movieCatalogs.length > 0) {
+      const cat = movieCatalogs[0];
+      const movieItems = await api.getCatalogItems(cat.addonUrl, cat.type, cat.id);
+      if (movieItems.length > 0) {
+        const movieRow = document.createElement('div');
+        movieRow.className = 'catalog-row fade-in';
+        movieRow.innerHTML = `
+          <div class="catalog-row-header">
+            <h3 class="catalog-row-title">Movies</h3>
+          </div>
+          <div class="catalog-scroll">${movieItems.slice(0, 20).map(item => cardHTML(item, 'movie')).join('')}</div>
+        `;
+        dom.homeCatalogs.appendChild(movieRow);
+        attachCardListeners(movieRow);
+      }
+    }
+
+    // Row 3: Shows — first series catalog from addons
+    const seriesCatalogs = await api.getCatalogs('series');
+    if (seriesCatalogs.length > 0) {
+      const cat = seriesCatalogs[0];
+      const seriesItems = await api.getCatalogItems(cat.addonUrl, cat.type, cat.id);
+      if (seriesItems.length > 0) {
+        const seriesRow = document.createElement('div');
+        seriesRow.className = 'catalog-row fade-in';
+        seriesRow.innerHTML = `
+          <div class="catalog-row-header">
+            <h3 class="catalog-row-title">Shows</h3>
+          </div>
+          <div class="catalog-scroll">${seriesItems.slice(0, 20).map(item => cardHTML(item, 'series')).join('')}</div>
+        `;
+        dom.homeCatalogs.appendChild(seriesRow);
+        attachCardListeners(seriesRow);
+      }
+    }
+
+    // If nothing at all loaded, show empty state
+    if (dom.homeCatalogs.children.length === 0) {
+      dom.homeCatalogs.innerHTML = `
+        <div class="empty-state">
+          <p>No content available</p>
+          <p style="font-size:13px;color:var(--text-muted)">Add Cinemeta addon in Settings to browse content</p>
+        </div>
+      `;
     }
   }
 
@@ -395,6 +493,9 @@
     state.currentMeta = meta;
     state.currentType = type;
     dom.pageTitle.textContent = meta.name || 'Details';
+
+    // Track recently played
+    addRecentlyPlayed(type, meta);
 
     const bgImage = meta.background || meta.poster || '';
     const genres = (meta.genres || []).slice(0, 4);

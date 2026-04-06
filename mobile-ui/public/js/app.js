@@ -180,6 +180,50 @@
     document.body.prepend(banner);
   }
 
+  // ─── Autoplay-safe play helper ───────────────────
+  // Browsers block unmuted autoplay when the user gesture chain is broken
+  // (e.g. after awaiting canplay). This helper falls back to muted playback
+  // and shows a tap-to-unmute overlay so the user can restore audio.
+
+  async function safePlay(videoEl) {
+    try {
+      await videoEl.play();
+    } catch (e) {
+      if (e.name === 'NotAllowedError') {
+        videoEl.muted = true;
+        await videoEl.play();
+        showUnmuteOverlay(videoEl);
+      } else {
+        throw e;
+      }
+    }
+  }
+
+  function showUnmuteOverlay(videoEl) {
+    // Remove any existing unmute overlay
+    const existing = document.getElementById('unmute-overlay');
+    if (existing) existing.remove();
+
+    const btn = document.createElement('button');
+    btn.id = 'unmute-overlay';
+    btn.setAttribute('aria-label', 'Tap to unmute');
+    btn.innerHTML = `
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+        <line x1="23" y1="9" x2="17" y2="15"/>
+        <line x1="17" y1="9" x2="23" y2="15"/>
+      </svg>
+      <span>Tap to unmute</span>
+    `;
+    btn.addEventListener('click', () => {
+      videoEl.muted = false;
+      btn.remove();
+    });
+
+    const container = document.getElementById('player-container');
+    container.appendChild(btn);
+  }
+
   // ─── Navigation ──────────────────────────────────
 
   function navigateTo(view, opts = {}) {
@@ -223,6 +267,9 @@
     if (state.currentView !== 'player') {
       dom.videoPlayer.pause();
       dom.videoPlayer.src = '';
+      dom.videoPlayer.muted = false;
+      const unmuteBtn = document.getElementById('unmute-overlay');
+      if (unmuteBtn) unmuteBtn.remove();
     }
   }
 
@@ -550,7 +597,7 @@
         dom.videoPlayer.addEventListener('error', onError, { once: true });
       });
 
-      await dom.videoPlayer.play();
+      await safePlay(dom.videoPlayer);
       dom.playerOverlay.classList.add('hidden');
     } catch (e) {
       dom.playerOverlay.innerHTML = `
@@ -1248,7 +1295,7 @@
       });
 
       if (statusInterval) clearInterval(statusInterval);
-      await dom.videoPlayer.play();
+      await safePlay(dom.videoPlayer);
       dom.playerOverlay.classList.add('hidden');
     } catch (e) {
       if (statusInterval) clearInterval(statusInterval);
@@ -1563,7 +1610,7 @@
         dom.videoPlayer.addEventListener('error', onError, { once: true });
       });
 
-      await dom.videoPlayer.play();
+      await safePlay(dom.videoPlayer);
       dom.playerOverlay.classList.add('hidden');
     } catch (e) {
       let hint = escapeHTML(e.message);

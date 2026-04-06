@@ -21,6 +21,7 @@
     currentSeason: 1,
     searchTimeout: null,
     vpnVerified: false,
+    activeFilter: '',     // currently selected filter chip value
   };
 
   // ─── DOM Refs ────────────────────────────────────
@@ -50,6 +51,9 @@
     castStopBtn: $('#cast-stop-btn'),
     bottomNav: $('#bottom-nav'),
     navBtns: $$('.nav-btn'),
+    // Filter bar
+    filterBar: $('#filter-bar'),
+    filterChips: $$('.filter-chip'),
     // Library
     libraryContent: $('#library-content'),
     libraryEmpty: $('#library-empty'),
@@ -252,6 +256,12 @@
     // Show/hide top bar in player
     const hideTop = view === 'player';
     $('#top-bar').style.display = hideTop ? 'none' : '';
+
+    // Show search bar and filter bar only on browsing views
+    const browsingViews = ['home', 'movies', 'series', 'search'];
+    const showSearchAndFilters = browsingViews.includes(view);
+    dom.searchBar.classList.toggle('search-bar--hidden', !showSearchAndFilters);
+    dom.filterBar.classList.toggle('filter-bar--hidden', !showSearchAndFilters);
   }
 
   // ─── Home / Catalog Loading ──────────────────────
@@ -536,11 +546,16 @@
   // ─── Search ──────────────────────────────────────
 
   function initSearch() {
+    // Search toggle now focuses the always-visible search input
     dom.searchToggle.addEventListener('click', () => {
-      const isHidden = dom.searchBar.classList.contains('hidden');
-      dom.searchBar.classList.toggle('hidden');
-      if (isHidden) {
-        dom.searchInput.focus();
+      dom.searchInput.focus();
+      if (state.currentView !== 'search') {
+        navigateTo('search');
+      }
+    });
+
+    dom.searchInput.addEventListener('focus', () => {
+      if (state.currentView !== 'search') {
         navigateTo('search');
       }
     });
@@ -551,8 +566,10 @@
 
       clearTimeout(state.searchTimeout);
       if (q.length >= 2) {
+        // Clear active filter when typing a manual search
+        clearActiveFilter();
         state.searchTimeout = setTimeout(() => performSearch(q), 400);
-      } else {
+      } else if (q.length === 0 && !state.activeFilter) {
         dom.searchResults.innerHTML = '';
         dom.searchEmpty.classList.remove('hidden');
       }
@@ -565,6 +582,72 @@
       dom.searchEmpty.classList.remove('hidden');
       dom.searchInput.focus();
     });
+  }
+
+  // ─── Filters ──────────────────────────────────────
+
+  function initFilters() {
+    dom.filterChips.forEach(chip => {
+      chip.addEventListener('click', () => {
+        const filter = chip.dataset.filter;
+
+        // Update active state
+        dom.filterChips.forEach(c => c.classList.remove('active'));
+        chip.classList.add('active');
+        state.activeFilter = filter;
+
+        if (!filter) {
+          // "All" selected — go back to home catalogs
+          dom.searchInput.value = '';
+          dom.searchClear.classList.add('hidden');
+          navigateTo('home');
+          loadHome(state.currentType);
+        } else {
+          // Filter selected — search for this term
+          dom.searchInput.value = '';
+          dom.searchClear.classList.add('hidden');
+          navigateTo('search');
+          performFilterSearch(filter);
+        }
+      });
+    });
+  }
+
+  function clearActiveFilter() {
+    state.activeFilter = '';
+    dom.filterChips.forEach(c => c.classList.remove('active'));
+    // Re-activate "All" chip
+    const allChip = document.querySelector('.filter-chip[data-filter=""]');
+    if (allChip) allChip.classList.add('active');
+  }
+
+  async function performFilterSearch(filter) {
+    dom.searchEmpty.classList.add('hidden');
+    dom.searchResults.innerHTML = `
+      <div class="loading-state" style="grid-column:1/-1">
+        <div class="spinner"></div>
+        <p>Finding ${escapeHTML(filter)} titles...</p>
+      </div>
+    `;
+
+    const typeFilter = state.currentType || null;
+    const results = await api.search(filter, typeFilter);
+
+    if (results.length === 0) {
+      dom.searchResults.innerHTML = `
+        <div class="empty-state" style="grid-column:1/-1">
+          <p>No results for "${escapeHTML(filter)}"</p>
+        </div>
+      `;
+      return;
+    }
+
+    dom.searchResults.innerHTML = results.map(item => {
+      const type = item.type || 'movie';
+      return cardHTML(item, type);
+    }).join('');
+
+    attachCardListeners(dom.searchResults);
   }
 
   async function performSearch(query) {
@@ -1396,58 +1479,118 @@
     return bytes + ' B';
   }
 
-  // ─── Share / QR Code ─────────────────────────────
+  // ─── Share / VPN QR Code ──────────────────────────
 
-  function getShareURL() {
-    const custom = $('#share-custom-url');
-    if (custom && custom.value.trim()) return custom.value.trim();
-    // Auto-detect: use current page URL
-    return window.location.origin;
-  }
+  let currentVPNConfig = '';
 
-  function generateShareQR() {
+  function generateConfigQR(config) {
     const container = $('#qr-code-container');
-    const urlText = $('#share-url-text');
-    const url = getShareURL();
-
     try {
-      const svg = QRCode.toSVG(url, {
-        moduleSize: 8,
+      const svg = QRCode.toSVG(config, {
+        moduleSize: 6,
         margin: 3,
         dark: '#000000',
         light: '#ffffff',
       });
       container.innerHTML = svg;
-      urlText.textContent = url;
     } catch (e) {
-      container.innerHTML = '<p style="color:#ff6b6b;">URL too long for QR code</p>';
-      urlText.textContent = url;
+      container.innerHTML = '<p style="color:#ff6b6b;">Config too long for QR code — try a shorter config</p>';
     }
   }
 
-  function initShare() {
-    const copyBtn = $('#share-copy-btn');
-    const regenBtn = $('#share-regenerate-btn');
+  async function loadVPNProfiles() {
+    const list = $('#vpn-profile-list');
+    try {
+      const resp = await fetch('/api/vpn/profiles');
+      const data = await resp.json();
 
-    copyBtn.addEventListener('click', () => {
-      const url = getShareURL();
-      navigator.clipboard.writeText(url).then(() => {
-        showToast('URL copied to clipboard');
-      }).catch(() => {
-        // Fallback for older browsers
-        const ta = document.createElement('textarea');
-        ta.value = url;
-        ta.style.position = 'fixed';
-        ta.style.left = '-9999px';
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand('copy');
-        document.body.removeChild(ta);
-        showToast('URL copied to clipboard');
+      if (data.profiles.length === 0) {
+        list.innerHTML = `<div class="vpn-profile-empty">
+          <p>${data.error || 'No VPN profiles found'}</p>
+          <p style="margin-top:8px;">Create profiles with: <code>pivpn add</code></p>
+        </div>`;
+        return;
+      }
+
+      list.innerHTML = data.profiles.map(name => `
+        <button class="vpn-profile-btn" data-profile="${name}">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4-4v2"/>
+            <circle cx="8.5" cy="7" r="4"/><path d="M20 8v6M23 11h-6"/>
+          </svg>
+          ${name}
+        </button>
+      `).join('');
+
+      list.querySelectorAll('.vpn-profile-btn').forEach(btn => {
+        btn.addEventListener('click', () => selectVPNProfile(btn.dataset.profile));
       });
+    } catch (e) {
+      list.innerHTML = '<div class="vpn-profile-empty">Failed to load VPN profiles</div>';
+    }
+  }
+
+  async function selectVPNProfile(name) {
+    const container = $('#qr-code-container');
+    const profileName = $('#vpn-profile-name');
+    const urlBox = $('#share-url-display');
+    const urlText = $('#share-url-text');
+
+    // Highlight selected button
+    $$('.vpn-profile-btn').forEach(b => b.classList.toggle('active', b.dataset.profile === name));
+
+    container.innerHTML = '<div class="spinner"></div><p>Loading config...</p>';
+
+    try {
+      const resp = await fetch(`/api/vpn/profile/${encodeURIComponent(name)}`);
+      if (!resp.ok) throw new Error('Profile not found');
+      const data = await resp.json();
+      currentVPNConfig = data.config;
+
+      generateConfigQR(data.config);
+      profileName.textContent = name;
+      profileName.classList.remove('hidden');
+      urlBox.classList.remove('hidden');
+      urlText.textContent = `${name}.conf`;
+    } catch (e) {
+      container.innerHTML = '<p style="color:#ff6b6b;">Failed to load profile</p>';
+      currentVPNConfig = '';
+    }
+  }
+
+  function copyToClipboard(text) {
+    navigator.clipboard.writeText(text).then(() => {
+      showToast('Copied to clipboard');
+    }).catch(() => {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      showToast('Copied to clipboard');
+    });
+  }
+
+  function initShare() {
+    $('#share-copy-btn').addEventListener('click', () => {
+      if (currentVPNConfig) copyToClipboard(currentVPNConfig);
     });
 
-    regenBtn.addEventListener('click', generateShareQR);
+    $('#share-manual-btn').addEventListener('click', () => {
+      const input = $('#share-custom-config');
+      const config = input.value.trim();
+      if (!config) { showToast('Paste a WireGuard config first'); return; }
+      currentVPNConfig = config;
+      generateConfigQR(config);
+      $('#vpn-profile-name').textContent = 'Manual Config';
+      $('#vpn-profile-name').classList.remove('hidden');
+      $('#share-url-display').classList.remove('hidden');
+      $('#share-url-text').textContent = 'manual.conf';
+      $$('.vpn-profile-btn').forEach(b => b.classList.remove('active'));
+    });
   }
 
   // ─── Settings ────────────────────────────────────
@@ -1652,31 +1795,23 @@
 
     // Remote Playback API — supported in Chrome, Edge, Safari (Chromecast + AirPlay)
     if (!video.remote) {
-      // Fallback: if the browser doesn't support Remote Playback API, keep button hidden
       return;
     }
 
-    // Disable the default browser remote playback prompt that some browsers show
-    // so we control the UX through our own button
     video.disableRemotePlayback = false;
 
-    // Watch for device availability
-    video.remote.watchAvailability((available) => {
-      castState.available = available;
-      dom.castBtn.classList.toggle('hidden', !available);
-    }).catch(() => {
-      // watchAvailability not supported — show button and let prompt() fail gracefully
-      castState.available = true;
-      dom.castBtn.classList.remove('hidden');
-    });
+    // Always show the cast button — let prompt() handle device discovery
+    dom.castBtn.classList.remove('hidden');
 
     // Cast button: prompt device picker
     dom.castBtn.addEventListener('click', async () => {
       try {
         await video.remote.prompt();
       } catch (e) {
-        if (e.name !== 'NotAllowedError') {
-          showToast('No cast devices found');
+        if (e.name === 'NotFoundError') {
+          showToast('No cast devices found on your network');
+        } else if (e.name !== 'NotAllowedError') {
+          showToast('Cast not available');
         }
       }
     });
@@ -1728,6 +1863,9 @@
       btn.addEventListener('click', () => {
         const view = btn.dataset.view;
         state.viewHistory = [];
+        clearActiveFilter();
+        dom.searchInput.value = '';
+        dom.searchClear.classList.add('hidden');
         if (view === 'movies') {
           navigateTo('movies');
           loadHome('movie');
@@ -1739,7 +1877,7 @@
           loadLibrary();
         } else if (view === 'share') {
           navigateTo('share');
-          generateShareQR();
+          loadVPNProfiles();
         } else {
           navigateTo('home');
           loadHome();
@@ -1752,6 +1890,9 @@
 
     // Search
     initSearch();
+
+    // Filters
+    initFilters();
 
     // Settings
     initSettings();

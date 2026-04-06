@@ -332,9 +332,14 @@ class TorrentEngine {
     });
 
     // Pipe torrent file through FFmpeg: copy video, transcode audio to AAC,
-    // output fragmented MP4 that can stream progressively
+    // output fragmented MP4 that can stream progressively.
+    // -map 0:v:0 -map 0:a:0? ensures we explicitly select the first video and
+    // first audio track (the '?' makes audio optional so files without audio
+    // don't cause FFmpeg to error out).
     const ffmpeg = spawn('ffmpeg', [
       '-i', 'pipe:0',
+      '-map', '0:v:0',
+      '-map', '0:a:0?',
       '-c:v', 'copy',
       '-c:a', 'aac',
       '-b:a', '192k',

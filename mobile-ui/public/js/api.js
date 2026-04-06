@@ -8,6 +8,20 @@
 
 const CINEMETA_URL = 'https://v3-cinemeta.strem.io';
 
+// Torrentio requires a config prefix to return results from all providers.
+// Without this, the bare URL may return empty or limited results.
+const TORRENTIO_BASE = 'https://torrentio.strem.io';
+const TORRENTIO_CONFIG = 'sort=qualitysize|qualityfilter=other';
+
+// Common trackers for building magnet URIs (Torrentio returns bare infoHash)
+const MAGNET_TRACKERS = [
+  'udp://tracker.opentrackr.org:1337/announce',
+  'udp://open.stealth.si:80/announce',
+  'udp://tracker.openbittorrent.com:6969/announce',
+  'udp://exodus.desync.com:6969/announce',
+  'udp://tracker.torrent.eu.org:451/announce',
+];
+
 class StremioAPI {
   constructor() {
     this.mode = localStorage.getItem('streaming_mode') || 'custom';
@@ -317,7 +331,7 @@ class StremioAPI {
     if (type === 'series' && seasonEpisode && seasonEpisode.season !== undefined && seasonEpisode.episode !== undefined) {
       torrentioId = `${imdbId}:${seasonEpisode.season}:${seasonEpisode.episode}`;
     }
-    const torrentioUrl = `https://torrentio.strem.io/stream/${type}/${torrentioId}.json`;
+    const torrentioUrl = `${TORRENTIO_BASE}/${TORRENTIO_CONFIG}/stream/${type}/${torrentioId}.json`;
 
     // Build backend scraper URL
     let backendUrl;
@@ -370,16 +384,17 @@ class StremioAPI {
       return data.streams.map(s => {
         if (!s.infoHash) return null;
         const titleParts = (s.title || '').split('\n');
-        const seedMatch = (s.title || '').match(/👤\s*(\d+)/);
+        const seedMatch = (s.title || '').match(/(?:👤|⬆️|⬆|seeders?|peers?|S)\s*[:：]?\s*(\d+)/i);
         const seeds = seedMatch ? parseInt(seedMatch[1], 10) : 0;
         const sizeMatch = (s.title || '').match(/([\d.]+\s*(?:GB|MB))/i);
         const qualityMatch = (s.title || '').match(/\b(2160p|1080p|720p|480p)\b/i);
 
+        const trackerParams = MAGNET_TRACKERS.map(t => `&tr=${encodeURIComponent(t)}`).join('');
         return {
           infoHash: s.infoHash.toLowerCase(),
           title: s.title || s.name || 'Unknown',
           name: s.name || 'Torrentio',
-          magnetUri: `magnet:?xt=urn:btih:${s.infoHash}`,
+          magnetUri: `magnet:?xt=urn:btih:${s.infoHash}${trackerParams}`,
           quality: qualityMatch ? qualityMatch[1] : '',
           size: sizeMatch ? sizeMatch[1] : '',
           seeds,

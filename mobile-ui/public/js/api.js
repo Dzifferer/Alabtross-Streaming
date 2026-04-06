@@ -624,16 +624,24 @@ class StremioAPI {
   // Known Stremio TV addons that users can quick-add
   static KNOWN_TV_ADDONS = [
     {
-      url: 'https://www.usatv.click',
+      url: 'https://848b3516657c-usatv.baby-beamup.club',
       name: 'USA TV',
-      description: 'US live TV channels — news, sports, entertainment',
+      description: 'US live TV — news, sports, entertainment (180+ channels)',
     },
     {
-      url: 'https://iptv-addon.fly.dev',
-      name: 'IPTV Addon',
-      description: 'Community IPTV channels from around the world',
+      url: 'https://7a82163c306e-livetv.baby-beamup.club',
+      name: 'Live TV',
+      description: 'International live TV channels',
     },
   ];
+
+  // Default source added on first launch
+  static DEFAULT_TV_SOURCE = {
+    type: 'stremio-tv',
+    url: 'https://848b3516657c-usatv.baby-beamup.club',
+    name: 'USA TV',
+    enabled: true,
+  };
 
   // ─── Legacy single-playlist support (migration) ──
 
@@ -666,7 +674,10 @@ class StremioAPI {
       return sources;
     }
 
-    return [];
+    // First launch — add default TV source
+    const defaults = [{ ...StremioAPI.DEFAULT_TV_SOURCE }];
+    this._saveLiveTVSources(defaults);
+    return defaults;
   }
 
   _saveLiveTVSources(sources) {

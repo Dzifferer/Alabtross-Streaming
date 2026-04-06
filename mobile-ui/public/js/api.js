@@ -496,6 +496,34 @@ class StremioAPI {
       bestStream: best ? best.stream : null,
     };
   }
+  // ─── Live TV / IPTV ──────────────────────────────
+
+  getPlaylistUrl() {
+    return localStorage.getItem('iptv_playlist_url') || '';
+  }
+
+  setPlaylistUrl(url) {
+    localStorage.setItem('iptv_playlist_url', url);
+  }
+
+  async getChannels() {
+    const playlistUrl = this.getPlaylistUrl();
+    if (!playlistUrl) return [];
+
+    try {
+      const resp = await fetch('/api/iptv/channels?url=' + encodeURIComponent(playlistUrl));
+      if (!resp.ok) return [];
+      const data = await resp.json();
+      return data.channels || [];
+    } catch {
+      return [];
+    }
+  }
+
+  getChannelStreamUrl(channel) {
+    if (!channel || !channel.url) return null;
+    return '/api/iptv/stream?url=' + encodeURIComponent(channel.url);
+  }
 }
 
 window.api = new StremioAPI();

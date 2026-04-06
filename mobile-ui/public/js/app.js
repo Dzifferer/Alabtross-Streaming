@@ -1131,6 +1131,26 @@
       if (statusInterval) clearInterval(statusInterval);
       await dom.videoPlayer.play();
       dom.playerOverlay.classList.add('hidden');
+
+      // Auto-add to library when streaming starts
+      if (stream._customMode && stream.infoHash && stream.magnetUri && state.currentMeta) {
+        const meta = state.currentMeta;
+        fetch('/api/library/add', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            imdbId: meta.imdb_id || meta.id || '',
+            type: state.currentType || 'movie',
+            name: meta.name || '',
+            poster: meta.poster || '',
+            year: meta.releaseInfo || meta.year || '',
+            magnetUri: stream.magnetUri,
+            infoHash: stream.infoHash,
+            quality: stream.quality || '',
+            size: stream.size || '',
+          }),
+        }).catch(() => {});
+      }
     } catch (e) {
       if (statusInterval) clearInterval(statusInterval);
       let hint = escapeHTML(e.message);

@@ -481,7 +481,7 @@ app.get('/api/library/:id/stream/remux', rateLimit, async (req, res) => {
     '-c:v', 'copy',
     '-c:a', 'aac',
     '-b:a', '192k',
-    '-movflags', 'frag_keyframe+empty_moov+faststart',
+    '-movflags', 'frag_keyframe+empty_moov',
     '-f', 'mp4',
     '-loglevel', 'warning',
     'pipe:1',

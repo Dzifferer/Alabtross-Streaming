@@ -1537,7 +1537,7 @@
           dom.videoPlayer.removeEventListener('error', onError);
           clearTimeout(timer);
         };
-        const timeoutMs = isMkv ? 90000 : 60000;
+        const timeoutMs = isMkv ? 240000 : 60000;
         const timer = setTimeout(() => {
           cleanup();
           reject(new Error(isMkv

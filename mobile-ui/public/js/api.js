@@ -351,10 +351,9 @@ class StremioAPI {
       }
     }
 
-    // Filter out codecs/formats that browsers can't play
+    // Filter out truly unplayable formats — keep x265/HEVC since server can remux
     return combined.filter(s => {
       const t = s.title || '';
-      if (/\bx265\b/i.test(t) || /\bH\.?265\b/i.test(t) || /\bHEVC\b/i.test(t)) return false;
       if (/\.avi\b/i.test(t) || /\bXviD\b/i.test(t) || /\bDivX\b/i.test(t)) return false;
       if (/\.wmv\b/i.test(t)) return false;
       return true;
@@ -418,8 +417,10 @@ class StremioAPI {
     // Custom mode: use local streaming endpoint
     if (stream._customMode && stream.infoHash) {
       if (!/^[0-9a-f]{40}$/i.test(stream.infoHash)) return null;
-      // Use remux endpoint for MKV streams (FFmpeg remuxes to fragmented MP4)
-      const needsRemux = stream.format === 'MKV';
+      // Use remux endpoint for MKV and x265/HEVC streams (FFmpeg remuxes to fragmented MP4)
+      const title = stream.title || '';
+      const isHEVC = /\bx265\b/i.test(title) || /\bH\.?265\b/i.test(title) || /\bHEVC\b/i.test(title);
+      const needsRemux = stream.format === 'MKV' || stream.needsRemux || isHEVC;
       let url = needsRemux
         ? `/api/play/${stream.infoHash}/remux`
         : `/api/play/${stream.infoHash}`;

@@ -873,7 +873,7 @@
 
     if (streams.length === 0) {
       const hint = api.getMode() === 'custom'
-        ? 'No torrents found on TPB, YTS, EZTV, or 1337x — check server terminal for details'
+        ? 'No torrents found on Torrentio, TPB, YTS, EZTV, 1337x, or Nyaa — check server terminal for details'
         : 'Try adding more stream addons in Settings';
       container.innerHTML = `
         <div class="empty-state" style="padding:32px 0">
@@ -990,13 +990,20 @@
     let formatBadge = '';
     if (stream._customMode && stream.format) {
       const playable = stream.browserPlayable;
-      const fColor = playable ? 'var(--success)' : 'var(--warning)';
-      const fBg = playable ? 'rgba(0,206,201,0.1)' : 'rgba(253,203,110,0.1)';
-      formatBadge = `<span class="stream-quality" style="background:${fBg};color:${fColor};margin-right:4px">${escapeHTML(stream.format)}</span>`;
+      const remuxable = stream.needsRemux || stream.remuxPlayable;
+      const fColor = playable ? 'var(--success)' : (remuxable ? 'var(--accent)' : 'var(--warning)');
+      const fBg = playable ? 'rgba(0,206,201,0.1)' : (remuxable ? 'rgba(99,110,250,0.1)' : 'rgba(253,203,110,0.1)');
+      const label = stream.needsRemux ? `${stream.format} (remux)` : stream.format;
+      formatBadge = `<span class="stream-quality" style="background:${fBg};color:${fColor};margin-right:4px">${escapeHTML(label)}</span>`;
+    }
+
+    let batchBadge = '';
+    if (stream.isBatch) {
+      batchBadge = `<span class="stream-quality" style="background:rgba(155,89,182,0.15);color:#b388ff;margin-right:4px">BATCH</span>`;
     }
 
     return `
-      <div class="stream-item${stream._customMode && !stream.browserPlayable ? ' stream-non-playable' : ''}" data-index="${index}" id="stream-${index}">
+      <div class="stream-item${stream._customMode && !stream.browserPlayable && !stream.remuxPlayable ? ' stream-non-playable' : ''}" data-index="${index}" id="stream-${index}">
         <div class="stream-icon">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polygon points="5 3 19 12 5 21 5 3"/>
@@ -1006,7 +1013,7 @@
           <div class="stream-title">${mainTitle}</div>
           <div class="stream-detail">${detail || addon}${quality ? ' &middot; ' + quality : ''}</div>
         </div>
-        ${speedBadge}
+        ${batchBadge}${formatBadge}${speedBadge}
       </div>
     `;
   }

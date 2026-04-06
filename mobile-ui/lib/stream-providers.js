@@ -10,6 +10,8 @@
  */
 
 const cheerio = require('cheerio');
+const https = require('https');
+const http = require('http');
 
 // ─── Helpers ────────────────────────────────────────
 
@@ -19,43 +21,59 @@ function sanitizeImdbId(id) {
   return null;
 }
 
-async function fetchJSON(url, timeoutMs = 10000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const resp = await fetch(url, {
-      signal: controller.signal,
+// Use Node's https module instead of undici fetch — undici has connectivity
+// issues on ARM/Jetson with Cloudflare IPs, while https module works fine.
+function httpGet(url, timeoutMs = 10000) {
+  return new Promise((resolve, reject) => {
+    const mod = url.startsWith('https') ? https : http;
+    const req = mod.get(url, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
+      timeout: timeoutMs,
+      family: 4, // Force IPv4
+    }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        httpGet(res.headers.location, timeoutMs).then(resolve, reject);
+        res.resume();
+        return;
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        resolve({ ok: false, status: res.statusCode, body: '' });
+        return;
+      }
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', chunk => body += chunk);
+      res.on('end', () => resolve({ ok: true, status: 200, body }));
     });
-    clearTimeout(timer);
-    if (!resp.ok) {
-      console.log(`[Provider] fetchJSON ${resp.status} for ${url}`);
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
+  });
+}
+
+async function fetchJSON(url, timeoutMs = 10000) {
+  try {
+    const res = await httpGet(url, timeoutMs);
+    if (!res.ok) {
+      console.log(`[Provider] fetchJSON ${res.status} for ${url}`);
       return null;
     }
-    return await resp.json();
+    return JSON.parse(res.body);
   } catch (e) {
-    clearTimeout(timer);
     console.log(`[Provider] fetchJSON error for ${url}: ${e.message}`);
     return null;
   }
 }
 
 async function fetchHTML(url, timeoutMs = 10000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const resp = await fetch(url, {
-      signal: controller.signal,
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
-    });
-    clearTimeout(timer);
-    if (!resp.ok) {
-      console.log(`[Provider] fetchHTML ${resp.status} for ${url}`);
+    const res = await httpGet(url, timeoutMs);
+    if (!res.ok) {
+      console.log(`[Provider] fetchHTML ${res.status} for ${url}`);
       return null;
     }
-    return await resp.text();
+    return res.body;
   } catch (e) {
-    clearTimeout(timer);
     console.log(`[Provider] fetchHTML error for ${url}: ${e.message}`);
     return null;
   }

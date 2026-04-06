@@ -83,14 +83,19 @@ class TorrentEngine {
       return torrent.files[fileIdx];
     }
 
-    // Find largest video file
-    let best = null;
-    for (const file of torrent.files) {
-      const ext = path.extname(file.name).toLowerCase();
-      if (!VIDEO_EXTENSIONS.has(ext)) continue;
-      if (!best || file.length > best.length) best = file;
-    }
-    return best;
+    // Filter to video files only
+    const videoFiles = torrent.files.filter(f =>
+      VIDEO_EXTENSIONS.has(path.extname(f.name).toLowerCase())
+    );
+    if (videoFiles.length === 0) return null;
+    if (videoFiles.length === 1) return videoFiles[0];
+
+    // Skip files that look like samples, extras, or trailers
+    const dominated = /\b(sample|trailer|extra|bonus|featurette|interview)\b/i;
+    const mainFiles = videoFiles.filter(f => !dominated.test(f.name));
+
+    // If filtering removed everything, fall back to full list
+    return (mainFiles.length > 0 ? mainFiles : videoFiles)[0];
   }
 
   /**

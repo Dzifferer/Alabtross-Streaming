@@ -12,6 +12,7 @@
 const cheerio = require('cheerio');
 const https = require('https');
 const http = require('http');
+const { TRACKERS } = require('./file-safety');
 
 // ─── Helpers ────────────────────────────────────────
 
@@ -80,18 +81,8 @@ async function fetchHTML(url, timeoutMs = 10000) {
 }
 
 function buildMagnet(infoHash, name) {
-  const trackers = [
-    'udp://open.demonii.com:1337/announce',
-    'udp://tracker.openbittorrent.com:80',
-    'udp://tracker.coppersurfer.tk:6969',
-    'udp://glotorrents.pw:6969/announce',
-    'udp://tracker.opentrackr.org:1337/announce',
-    'udp://torrent.gresille.org:80/announce',
-    'udp://p4p.arenabg.com:1337',
-    'udp://tracker.leechers-paradise.org:6969',
-  ];
   const encoded = encodeURIComponent(name || 'Unknown');
-  const tr = trackers.map(t => `&tr=${encodeURIComponent(t)}`).join('');
+  const tr = TRACKERS.map(t => `&tr=${encodeURIComponent(t)}`).join('');
   return `magnet:?xt=urn:btih:${infoHash}&dn=${encoded}${tr}`;
 }
 
@@ -328,11 +319,6 @@ async function search1337x(query) {
 // ─── Stream Filtering & Ranking ─────────────────────
 
 const MIN_SEEDS = 3;
-
-// Formats browsers can play natively
-const BROWSER_PLAYABLE = /\.(mp4|webm|m4v)$/i;
-// Formats that need external player or won't work in browser
-const NON_BROWSER = /\b(mkv|avi|xvid|divx|wmv|flv|mpeg|mpg)\b/i;
 
 /**
  * Detect the likely file format from the torrent name.

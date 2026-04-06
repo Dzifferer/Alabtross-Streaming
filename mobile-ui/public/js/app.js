@@ -29,6 +29,18 @@
   const $ = (sel) => document.querySelector(sel);
   const $$ = (sel) => document.querySelectorAll(sel);
 
+  const VIEW_MAP = {
+    'home': 'view-home',
+    'movies': 'view-home',
+    'series': 'view-home',
+    'search': 'view-search',
+    'detail': 'view-detail',
+    'settings': 'view-settings',
+    'library': 'view-library',
+    'share': 'view-share',
+    'player': 'view-player',
+  };
+
   const dom = {
     backBtn: $('#back-btn'),
     pageTitle: $('#page-title'),
@@ -176,20 +188,7 @@
     // Hide all views, show target
     $$('.view').forEach(v => v.classList.remove('active'));
 
-    // Map nav views to their actual view IDs
-    const viewMap = {
-      'home': 'view-home',
-      'movies': 'view-home',
-      'series': 'view-home',
-      'search': 'view-search',
-      'detail': 'view-detail',
-      'settings': 'view-settings',
-      'library': 'view-library',
-      'share': 'view-share',
-      'player': 'view-player',
-    };
-
-    const target = $(('#' + (viewMap[view] || 'view-home')));
+    const target = $(('#' + (VIEW_MAP[view] || 'view-home')));
     if (target) target.classList.add('active');
 
     // Update UI
@@ -206,13 +205,7 @@
       state.currentView = prev;
       $$('.view').forEach(v => v.classList.remove('active'));
 
-      const viewMap = {
-        'home': 'view-home', 'movies': 'view-home', 'series': 'view-home',
-        'search': 'view-search', 'detail': 'view-detail',
-        'settings': 'view-settings', 'library': 'view-library',
-        'share': 'view-share', 'player': 'view-player',
-      };
-      const target = $('#' + (viewMap[prev] || 'view-home'));
+      const target = $('#' + (VIEW_MAP[prev] || 'view-home'));
       if (target) target.classList.add('active');
       updateNavUI(prev);
       updateTopBar(prev);
@@ -414,8 +407,17 @@
 
   // ─── Card Rendering ──────────────────────────────
 
+  function isSafePosterUrl(url) {
+    if (!url) return false;
+    try {
+      const u = new URL(url, window.location.origin);
+      return u.protocol === 'https:' || u.protocol === 'http:' || u.pathname.startsWith('/');
+    } catch { return false; }
+  }
+
   function cardHTML(item, type) {
-    const poster = item.poster || '';
+    const rawPoster = item.poster || '';
+    const poster = isSafePosterUrl(rawPoster) ? rawPoster : '';
     const title = escapeHTML(item.name || 'Unknown');
     const year = item.releaseInfo || item.year || '';
     const id = item.imdb_id || item.id;

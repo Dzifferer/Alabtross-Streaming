@@ -18,23 +18,12 @@
 
 const torrentStream = require('torrent-stream');
 const path = require('path');
+const { TRACKERS, isFileNameSafe, getMimeType, sanitizeFilename } = require('./file-safety');
 
 const IDLE_TIMEOUT = 30 * 60 * 1000; // 30 minutes
 const MAX_CONCURRENT = 5;
 const MAX_FILE_SIZE = 20 * 1024 * 1024 * 1024; // 20 GB
 const MAGIC_READ_SIZE = 16;
-
-const VIDEO_EXTENSIONS = new Set([
-  '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg',
-]);
-
-const DANGEROUS_EXTENSIONS = new Set([
-  '.exe', '.bat', '.cmd', '.com', '.scr', '.pif', '.msi', '.msp',
-  '.ps1', '.vbs', '.vbe', '.js', '.jse', '.wsf', '.wsh', '.sh',
-  '.bash', '.csh', '.app', '.action', '.command', '.run', '.bin',
-  '.dll', '.so', '.dylib', '.deb', '.rpm', '.apk', '.dmg', '.iso',
-  '.jar', '.py', '.rb', '.pl', '.php', '.html', '.htm', '.svg',
-]);
 
 const VIDEO_SIGNATURES = [
   { offset: 4, bytes: Buffer.from('ftyp') },       // MP4/M4V/MOV
@@ -91,20 +80,7 @@ class TorrentEngine {
         uploads: 0,
         dht: true,
         path: this._downloadPath,
-        trackers: [
-          'udp://tracker.opentrackr.org:1337/announce',
-          'udp://open.stealth.si:80/announce',
-          'udp://tracker.openbittorrent.com:6969/announce',
-          'udp://exodus.desync.com:6969/announce',
-          'udp://tracker.torrent.eu.org:451/announce',
-          'udp://open.demonii.com:1337/announce',
-          'udp://tracker.coppersurfer.tk:6969',
-          'udp://p4p.arenabg.com:1337',
-          'udp://tracker.leechers-paradise.org:6969',
-          'udp://explodie.org:6969/announce',
-          'wss://tracker.openwebtorrent.com',
-          'wss://tracker.btorrent.xyz',
-        ],
+        trackers: TRACKERS,
       });
 
       placeholder.engine = engine;
@@ -132,7 +108,7 @@ class TorrentEngine {
         console.log(`[TorrentEngine] Torrent ready: "${engine.torrent.name}", ${engine.files.length} files, ${peerCount} peers`);
 
         for (const file of engine.files) {
-          if (!this._isFileNameSafe(file.name)) {
+          if (!isFileNameSafe(file.name)) {
             file.deselect();
             console.log(`[Security] Deselected: "${file.name}"`);
           }
@@ -176,7 +152,7 @@ class TorrentEngine {
 
     if (fileIdx !== undefined && fileIdx >= 0 && fileIdx < files.length) {
       file = files[fileIdx];
-      if (!this._isFileNameSafe(file.name)) {
+      if (!isFileNameSafe(file.name)) {
         console.warn(`[Security] Rejected fileIdx ${fileIdx}: unsafe "${file.name}"`);
         return null;
       }
@@ -248,8 +224,8 @@ class TorrentEngine {
     this._touchTorrent(hash);
 
     const fileSize = file.length;
-    const mimeType = this._getMimeType(file.name);
-    const safeFilename = this._sanitizeFilename(file.name);
+    const mimeType = getMimeType(file.name);
+    const safeFilename = sanitizeFilename(file.name);
 
     const securityHeaders = {
       'Content-Type': mimeType,
@@ -325,20 +301,6 @@ class TorrentEngine {
 
   // ─── Security ─────────────────────────────────────
 
-  _isFileNameSafe(filename) {
-    if (!filename) return false;
-    const normalized = path.normalize(filename);
-    if (normalized.startsWith('..') || path.isAbsolute(normalized)) return false;
-    if (filename.includes('..')) return false;
-    const parts = path.basename(filename).split('.');
-    for (let i = 1; i < parts.length; i++) {
-      const ext = '.' + parts[i].toLowerCase();
-      if (DANGEROUS_EXTENSIONS.has(ext)) return false;
-    }
-    const finalExt = path.extname(filename).toLowerCase();
-    return VIDEO_EXTENSIONS.has(finalExt);
-  }
-
   _validateMagicBytes(file) {
     return new Promise((resolve, reject) => {
       if (file.length < MAGIC_READ_SIZE) { resolve(false); return; }
@@ -361,10 +323,6 @@ class TorrentEngine {
         resolve(matchesVideoSignature(header));
       }
     });
-  }
-
-  _sanitizeFilename(filename) {
-    return path.basename(filename).replace(/[^\w\s.\-()[\]]/g, '_').substring(0, 200);
   }
 
   // ─── Private ──────────────────────────────────────
@@ -405,15 +363,6 @@ class TorrentEngine {
     if (oldestHash) this._removeTorrent(oldestHash);
   }
 
-  _getMimeType(filename) {
-    const ext = path.extname(filename).toLowerCase();
-    const types = {
-      '.mp4': 'video/mp4', '.mkv': 'video/x-matroska', '.avi': 'video/x-msvideo',
-      '.mov': 'video/quicktime', '.wmv': 'video/x-ms-wmv', '.flv': 'video/x-flv',
-      '.webm': 'video/webm', '.m4v': 'video/mp4', '.mpg': 'video/mpeg', '.mpeg': 'video/mpeg',
-    };
-    return types[ext] || null;
-  }
 }
 
 function matchesVideoSignature(header) {

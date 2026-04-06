@@ -3,6 +3,8 @@ const path = require('path');
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
+const { URL } = require('url');
+const dns = require('dns');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 const { getMovieStreams, getSeriesStreams } = require('./lib/stream-providers');
 const TorrentEngine = require('./lib/torrent-engine');
@@ -15,7 +17,7 @@ const TORRENT_CACHE_PATH = process.env.TORRENT_CACHE || path.join(__dirname, '.t
 const LIBRARY_PATH = process.env.LIBRARY_PATH || path.join(__dirname, 'library');
 
 // JSON body parsing for library POST/DELETE requests
-app.use(express.json());
+app.use(express.json({ limit: '10kb' }));
 
 // ─── Rate Limiting (simple in-memory, per-IP) ────────────────────────
 const rateLimitMap = new Map();
@@ -38,7 +40,7 @@ function rateLimit(req, res, next) {
 }
 
 // Clean up rate limit map periodically
-setInterval(() => {
+const rateLimitCleanupTimer = setInterval(() => {
   const now = Date.now();
   for (const [ip, entry] of rateLimitMap) {
     if (now - entry.start > RATE_LIMIT_WINDOW) rateLimitMap.delete(ip);
@@ -210,7 +212,7 @@ app.delete('/api/library/:id', rateLimit, (req, res) => {
 });
 
 // GET /api/library/:id/stream — stream a completed library item
-app.get('/api/library/:id/stream', rateLimit, (req, res) => {
+app.get('/api/library/:id/stream', rateLimit, async (req, res) => {
   const item = library.getItem(req.params.id);
   if (!item) return res.status(404).json({ error: 'Item not found' });
   if (item.status !== 'complete') {
@@ -220,7 +222,13 @@ app.get('/api/library/:id/stream', rateLimit, (req, res) => {
   const filePath = library.getFilePath(req.params.id);
   if (!filePath) return res.status(404).json({ error: 'File not found' });
 
-  const stat = fs.statSync(filePath);
+  let stat;
+  try {
+    stat = await fs.promises.stat(filePath);
+  } catch {
+    return res.status(404).json({ error: 'File not found on disk' });
+  }
+
   const fileSize = stat.size;
   const mimeType = library.getMimeType(filePath);
   const safeFilename = path.basename(filePath).replace(/[^\w\s.\-()[\]]/g, '_').substring(0, 200);
@@ -269,12 +277,48 @@ app.get('/api/library/:id/stream', rateLimit, (req, res) => {
 let playlistCache = null;
 const PLAYLIST_CACHE_TTL = 60 * 60 * 1000; // 1 hour
 
-function fetchUrl(url) {
+// ─── SSRF Protection ──────────────────────────────────────────────────
+const BLOCKED_IP_RANGES = [
+  /^127\./, /^10\./, /^172\.(1[6-9]|2\d|3[01])\./, /^192\.168\./,
+  /^169\.254\./, /^0\./, /^100\.(6[4-9]|[7-9]\d|1[0-2]\d)\./, /^::1$/,
+  /^fc00:/, /^fe80:/, /^fd/, /^localhost$/i,
+];
+
+function isBlockedHost(hostname) {
+  return BLOCKED_IP_RANGES.some(re => re.test(hostname));
+}
+
+async function validateUrlNotSSRF(urlStr) {
+  const parsed = new URL(urlStr);
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    throw new Error('Invalid URL protocol');
+  }
+  if (isBlockedHost(parsed.hostname)) {
+    throw new Error('Blocked host');
+  }
+  // Resolve DNS to check the actual IP
+  try {
+    const { address } = await dns.promises.lookup(parsed.hostname);
+    if (isBlockedHost(address)) {
+      throw new Error('Blocked host (resolved IP)');
+    }
+  } catch (err) {
+    if (err.message.includes('Blocked')) throw err;
+    // DNS resolution failure — allow the request to fail naturally
+  }
+}
+
+const MAX_REDIRECTS = 5;
+
+function fetchUrl(url, redirectCount = 0) {
+  if (redirectCount > MAX_REDIRECTS) {
+    return Promise.reject(new Error('Too many redirects'));
+  }
   return new Promise((resolve, reject) => {
     const mod = url.startsWith('https') ? https : http;
     const req = mod.get(url, { headers: { 'User-Agent': 'Alabtross/1.0' }, timeout: 15000 }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return fetchUrl(res.headers.location).then(resolve, reject);
+        return fetchUrl(res.headers.location, redirectCount + 1).then(resolve, reject);
       }
       if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
       let body = '';
@@ -319,12 +363,9 @@ app.get('/api/iptv/channels', rateLimit, async (req, res) => {
   if (!playlistUrl) return res.status(400).json({ error: 'Missing url parameter' });
 
   try {
-    const u = new URL(playlistUrl);
-    if (!['http:', 'https:'].includes(u.protocol)) {
-      return res.status(400).json({ error: 'Invalid URL protocol' });
-    }
+    await validateUrlNotSSRF(playlistUrl);
   } catch {
-    return res.status(400).json({ error: 'Invalid URL' });
+    return res.status(400).json({ error: 'Invalid or blocked URL' });
   }
 
   // Return cached if same URL and fresh
@@ -345,18 +386,16 @@ app.get('/api/iptv/channels', rateLimit, async (req, res) => {
 });
 
 // GET /api/iptv/stream?url=<stream-url> — proxy HLS/stream to avoid CORS
-app.get('/api/iptv/stream', rateLimit, (req, res) => {
+app.get('/api/iptv/stream', rateLimit, async (req, res) => {
   const streamUrl = req.query.url;
   if (!streamUrl) return res.status(400).json({ error: 'Missing url parameter' });
 
   let parsedUrl;
   try {
     parsedUrl = new URL(streamUrl);
-    if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
-      return res.status(400).json({ error: 'Invalid URL protocol' });
-    }
+    await validateUrlNotSSRF(streamUrl);
   } catch {
-    return res.status(400).json({ error: 'Invalid URL' });
+    return res.status(400).json({ error: 'Invalid or blocked URL' });
   }
 
   const mod = parsedUrl.protocol === 'https:' ? https : http;
@@ -365,8 +404,14 @@ app.get('/api/iptv/stream', rateLimit, (req, res) => {
     timeout: 15000,
   }, (upstream) => {
     if (upstream.statusCode >= 300 && upstream.statusCode < 400 && upstream.headers.location) {
-      // Follow redirect
-      res.redirect(302, '/api/iptv/stream?url=' + encodeURIComponent(upstream.headers.location));
+      // Follow redirect through proxy (SSRF check happens on re-entry)
+      const redirectCount = parseInt(req.query._rd || '0', 10);
+      if (redirectCount >= MAX_REDIRECTS) {
+        upstream.resume();
+        return res.status(502).json({ error: 'Too many redirects' });
+      }
+      const rdUrl = '/api/iptv/stream?url=' + encodeURIComponent(upstream.headers.location) + '&_rd=' + (redirectCount + 1);
+      res.redirect(302, rdUrl);
       upstream.resume();
       return;
     }
@@ -452,8 +497,12 @@ app.listen(PORT, '0.0.0.0', () => {
 });
 
 // Graceful shutdown
-process.on('SIGTERM', () => {
+function shutdown() {
+  clearInterval(rateLimitCleanupTimer);
   if (engine) engine.destroy();
   library.destroy();
   process.exit(0);
-});
+}
+
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);

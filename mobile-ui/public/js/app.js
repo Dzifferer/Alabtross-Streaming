@@ -1652,31 +1652,23 @@
 
     // Remote Playback API — supported in Chrome, Edge, Safari (Chromecast + AirPlay)
     if (!video.remote) {
-      // Fallback: if the browser doesn't support Remote Playback API, keep button hidden
       return;
     }
 
-    // Disable the default browser remote playback prompt that some browsers show
-    // so we control the UX through our own button
     video.disableRemotePlayback = false;
 
-    // Watch for device availability
-    video.remote.watchAvailability((available) => {
-      castState.available = available;
-      dom.castBtn.classList.toggle('hidden', !available);
-    }).catch(() => {
-      // watchAvailability not supported — show button and let prompt() fail gracefully
-      castState.available = true;
-      dom.castBtn.classList.remove('hidden');
-    });
+    // Always show the cast button — let prompt() handle device discovery
+    dom.castBtn.classList.remove('hidden');
 
     // Cast button: prompt device picker
     dom.castBtn.addEventListener('click', async () => {
       try {
         await video.remote.prompt();
       } catch (e) {
-        if (e.name !== 'NotAllowedError') {
-          showToast('No cast devices found');
+        if (e.name === 'NotFoundError') {
+          showToast('No cast devices found on your network');
+        } else if (e.name !== 'NotAllowedError') {
+          showToast('Cast not available');
         }
       }
     });

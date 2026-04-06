@@ -93,7 +93,11 @@ function buildMagnet(infoHash, name) {
 
 // ─── Torrentio Provider (Primary) ───────────────────
 
-const TORRENTIO_BASE = 'https://torrentio.strem.io';
+// Torrentio requires a configuration prefix to return results from all providers.
+// The bare URL (no config) may return empty or limited results.
+// This default config enables all major providers sorted by quality+size.
+const TORRENTIO_CONFIG = process.env.TORRENTIO_CONFIG || 'sort=qualitysize|qualityfilter=other';
+const TORRENTIO_BASE = process.env.TORRENTIO_BASE || 'https://torrentio.strem.io';
 
 async function searchTorrentio(type, imdbId, season, episode) {
   const streams = [];
@@ -102,7 +106,10 @@ async function searchTorrentio(type, imdbId, season, episode) {
     stremioId = `${imdbId}:${season}:${episode}`;
   }
 
-  const data = await fetchJSON(`${TORRENTIO_BASE}/stream/${type}/${stremioId}.json`);
+  const url = TORRENTIO_CONFIG
+    ? `${TORRENTIO_BASE}/${TORRENTIO_CONFIG}/stream/${type}/${stremioId}.json`
+    : `${TORRENTIO_BASE}/stream/${type}/${stremioId}.json`;
+  const data = await fetchJSON(url);
   if (!data || !Array.isArray(data.streams)) {
     console.log(`[Torrentio] No results for ${type}/${stremioId}`);
     return streams;
@@ -119,9 +126,11 @@ async function searchTorrentio(type, imdbId, season, episode) {
     const displayName = s.name || titleParts[0] || 'Unknown';
     const details = titleParts.slice(1).join(' ').trim();
 
-    // Extract seeds from Torrentio's title (e.g., "👤 45")
-    const seedMatch = details.match(/👤\s*(\d+)/);
-    const seeds = seedMatch ? parseInt(seedMatch[1], 10) : 0;
+    // Extract seeds from Torrentio's title — handles multiple formats:
+    // "👤 45", "⬆️ 45", "seeders: 45", "S: 45", "seeds: 45"
+    const seedMatch = details.match(/(?:👤|⬆️|⬆|seeders?|peers?|S)\s*[:：]?\s*(\d+)/i)
+      || (s.title || '').match(/(?:👤|⬆️|⬆|seeders?|peers?|S)\s*[:：]?\s*(\d+)/i);
+    const seeds = seedMatch ? parseInt(seedMatch[1], 10) : -1; // -1 = unknown (don't filter)
 
     // Extract size
     const sizeMatch = details.match(/([\d.]+\s*(?:GB|MB))/i);
@@ -133,11 +142,12 @@ async function searchTorrentio(type, imdbId, season, episode) {
 
     streams.push({
       infoHash: hash,
-      title: `${displayName}\n${quality ? quality + ' ' : ''}${sizeStr}${seeds ? ' | Seeds: ' + seeds : ''}${details ? '\n' + details : ''}`,
+      title: `${displayName}\n${quality ? quality + ' ' : ''}${sizeStr}${seeds > 0 ? ' | Seeds: ' + seeds : ''}${details ? '\n' + details : ''}`,
       magnetUri: buildMagnet(hash, displayName),
       quality,
       size: sizeStr,
-      seeds,
+      seeds: seeds >= 0 ? seeds : 0,
+      _seedsUnknown: seeds < 0,
       fileIdx: s.fileIdx,
       source: 'Torrentio',
     });
@@ -226,30 +236,66 @@ async function searchYTS(imdbId) {
 
 // ─── EZTV Provider (TV Series) ──────────────────────
 
-async function searchEZTV(imdbId) {
+async function searchEZTV(imdbId, targetSeason, targetEpisode) {
   const streams = [];
   // EZTV wants numeric IMDB ID without 'tt' prefix
   const numericId = imdbId.replace(/^tt0*/, '');
 
-  // Fetch multiple pages for long-running series (up to 200 results)
-  const pages = [1, 2, 3, 4];
-  const limit = 50;
-  const allTorrents = [];
-
-  for (const page of pages) {
-    const data = await fetchJSON(
-      `https://eztv.re/api/get-torrents?imdb_id=${numericId}&limit=${limit}&page=${page}`
-    );
-    if (!data || !data.torrents || data.torrents.length === 0) break;
-    allTorrents.push(...data.torrents);
-    // Stop if we got fewer than limit (no more pages)
-    if (data.torrents.length < limit) break;
-  }
-
-  if (allTorrents.length === 0) {
+  // First, get page 1 to find total_count and check for matches
+  const limit = 100;
+  const firstPage = await fetchJSON(
+    `https://eztv.re/api/get-torrents?imdb_id=${numericId}&limit=${limit}&page=1`
+  );
+  if (!firstPage || !firstPage.torrents || firstPage.torrents.length === 0) {
     console.log(`[EZTV] No results for ${imdbId} (numeric: ${numericId})`);
     return streams;
   }
+
+  const allTorrents = [...firstPage.torrents];
+  const totalCount = firstPage.torrents_count || allTorrents.length;
+  const totalPages = Math.ceil(totalCount / limit);
+
+  // Build a season/episode tag to look for in titles
+  const seTag = targetSeason !== undefined && targetEpisode !== undefined
+    ? `S${String(targetSeason).padStart(2, '0')}E${String(targetEpisode).padStart(2, '0')}`
+    : null;
+
+  // Check if first page already has our target episode
+  let foundTarget = seTag ? allTorrents.some(t =>
+    (t.season === targetSeason && t.episode === targetEpisode) ||
+    (t.title || t.filename || '').toUpperCase().includes(seTag)
+  ) : true;
+
+  // If target not found and there are more pages, fetch more aggressively
+  // EZTV returns newest first, so older seasons need deeper pagination
+  if (!foundTarget && totalPages > 1) {
+    // Fetch up to 10 more pages (1000 more results) to find the target episode
+    const maxPages = Math.min(totalPages, 11);
+    const pagePromises = [];
+    for (let page = 2; page <= maxPages; page++) {
+      pagePromises.push(
+        fetchJSON(`https://eztv.re/api/get-torrents?imdb_id=${numericId}&limit=${limit}&page=${page}`)
+          .catch(() => null)
+      );
+    }
+    const pageResults = await Promise.all(pagePromises);
+    for (const data of pageResults) {
+      if (data && data.torrents && data.torrents.length > 0) {
+        allTorrents.push(...data.torrents);
+      }
+    }
+  } else if (totalPages > 1 && totalPages <= 4) {
+    // Small show — fetch remaining pages sequentially
+    for (let page = 2; page <= totalPages; page++) {
+      const data = await fetchJSON(
+        `https://eztv.re/api/get-torrents?imdb_id=${numericId}&limit=${limit}&page=${page}`
+      );
+      if (!data || !data.torrents || data.torrents.length === 0) break;
+      allTorrents.push(...data.torrents);
+    }
+  }
+
+  console.log(`[EZTV] Fetched ${allTorrents.length}/${totalCount} torrents for ${imdbId} (numeric: ${numericId})`);
 
   for (const t of allTorrents) {
     if (!t.hash) continue;
@@ -433,7 +479,9 @@ async function searchNyaa(query, season, episode) {
 
 // ─── Stream Filtering & Ranking ─────────────────────
 
-const MIN_SEEDS = 1;
+// Only filter torrents that we KNOW are dead (confirmed 0 seeds).
+// Streams where seed count couldn't be parsed are kept (_seedsUnknown).
+const MIN_SEEDS = 0;
 
 /**
  * Detect the likely file format from the torrent name.
@@ -466,8 +514,9 @@ function needsRemux(name) {
  * - Sort: native-playable first, then remuxable, then by seeds
  */
 function filterAndRank(streams) {
-  // Filter dead torrents
-  let filtered = streams.filter(s => (s.seeds || 0) >= MIN_SEEDS);
+  // Filter confirmed-dead torrents (seeds === 0 and seed count was actually parsed).
+  // Keep streams where seed count is unknown (_seedsUnknown) — they may still be alive.
+  let filtered = streams.filter(s => s._seedsUnknown || (s.seeds || 0) >= MIN_SEEDS);
 
   // Tag each stream with format info
   for (const s of filtered) {
@@ -588,15 +637,29 @@ async function getSeriesStreams(imdbId, season, episode, title) {
   const anime = isLikelyAnime(title);
 
   let fallbackCombined = [];
-  if (usableTorrentio.length < 3) {
-    console.log(`[Streams] Only ${usableTorrentio.length} usable Torrentio results, querying fallbacks...`);
+  // For series, always run fallbacks in parallel with Torrentio results,
+  // since multi-season shows need broader coverage
+  const needsFallback = usableTorrentio.length < 5;
+  if (needsFallback) {
+    if (usableTorrentio.length < 3) {
+      console.log(`[Streams] Only ${usableTorrentio.length} usable Torrentio results, querying all fallbacks...`);
+    } else {
+      console.log(`[Streams] ${usableTorrentio.length} Torrentio results, supplementing with EZTV...`);
+    }
     const tpbQuery = se ? `${title || id} ${seTag}` : (title || id);
 
     const promises = [
-      searchTPB(tpbQuery).catch(e => { console.log(`[TPB] Error: ${e.message}`); return []; }),
-      searchEZTV(id).catch(e => { console.log(`[EZTV] Error: ${e.message}`); return []; }),
-      se ? search1337x(`${title || id} ${seTag}`).catch(e => { console.log(`[1337x] Error: ${e.message}`); return []; }) : Promise.resolve([]),
+      // Always search EZTV for series (it has good season/episode tagging)
+      searchEZTV(id, season, episode).catch(e => { console.log(`[EZTV] Error: ${e.message}`); return []; }),
     ];
+
+    // Only run expensive scrapers if Torrentio results are very low
+    if (usableTorrentio.length < 3) {
+      promises.push(
+        searchTPB(tpbQuery).catch(e => { console.log(`[TPB] Error: ${e.message}`); return []; }),
+        se ? search1337x(`${title || id} ${seTag}`).catch(e => { console.log(`[1337x] Error: ${e.message}`); return []; }) : Promise.resolve([]),
+      );
+    }
 
     // Always search Nyaa for anime, or if title suggests it
     if (anime || usableTorrentio.length === 0) {
@@ -606,8 +669,12 @@ async function getSeriesStreams(imdbId, season, episode, title) {
     }
 
     const results = await Promise.all(promises);
-    const [tpbStreams, eztvStreams, x1337Streams] = results;
-    const nyaaStreams = results[3] || [];
+    const eztvStreams = results[0] || [];
+    const tpbStreams = usableTorrentio.length < 3 ? (results[1] || []) : [];
+    const x1337Streams = usableTorrentio.length < 3 ? (results[2] || []) : [];
+    const nyaaStreams = (anime || usableTorrentio.length === 0)
+      ? (results[results.length - 1] || [])
+      : [];
 
     // Filter EZTV results to matching season/episode if specified
     let filteredEztv = eztvStreams;

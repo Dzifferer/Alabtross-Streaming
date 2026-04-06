@@ -285,7 +285,7 @@
       <div class="card" data-type="${type}" data-id="${id}">
         <div class="card-poster">
           ${poster
-            ? `<img src="${poster}" alt="${title}" class="loading" onload="this.classList.remove('loading')" onerror="this.style.display='none'">`
+            ? `<img src="${poster}" alt="${title}" class="loading">`
             : ''}
           <div class="poster-placeholder">${!poster ? title : ''}</div>
         </div>
@@ -304,6 +304,12 @@
       if (card) {
         openDetail(card.dataset.type, card.dataset.id);
       }
+    });
+
+    // Attach load/error handlers to poster images (CSP forbids inline handlers)
+    container.querySelectorAll('img.loading').forEach(img => {
+      img.addEventListener('load', () => img.classList.remove('loading'));
+      img.addEventListener('error', () => { img.style.display = 'none'; });
     });
   }
 
@@ -734,11 +740,12 @@
       dom.playerOverlay.innerHTML = `
         <p style="color:var(--danger)">Playback failed</p>
         <p style="font-size:13px;color:var(--text-muted)">${escapeHTML(e.message)}</p>
-        <button onclick="window.app.goBack()" style="
+        <button id="player-go-back" style="
           margin-top:16px; padding:10px 24px; background:var(--accent);
           border:none; border-radius:8px; color:white; font-size:14px; cursor:pointer;
         ">Go Back</button>
       `;
+      document.getElementById('player-go-back').addEventListener('click', () => goBack());
     }
   }
 

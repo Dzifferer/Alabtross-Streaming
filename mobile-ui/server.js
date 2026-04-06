@@ -9,6 +9,34 @@ const PORT = process.env.PORT || 8080;
 const STREMIO_SERVER = process.env.STREMIO_SERVER || 'http://localhost:11470';
 const TORRENT_CACHE_PATH = process.env.TORRENT_CACHE || path.join(__dirname, '.torrent-cache');
 
+// ─── Rate Limiting (simple in-memory, per-IP) ────────────────────────
+const rateLimitMap = new Map();
+const RATE_LIMIT_WINDOW = 60 * 1000; // 1 minute
+const RATE_LIMIT_MAX = 30;           // max requests per window
+
+function rateLimit(req, res, next) {
+  const ip = req.ip || req.socket.remoteAddress;
+  const now = Date.now();
+  let entry = rateLimitMap.get(ip);
+  if (!entry || now - entry.start > RATE_LIMIT_WINDOW) {
+    entry = { start: now, count: 0 };
+    rateLimitMap.set(ip, entry);
+  }
+  entry.count++;
+  if (entry.count > RATE_LIMIT_MAX) {
+    return res.status(429).json({ error: 'Too many requests — try again later' });
+  }
+  next();
+}
+
+// Clean up rate limit map periodically
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, entry] of rateLimitMap) {
+    if (now - entry.start > RATE_LIMIT_WINDOW) rateLimitMap.delete(ip);
+  }
+}, RATE_LIMIT_WINDOW);
+
 // ─── Torrent Engine (lazy-initialized on first custom-mode request) ───
 let engine = null;
 function getEngine() {
@@ -53,7 +81,7 @@ app.use('/stremio-api', (req, res, next) => {
 // ─── Custom Mode API Routes ───────────────────────────────────────────
 
 // GET /api/streams/movie/:imdbId
-app.get('/api/streams/movie/:imdbId', async (req, res) => {
+app.get('/api/streams/movie/:imdbId', rateLimit, async (req, res) => {
   const { imdbId } = req.params;
   if (!/^tt\d{7,10}$/.test(imdbId)) {
     return res.status(400).json({ error: 'Invalid IMDB ID' });
@@ -68,7 +96,7 @@ app.get('/api/streams/movie/:imdbId', async (req, res) => {
 });
 
 // GET /api/streams/series/:imdbId?season=N&episode=N
-app.get('/api/streams/series/:imdbId', async (req, res) => {
+app.get('/api/streams/series/:imdbId', rateLimit, async (req, res) => {
   const { imdbId } = req.params;
   if (!/^tt\d{7,10}$/.test(imdbId)) {
     return res.status(400).json({ error: 'Invalid IMDB ID' });
@@ -86,7 +114,7 @@ app.get('/api/streams/series/:imdbId', async (req, res) => {
 
 // GET /api/play/:infoHash — stream video from torrent
 // Optional query: ?fileIdx=N&magnet=<uri>
-app.get('/api/play/:infoHash', (req, res) => {
+app.get('/api/play/:infoHash', rateLimit, (req, res) => {
   const { infoHash } = req.params;
   if (!/^[0-9a-f]{40}$/i.test(infoHash)) {
     return res.status(400).json({ error: 'Invalid infoHash' });
@@ -94,7 +122,19 @@ app.get('/api/play/:infoHash', (req, res) => {
   const fileIdx = req.query.fileIdx !== undefined
     ? parseInt(req.query.fileIdx, 10)
     : undefined;
-  const magnet = req.query.magnet || infoHash;
+
+  // Validate magnet URI if provided — must be a proper magnet link
+  // containing this exact infoHash (prevents using the endpoint to
+  // fetch arbitrary content)
+  let magnet = infoHash;
+  if (req.query.magnet) {
+    const magnetStr = req.query.magnet;
+    if (!magnetStr.startsWith('magnet:?') ||
+        !magnetStr.toLowerCase().includes(infoHash.toLowerCase())) {
+      return res.status(400).json({ error: 'Magnet URI does not match infoHash' });
+    }
+    magnet = magnetStr;
+  }
 
   getEngine().serveStream(req, res, magnet, fileIdx);
 });

@@ -279,12 +279,12 @@ html, body {
 
 /* ===== Search Bar ===== */
 #search-bar {
-  padding: 8px 16px 12px;
+  padding: 10px 16px 8px;
   background: var(--bg);
   z-index: 99;
 }
 
-#search-bar.hidden {
+#search-bar.search-bar--hidden {
   display: none;
 }
 
@@ -299,9 +299,78 @@ html, body {
   transition: border-color 0.2s;
 }
 
+.search-input-wrap--prominent {
+  background: var(--bg-elevated);
+  border: 1px solid rgba(255,255,255,0.12);
+  padding: 12px 18px;
+}
+
 .search-input-wrap:focus-within {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+/* ===== Filter Bar ===== */
+#filter-bar {
+  padding: 0 0 8px;
+  background: var(--bg);
+  z-index: 98;
+}
+
+#filter-bar.filter-bar--hidden {
+  display: none;
+}
+
+.filter-scroll {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 4px 16px 4px;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.filter-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.filter-chip {
+  flex-shrink: 0;
+  padding: 7px 16px;
+  border-radius: 20px;
+  border: 1px solid rgba(255,255,255,0.1);
+  background: none;
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.filter-chip:active {
+  transform: scale(0.95);
+}
+
+.filter-chip.active {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+
+/* Custom theme overrides for filter bar */
+.theme-custom .filter-chip.active {
+  background: #1a5c38;
+  border-color: #1a5c38;
+}
+
+.theme-custom .filter-chip {
+  border-color: rgba(26, 92, 56, 0.2);
+}
+
+.theme-custom .search-input-wrap--prominent {
+  background: #0f1511;
+  border-color: rgba(26, 92, 56, 0.2);
 }
 
 .search-input-wrap svg {

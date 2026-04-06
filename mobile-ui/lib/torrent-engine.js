@@ -1,43 +1,33 @@
 /**
  * Alabtross — Torrent Streaming Engine
  *
- * Uses WebTorrent to download torrents and serve video files over
- * HTTP with range-request support. Replaces the Stremio server's
- * /hlsv2/ torrent→HLS functionality.
+ * Pure JavaScript torrent client using torrent-stream (same engine
+ * as Peerflix/Popcorn Time). No native C++ modules required.
+ *
+ * Streams video files over HTTP with range-request support.
  *
  * Security layers:
  *   1. Only video file extensions are ever served or downloaded
  *   2. Magic byte validation ensures the file is a real video container
  *   3. Path traversal protection rejects filenames with ../ or absolute paths
  *   4. Max file size cap prevents disk exhaustion
- *   5. Non-video files are deselected so WebTorrent never downloads them
+ *   5. Non-video files are deselected so they never download
  *   6. Content-Disposition forces safe inline playback
  *   7. Idle cleanup + concurrency limit bound resource usage
  */
 
+const torrentStream = require('torrent-stream');
 const path = require('path');
-
-// WebTorrent v2+ is ESM-only — use dynamic import
-let _WebTorrent = null;
-async function loadWebTorrent() {
-  if (!_WebTorrent) {
-    const mod = await import('webtorrent');
-    _WebTorrent = mod.default || mod;
-  }
-  return _WebTorrent;
-}
 
 const IDLE_TIMEOUT = 30 * 60 * 1000; // 30 minutes
 const MAX_CONCURRENT = 5;
 const MAX_FILE_SIZE = 20 * 1024 * 1024 * 1024; // 20 GB
-const MAGIC_READ_SIZE = 16; // bytes needed to check file signatures
+const MAGIC_READ_SIZE = 16;
 
-// Video file extensions we'll serve
 const VIDEO_EXTENSIONS = new Set([
   '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg',
 ]);
 
-// Known dangerous extensions that should NEVER be served regardless
 const DANGEROUS_EXTENSIONS = new Set([
   '.exe', '.bat', '.cmd', '.com', '.scr', '.pif', '.msi', '.msp',
   '.ps1', '.vbs', '.vbe', '.js', '.jse', '.wsf', '.wsh', '.sh',
@@ -46,127 +36,132 @@ const DANGEROUS_EXTENSIONS = new Set([
   '.jar', '.py', '.rb', '.pl', '.php', '.html', '.htm', '.svg',
 ]);
 
-/**
- * Video container magic byte signatures.
- * Each entry: { offset, bytes } where bytes is a Buffer to match at that offset.
- */
 const VIDEO_SIGNATURES = [
-  // MP4/M4V/MOV — ftyp box at offset 4
-  { offset: 4, bytes: Buffer.from('ftyp') },
-  // MKV/WebM — EBML header
-  { offset: 0, bytes: Buffer.from([0x1A, 0x45, 0xDF, 0xA3]) },
-  // AVI — RIFF....AVI
-  { offset: 0, bytes: Buffer.from('RIFF') },
-  // FLV
-  { offset: 0, bytes: Buffer.from('FLV') },
-  // MPEG-TS (0x47 sync byte)
-  { offset: 0, bytes: Buffer.from([0x47]) },
-  // MPEG-PS / MPEG video
-  { offset: 0, bytes: Buffer.from([0x00, 0x00, 0x01, 0xBA]) },
-  { offset: 0, bytes: Buffer.from([0x00, 0x00, 0x01, 0xB3]) },
-  // WMV/ASF — ASF header GUID
-  { offset: 0, bytes: Buffer.from([0x30, 0x26, 0xB2, 0x75]) },
+  { offset: 4, bytes: Buffer.from('ftyp') },       // MP4/M4V/MOV
+  { offset: 0, bytes: Buffer.from([0x1A, 0x45, 0xDF, 0xA3]) }, // MKV/WebM
+  { offset: 0, bytes: Buffer.from('RIFF') },        // AVI
+  { offset: 0, bytes: Buffer.from('FLV') },         // FLV
+  { offset: 0, bytes: Buffer.from([0x47]) },        // MPEG-TS
+  { offset: 0, bytes: Buffer.from([0x00, 0x00, 0x01, 0xBA]) }, // MPEG-PS
+  { offset: 0, bytes: Buffer.from([0x00, 0x00, 0x01, 0xB3]) }, // MPEG video
+  { offset: 0, bytes: Buffer.from([0x30, 0x26, 0xB2, 0x75]) }, // WMV/ASF
 ];
 
 class TorrentEngine {
   constructor(opts = {}) {
-    this.client = null;
-    this._clientReady = null;
-    this._maxConns = opts.maxConns || 55;
-    this._active = new Map(); // infoHash -> { torrent, lastAccess, timer }
+    this._active = new Map(); // infoHash -> { engine, files, lastAccess, timer }
     this._downloadPath = opts.downloadPath || path.join(process.cwd(), '.torrent-cache');
     this._maxFileSize = opts.maxFileSize || MAX_FILE_SIZE;
   }
 
-  async _ensureClient() {
-    if (this.client) return this.client;
-    if (this._clientReady) return this._clientReady;
-    console.log('[TorrentEngine] Initializing WebTorrent client...');
-    this._clientReady = loadWebTorrent().then(WebTorrent => {
-      this.client = new WebTorrent({ maxConns: this._maxConns });
-      console.log('[TorrentEngine] WebTorrent client ready');
-      this.client.on('error', err => console.error('[TorrentEngine] Client error:', err.message));
-      return this.client;
-    }).catch(err => {
-      console.error('[TorrentEngine] Failed to load WebTorrent:', err.message);
-      this._clientReady = null;
-      throw err;
-    });
-    return this._clientReady;
-  }
-
   /**
-   * Get or start a torrent by infoHash or magnet URI.
-   * Returns a promise that resolves with torrent metadata once ready.
+   * Get or start a torrent by magnet URI or infoHash.
+   * Returns a promise that resolves with { engine, files } once metadata is ready.
    */
-  async getTorrent(infoHashOrMagnet) {
-    const hash = this._extractHash(infoHashOrMagnet);
+  async getTorrent(magnetOrHash) {
+    const hash = this._extractHash(magnetOrHash);
     if (!hash) throw new Error('Invalid infoHash or magnet URI');
 
     // Already active?
     const existing = this._active.get(hash);
-    if (existing) {
+    if (existing && existing.files) {
       this._touchTorrent(hash);
-      if (existing.torrent.ready) return existing.torrent;
-      return this._waitReady(existing.torrent);
+      return existing;
+    }
+    if (existing && existing.pending) {
+      return existing.pending;
     }
 
-    // Enforce concurrency limit — remove oldest idle torrent
+    // Enforce concurrency limit
     if (this._active.size >= MAX_CONCURRENT) {
       this._evictOldest();
     }
 
-    const client = await this._ensureClient();
+    const uri = magnetOrHash.startsWith('magnet:') ? magnetOrHash : hash;
 
-    return new Promise((resolve, reject) => {
-      const magnetOrHash = infoHashOrMagnet.startsWith('magnet:')
-        ? infoHashOrMagnet
-        : hash;
+    console.log(`[TorrentEngine] Starting torrent: ${hash}`);
 
-      client.add(magnetOrHash, { path: this._downloadPath }, (torrent) => {
-        // Security: deselect all non-video files so they are never downloaded
-        this._deselectNonVideoFiles(torrent);
+    const pending = new Promise((resolve, reject) => {
+      const engine = torrentStream(uri, {
+        connections: 100,
+        uploads: 0,       // don't upload — streaming only
+        path: this._downloadPath,
+        trackers: [
+          'udp://open.demonii.com:1337/announce',
+          'udp://tracker.openbittorrent.com:80',
+          'udp://tracker.coppersurfer.tk:6969',
+          'udp://tracker.opentrackr.org:1337/announce',
+          'udp://p4p.arenabg.com:1337',
+          'udp://tracker.leechers-paradise.org:6969',
+        ],
+      });
+
+      const timeout = setTimeout(() => {
+        if (!this._active.has(hash) || !this._active.get(hash).files) {
+          engine.destroy();
+          this._active.delete(hash);
+          reject(new Error('Torrent metadata timeout (60s) — try a torrent with more seeds'));
+        }
+      }, 60000);
+
+      engine.on('ready', () => {
+        clearTimeout(timeout);
+        console.log(`[TorrentEngine] Torrent ready: "${engine.torrent.name}", ${engine.files.length} files`);
+
+        // Deselect non-video files
+        for (const file of engine.files) {
+          if (!this._isFileNameSafe(file.name)) {
+            file.deselect();
+            console.log(`[Security] Deselected: "${file.name}"`);
+          }
+        }
 
         const entry = {
-          torrent,
+          engine,
+          files: engine.files,
+          name: engine.torrent.name,
+          infoHash: hash,
           lastAccess: Date.now(),
           timer: null,
+          pending: null,
         };
         this._active.set(hash, entry);
         this._scheduleCleanup(hash);
-        resolve(torrent);
+        resolve(entry);
       });
 
-      // Timeout if metadata doesn't arrive in 60 seconds
-      setTimeout(() => {
-        if (!this._active.has(hash)) {
-          reject(new Error('Torrent metadata timeout'));
-        }
-      }, 60000);
+      engine.on('error', (err) => {
+        clearTimeout(timeout);
+        console.error(`[TorrentEngine] Engine error for ${hash}: ${err.message}`);
+        this._active.delete(hash);
+        reject(err);
+      });
+
+      // Store pending promise so duplicate requests wait for the same torrent
+      this._active.set(hash, { pending: pending, engine, lastAccess: Date.now(), timer: null });
     });
+
+    return pending;
   }
 
   /**
-   * Get a safe video file from a torrent.
-   * Even when fileIdx is specified, the file MUST pass safety checks.
+   * Get a safe video file from the torrent.
    */
-  getVideoFile(torrent, fileIdx) {
+  getVideoFile(entry, fileIdx) {
+    const files = entry.files;
     let file = null;
 
-    if (fileIdx !== undefined && fileIdx >= 0 && fileIdx < torrent.files.length) {
-      file = torrent.files[fileIdx];
-      // Validate the requested file is actually a video
+    if (fileIdx !== undefined && fileIdx >= 0 && fileIdx < files.length) {
+      file = files[fileIdx];
       if (!this._isFileNameSafe(file.name)) {
-        console.warn(`[Security] Rejected fileIdx ${fileIdx}: unsafe filename "${file.name}"`);
+        console.warn(`[Security] Rejected fileIdx ${fileIdx}: unsafe "${file.name}"`);
         return null;
       }
     } else {
-      // Auto-select: filter to safe video files only
-      const videoFiles = torrent.files.filter(f => this._isFileNameSafe(f.name));
+      const videoFiles = files.filter(f => this._isFileNameSafe(f.name));
       if (videoFiles.length === 0) return null;
       if (videoFiles.length === 1) { file = videoFiles[0]; }
       else {
-        // Skip files that look like samples, extras, or trailers
         const dominated = /\b(sample|trailer|extra|bonus|featurette|interview)\b/i;
         const mainFiles = videoFiles.filter(f => !dominated.test(f.name));
         file = (mainFiles.length > 0 ? mainFiles : videoFiles)[0];
@@ -175,9 +170,8 @@ class TorrentEngine {
 
     if (!file) return null;
 
-    // Enforce max file size
     if (file.length > this._maxFileSize) {
-      console.warn(`[Security] Rejected file "${file.name}": ${(file.length / 1e9).toFixed(1)}GB exceeds limit`);
+      console.warn(`[Security] Rejected "${file.name}": ${(file.length / 1e9).toFixed(1)}GB exceeds limit`);
       return null;
     }
 
@@ -185,47 +179,47 @@ class TorrentEngine {
   }
 
   /**
-   * Serve a torrent's video file as an HTTP response with range support.
-   * Validates magic bytes before streaming any data.
+   * Serve a torrent's video file over HTTP with range support.
    */
-  async serveStream(req, res, infoHashOrMagnet, fileIdx) {
-    const hash = this._extractHash(infoHashOrMagnet);
-    console.log(`[TorrentEngine] serveStream request: hash=${hash}, fileIdx=${fileIdx}`);
+  async serveStream(req, res, magnetOrHash, fileIdx) {
+    const hash = this._extractHash(magnetOrHash);
+    console.log(`[TorrentEngine] serveStream: hash=${hash}, fileIdx=${fileIdx}`);
 
-    let torrent;
+    let entry;
     try {
-      torrent = await this.getTorrent(infoHashOrMagnet);
-      console.log(`[TorrentEngine] Torrent ready: "${torrent.name}", ${torrent.files.length} files`);
+      entry = await this.getTorrent(magnetOrHash);
     } catch (err) {
       console.error(`[TorrentEngine] Failed to load torrent ${hash}: ${err.message}`);
       res.status(503).json({ error: 'Failed to load torrent: ' + err.message });
       return;
     }
 
-    const file = this.getVideoFile(torrent, fileIdx);
+    const file = this.getVideoFile(entry, fileIdx);
     if (!file) {
-      console.warn(`[TorrentEngine] No safe video file in torrent "${torrent.name}"`);
-      torrent.files.forEach(f => console.log(`  - ${f.name} (${(f.length / 1e6).toFixed(1)}MB)`));
+      console.warn(`[TorrentEngine] No safe video file in "${entry.name}"`);
+      entry.files.forEach(f => console.log(`  - ${f.name} (${(f.length / 1e6).toFixed(1)}MB)`));
       res.status(404).json({ error: 'No safe video file found in torrent' });
       return;
     }
-    console.log(`[TorrentEngine] Serving file: "${file.name}" (${(file.length / 1e6).toFixed(0)}MB)`);
 
-    // Validate magic bytes — but skip if file hasn't downloaded enough yet
-    // (torrent may still be connecting to peers)
+    console.log(`[TorrentEngine] Serving: "${file.name}" (${(file.length / 1e6).toFixed(0)}MB)`);
+
+    // Select the file for download (torrent-stream won't download until selected)
+    file.select();
+
+    // Validate magic bytes with timeout fallback
     try {
       const isVideo = await Promise.race([
         this._validateMagicBytes(file),
-        new Promise(resolve => setTimeout(() => resolve(true), 10000)), // allow after 10s
+        new Promise(resolve => setTimeout(() => resolve(true), 10000)),
       ]);
       if (!isVideo) {
-        console.warn(`[Security] Magic byte check failed for "${file.name}" — not a video container`);
+        console.warn(`[Security] Magic byte check failed for "${file.name}"`);
         res.status(403).json({ error: 'File failed video format validation' });
         return;
       }
     } catch (err) {
-      // Don't block playback on magic byte failures — the file may just be buffering
-      console.warn(`[Security] Magic byte read error for "${file.name}": ${err.message} — allowing anyway`);
+      console.warn(`[Security] Magic byte error for "${file.name}": ${err.message} — allowing`);
     }
 
     this._touchTorrent(hash);
@@ -234,7 +228,6 @@ class TorrentEngine {
     const mimeType = this._getMimeType(file.name);
     const safeFilename = this._sanitizeFilename(file.name);
 
-    // Security headers for the response
     const securityHeaders = {
       'Content-Type': mimeType,
       'X-Content-Type-Options': 'nosniff',
@@ -242,7 +235,6 @@ class TorrentEngine {
       'Cache-Control': 'no-store',
     };
 
-    // Handle range requests
     const range = req.headers.range;
     if (range) {
       const parts = range.replace(/bytes=/, '').split('-');
@@ -286,88 +278,58 @@ class TorrentEngine {
    */
   getStatus(infoHash) {
     const entry = this._active.get(infoHash.toLowerCase());
-    if (!entry) return null;
-    const t = entry.torrent;
+    if (!entry || !entry.files) return null;
+    const sw = entry.engine.swarm;
     return {
-      infoHash: t.infoHash,
-      name: t.name,
-      progress: Math.round(t.progress * 100),
-      downloadSpeed: t.downloadSpeed,
-      uploadSpeed: t.uploadSpeed,
-      numPeers: t.numPeers,
-      // Only expose video file info — hide non-video filenames
-      files: t.files
+      infoHash: entry.infoHash,
+      name: entry.name,
+      downloadSpeed: sw ? sw.downloadSpeed() : 0,
+      uploadSpeed: sw ? sw.uploadSpeed() : 0,
+      numPeers: sw ? sw.wires.length : 0,
+      files: entry.files
         .filter(f => this._isFileNameSafe(f.name))
         .map(f => ({ name: f.name, length: f.length })),
     };
   }
 
-  /**
-   * Clean up and destroy the engine.
-   */
   destroy() {
     for (const [hash, entry] of this._active) {
       clearTimeout(entry.timer);
+      if (entry.engine) entry.engine.destroy();
     }
     this._active.clear();
-    if (this.client) this.client.destroy();
   }
 
-  // ─── Security Checks ─────────────────────────────
+  // ─── Security ─────────────────────────────────────
 
-  /**
-   * Check if a filename is safe to serve:
-   * - Must have a video extension
-   * - Must NOT have a dangerous extension (catches double-extension tricks)
-   * - Must not contain path traversal
-   */
   _isFileNameSafe(filename) {
     if (!filename) return false;
-
-    // Path traversal check
     const normalized = path.normalize(filename);
     if (normalized.startsWith('..') || path.isAbsolute(normalized)) return false;
     if (filename.includes('..')) return false;
-
-    // Check all extensions in the filename (catches double-ext like .mp4.exe)
     const parts = path.basename(filename).split('.');
     for (let i = 1; i < parts.length; i++) {
       const ext = '.' + parts[i].toLowerCase();
       if (DANGEROUS_EXTENSIONS.has(ext)) return false;
     }
-
-    // Must end with a video extension
     const finalExt = path.extname(filename).toLowerCase();
     return VIDEO_EXTENSIONS.has(finalExt);
   }
 
-  /**
-   * Read the first bytes of a file and check against known video signatures.
-   * Returns true if the file matches any known video container format.
-   */
   _validateMagicBytes(file) {
     return new Promise((resolve, reject) => {
-      if (file.length < MAGIC_READ_SIZE) {
-        resolve(false);
-        return;
-      }
-
+      if (file.length < MAGIC_READ_SIZE) { resolve(false); return; }
       const stream = file.createReadStream({ start: 0, end: MAGIC_READ_SIZE - 1 });
       const chunks = [];
       let bytesRead = 0;
-
       stream.on('data', (chunk) => {
         chunks.push(chunk);
         bytesRead += chunk.length;
-        if (bytesRead >= MAGIC_READ_SIZE) {
-          stream.destroy();
-        }
+        if (bytesRead >= MAGIC_READ_SIZE) stream.destroy();
       });
-
-      stream.on('end', () => check());
-      stream.on('close', () => check());
+      stream.on('end', check);
+      stream.on('close', check);
       stream.on('error', reject);
-
       let checked = false;
       function check() {
         if (checked) return;
@@ -378,26 +340,8 @@ class TorrentEngine {
     });
   }
 
-  /**
-   * Deselect all non-video files in a torrent so they are never downloaded.
-   */
-  _deselectNonVideoFiles(torrent) {
-    for (const file of torrent.files) {
-      if (!this._isFileNameSafe(file.name)) {
-        file.deselect();
-        console.log(`[Security] Deselected non-video file: "${file.name}"`);
-      }
-    }
-  }
-
-  /**
-   * Sanitize a filename for use in Content-Disposition header.
-   * Strips path components and non-ASCII characters.
-   */
   _sanitizeFilename(filename) {
-    return path.basename(filename)
-      .replace(/[^\w\s.\-()[\]]/g, '_')
-      .substring(0, 200);
+    return path.basename(filename).replace(/[^\w\s.\-()[\]]/g, '_').substring(0, 200);
   }
 
   // ─── Private ──────────────────────────────────────
@@ -411,78 +355,48 @@ class TorrentEngine {
 
   _touchTorrent(hash) {
     const entry = this._active.get(hash);
-    if (entry) {
-      entry.lastAccess = Date.now();
-      this._scheduleCleanup(hash);
-    }
+    if (entry) { entry.lastAccess = Date.now(); this._scheduleCleanup(hash); }
   }
 
   _scheduleCleanup(hash) {
     const entry = this._active.get(hash);
     if (!entry) return;
     if (entry.timer) clearTimeout(entry.timer);
-    entry.timer = setTimeout(() => {
-      this._removeTorrent(hash);
-    }, IDLE_TIMEOUT);
+    entry.timer = setTimeout(() => this._removeTorrent(hash), IDLE_TIMEOUT);
   }
 
   _removeTorrent(hash) {
     const entry = this._active.get(hash);
     if (!entry) return;
     clearTimeout(entry.timer);
-    entry.torrent.destroy();
+    if (entry.engine) entry.engine.destroy();
     this._active.delete(hash);
     console.log(`[TorrentEngine] Removed idle torrent: ${hash}`);
   }
 
   _evictOldest() {
-    let oldest = null;
-    let oldestHash = null;
+    let oldest = null, oldestHash = null;
     for (const [hash, entry] of this._active) {
-      if (!oldest || entry.lastAccess < oldest.lastAccess) {
-        oldest = entry;
-        oldestHash = hash;
-      }
+      if (!oldest || entry.lastAccess < oldest.lastAccess) { oldest = entry; oldestHash = hash; }
     }
     if (oldestHash) this._removeTorrent(oldestHash);
-  }
-
-  _waitReady(torrent) {
-    if (torrent.ready) return Promise.resolve(torrent);
-    return new Promise((resolve, reject) => {
-      torrent.on('ready', () => resolve(torrent));
-      torrent.on('error', reject);
-      setTimeout(() => reject(new Error('Torrent ready timeout')), 60000);
-    });
   }
 
   _getMimeType(filename) {
     const ext = path.extname(filename).toLowerCase();
     const types = {
-      '.mp4': 'video/mp4',
-      '.mkv': 'video/x-matroska',
-      '.avi': 'video/x-msvideo',
-      '.mov': 'video/quicktime',
-      '.wmv': 'video/x-ms-wmv',
-      '.flv': 'video/x-flv',
-      '.webm': 'video/webm',
-      '.m4v': 'video/mp4',
-      '.mpg': 'video/mpeg',
-      '.mpeg': 'video/mpeg',
+      '.mp4': 'video/mp4', '.mkv': 'video/x-matroska', '.avi': 'video/x-msvideo',
+      '.mov': 'video/quicktime', '.wmv': 'video/x-ms-wmv', '.flv': 'video/x-flv',
+      '.webm': 'video/webm', '.m4v': 'video/mp4', '.mpg': 'video/mpeg', '.mpeg': 'video/mpeg',
     };
-    // Never fall back to application/octet-stream — reject unknown types
     return types[ext] || null;
   }
 }
 
-/**
- * Check a buffer header against known video container signatures.
- */
 function matchesVideoSignature(header) {
   for (const sig of VIDEO_SIGNATURES) {
     if (header.length < sig.offset + sig.bytes.length) continue;
-    const slice = header.subarray(sig.offset, sig.offset + sig.bytes.length);
-    if (slice.equals(sig.bytes)) return true;
+    if (header.subarray(sig.offset, sig.offset + sig.bytes.length).equals(sig.bytes)) return true;
   }
   return false;
 }

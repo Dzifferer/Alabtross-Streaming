@@ -306,6 +306,24 @@
     for (const catalog of allCatalogs) {
       await loadCatalogRow(catalog);
     }
+
+    // Live TV — append after catalog rows (same as custom mode)
+    if (!type) {
+      const tvGroups = await api.getAllLiveTVChannels();
+      for (const group of tvGroups) {
+        const tvRow = document.createElement('div');
+        tvRow.className = 'catalog-row fade-in';
+        tvRow.innerHTML = `
+          <div class="catalog-row-header">
+            <h3 class="catalog-row-title">${escapeHTML(group.sourceName)}</h3>
+            <span class="catalog-row-badge">LIVE</span>
+          </div>
+          <div class="catalog-scroll">${group.channels.slice(0, 30).map(ch => channelCardHTML(ch)).join('')}</div>
+        `;
+        dom.homeCatalogs.appendChild(tvRow);
+        attachChannelListeners(tvRow);
+      }
+    }
   }
 
   async function loadHomeCustom() {

@@ -12,7 +12,34 @@
 const cheerio = require('cheerio');
 const https = require('https');
 const http = require('http');
+const dns = require('dns');
 const { TRACKERS } = require('./file-safety');
+
+// ─── DNS Fallback ──────────────────────────────────
+// When system DNS fails (ENOTFOUND), retry with public resolvers.
+// This fixes environments where default DNS can't resolve torrent sites.
+const fallbackResolver = new dns.Resolver();
+fallbackResolver.setServers(['1.1.1.1', '8.8.8.8', '1.0.0.1', '8.8.4.4']);
+
+function resolveWithFallback(hostname) {
+  return new Promise((resolve, reject) => {
+    // Try system DNS first
+    dns.resolve4(hostname, (err, addresses) => {
+      if (!err && addresses && addresses.length > 0) {
+        return resolve(addresses[0]);
+      }
+      // System DNS failed — try public resolvers
+      console.log(`[DNS] System DNS failed for ${hostname}, trying fallback resolvers...`);
+      fallbackResolver.resolve4(hostname, (err2, addresses2) => {
+        if (!err2 && addresses2 && addresses2.length > 0) {
+          console.log(`[DNS] Fallback resolved ${hostname} → ${addresses2[0]}`);
+          return resolve(addresses2[0]);
+        }
+        reject(err2 || err);
+      });
+    });
+  });
+}
 
 // ─── Helpers ────────────────────────────────────────
 
@@ -26,7 +53,7 @@ function sanitizeImdbId(id) {
 // issues on ARM/Jetson with Cloudflare IPs, while https module works fine.
 const MAX_REDIRECTS = 5;
 
-function httpGet(url, timeoutMs = 10000, _redirectCount = 0) {
+function httpGetDirect(url, timeoutMs = 10000, _redirectCount = 0, resolvedIp = null) {
   return new Promise((resolve, reject) => {
     if (_redirectCount > MAX_REDIRECTS) {
       return reject(new Error('Too many redirects'));
@@ -40,11 +67,23 @@ function httpGet(url, timeoutMs = 10000, _redirectCount = 0) {
     }, timeoutMs);
 
     const mod = url.startsWith('https') ? https : http;
-    const req = mod.get(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
+    const parsedUrl = new URL(url);
+    const options = {
+      hostname: resolvedIp || parsedUrl.hostname,
+      port: parsedUrl.port || (mod === https ? 443 : 80),
+      path: parsedUrl.pathname + parsedUrl.search,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,application/json,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        ...(resolvedIp ? { Host: parsedUrl.hostname } : {}),
+      },
       timeout: timeoutMs,
       family: 4, // Force IPv4
-    }, (res) => {
+      servername: parsedUrl.hostname, // SNI for TLS when using resolved IP
+    };
+
+    const req = mod.get(options, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         clearTimeout(deadline);
         httpGet(res.headers.location, timeoutMs, _redirectCount + 1).then(resolve, reject);
@@ -65,6 +104,26 @@ function httpGet(url, timeoutMs = 10000, _redirectCount = 0) {
     req.on('error', (e) => { clearTimeout(deadline); reject(e); });
     req.on('timeout', () => { clearTimeout(deadline); req.destroy(); reject(new Error('Socket timeout')); });
   });
+}
+
+async function httpGet(url, timeoutMs = 10000, _redirectCount = 0) {
+  try {
+    return await httpGetDirect(url, timeoutMs, _redirectCount);
+  } catch (e) {
+    // If DNS resolution failed, try with fallback DNS resolvers
+    if (e.message && (e.message.includes('ENOTFOUND') || e.message.includes('EAI_AGAIN'))) {
+      const parsedUrl = new URL(url);
+      try {
+        const ip = await resolveWithFallback(parsedUrl.hostname);
+        console.log(`[DNS] Retrying ${parsedUrl.hostname} via resolved IP ${ip}`);
+        return await httpGetDirect(url, timeoutMs, _redirectCount, ip);
+      } catch (dnsErr) {
+        console.log(`[DNS] Fallback DNS also failed for ${parsedUrl.hostname}: ${dnsErr.message}`);
+        throw e; // throw original error
+      }
+    }
+    throw e;
+  }
 }
 
 async function fetchJSON(url, timeoutMs = 10000, retries = 1) {
@@ -198,9 +257,11 @@ async function searchTorrentio(type, imdbId, season, episode) {
 
 async function searchTPB(query) {
   const streams = [];
+  // Clean query: remove special chars that confuse search, trim to reasonable length
+  const cleanQuery = query.replace(/['']/g, ' ').replace(/[^\w\s-]/g, ' ').replace(/\s+/g, ' ').trim();
   // apibay.org is the public TPB API — returns JSON array
   const data = await fetchJSON(
-    `https://apibay.org/q.php?q=${encodeURIComponent(query)}&cat=200,205,207,208`
+    `https://apibay.org/q.php?q=${encodeURIComponent(cleanQuery)}&cat=200,205,207,208`
   );
   // cat 200=Video, 205=TV, 207=HD Movies, 208=HD TV
   if (!data || !Array.isArray(data)) return streams;
@@ -344,6 +405,17 @@ async function searchEZTV(imdbId, targetSeason, targetEpisode) {
       ? t.filename.match(/\b(2160p|1080p|720p|480p)\b/i)[1]
       : '';
 
+    // Parse season/episode from API fields, falling back to title extraction
+    let eSeason = t.season ? parseInt(t.season, 10) : undefined;
+    let eEpisode = t.episode ? parseInt(t.episode, 10) : undefined;
+    if ((eSeason === undefined || eEpisode === undefined) && (t.title || t.filename)) {
+      const seMatch = (t.title || t.filename).match(/[Ss](\d{1,2})\s*[Ee](\d{1,3})/);
+      if (seMatch) {
+        if (eSeason === undefined) eSeason = parseInt(seMatch[1], 10);
+        if (eEpisode === undefined) eEpisode = parseInt(seMatch[2], 10);
+      }
+    }
+
     streams.push({
       infoHash: hash,
       title: `${t.title || t.filename}\n${quality} ${sizeMB} | Seeds: ${seeds}`,
@@ -351,8 +423,8 @@ async function searchEZTV(imdbId, targetSeason, targetEpisode) {
       quality,
       size: sizeMB,
       seeds,
-      season: t.season ? parseInt(t.season, 10) : undefined,
-      episode: t.episode ? parseInt(t.episode, 10) : undefined,
+      season: eSeason,
+      episode: eEpisode,
       source: 'EZTV',
     });
   }
@@ -365,9 +437,17 @@ async function searchEZTV(imdbId, targetSeason, targetEpisode) {
 
 async function search1337x(query) {
   const streams = [];
-  const html = await fetchHTML(
-    `https://1337x.to/search/${encodeURIComponent(query)}/1/`
-  );
+  // Clean query: remove special chars that confuse search
+  const cleanQuery = query.replace(/['']/g, ' ').replace(/[^\w\s-]/g, ' ').replace(/\s+/g, ' ').trim();
+  // Try primary domain first, then mirror if 403/blocked
+  const domains = ['1337x.to', '1337x.st', '1337x.gd'];
+  let html = null;
+  for (const domain of domains) {
+    html = await fetchHTML(
+      `https://${domain}/search/${encodeURIComponent(cleanQuery)}/1/`
+    );
+    if (html) break;
+  }
   if (!html) return streams;
 
   const $ = cheerio.load(html);
@@ -551,28 +631,40 @@ function needsRemux(name) {
  * - Sort: native-playable first, then remuxable, then by seeds
  */
 function filterAndRank(streams) {
+  console.log(`[FilterRank] Input: ${streams.length} streams`);
+
   // Filter confirmed-dead torrents (seeds === 0 and seed count was actually parsed).
   // Keep streams where seed count is unknown (_seedsUnknown) — they may still be alive.
   let filtered = streams.filter(s => s._seedsUnknown || (s.seeds || 0) >= MIN_SEEDS);
+  if (filtered.length !== streams.length) {
+    console.log(`[FilterRank] After seed filter: ${filtered.length} (removed ${streams.length - filtered.length} dead)`);
+  }
 
   // Tag each stream with format info
+  const formatCounts = {};
   for (const s of filtered) {
     s.format = detectFormat(s.title);
     s.needsRemux = needsRemux(s.title);
     s.browserPlayable = (s.format === 'MP4' || s.format === 'WebM') && !s.needsRemux;
     s.remuxPlayable = s.format === 'MKV' || s.needsRemux;
+    formatCounts[s.format] = (formatCounts[s.format] || 0) + 1;
     // Add format to the display title
     if (s.format !== 'Unknown') {
       const remuxTag = s.needsRemux ? ' ⟳REMUX' : '';
       s.title = s.title.replace(/\n/, ` [${s.format}${remuxTag}]\n`);
     }
   }
+  console.log(`[FilterRank] Formats: ${JSON.stringify(formatCounts)}`);
 
   // Only remove truly unplayable formats (AVI, WMV) — keep x265 since we can remux
+  const beforeFormat = filtered.length;
   filtered = filtered.filter(s => {
     if (s.format === 'AVI' || s.format === 'WMV') return false;
     return true;
   });
+  if (filtered.length !== beforeFormat) {
+    console.log(`[FilterRank] After format filter: ${filtered.length} (removed ${beforeFormat - filtered.length} AVI/WMV)`);
+  }
 
   // Sort: native browser-playable > remuxable > unknown, then by seeds descending
   filtered.sort((a, b) => {
@@ -625,8 +717,10 @@ async function getMovieStreams(imdbId, title) {
     }
   }
 
+  console.log(`[Streams] Combined: ${combined.length} unique streams for ${id}`);
+
   const ranked = filterAndRank(combined);
-  console.log(`[Streams] Total: ${ranked.length} streams (${ranked.filter(s => s.browserPlayable).length} native, ${ranked.filter(s => s.remuxPlayable).length} remuxable) for ${id}`);
+  console.log(`[Streams] Total: ${ranked.length} streams (${ranked.filter(s => s.browserPlayable).length} browser-playable, ${ranked.filter(s => s.remuxPlayable).length} remuxable) for ${id}`);
   return ranked;
 }
 
@@ -688,10 +782,17 @@ async function getSeriesStreams(imdbId, season, episode, title) {
     filteredEztv = eztvStreams.filter(s =>
       s.season === season && s.episode === episode
     );
+    console.log(`[EZTV] Season/episode match (s=${season} e=${episode}): ${filteredEztv.length}/${eztvStreams.length}`);
     if (filteredEztv.length === 0) {
+      // Log sample EZTV data to debug mismatches
+      if (eztvStreams.length > 0) {
+        const sample = eztvStreams.slice(0, 3).map(s => ({ season: s.season, episode: s.episode, title: (s.title || '').split('\n')[0] }));
+        console.log(`[EZTV] Sample data (no s/e match): ${JSON.stringify(sample)}`);
+      }
       filteredEztv = eztvStreams.filter(s =>
         s.title && s.title.toUpperCase().includes(seTag)
       );
+      console.log(`[EZTV] Title tag match ("${seTag}"): ${filteredEztv.length}/${eztvStreams.length}`);
     }
     // For anime: also try absolute episode number (e.g., "- 05" or "E05" without season)
     if (filteredEztv.length === 0 && episode !== undefined) {
@@ -725,9 +826,17 @@ async function getSeriesStreams(imdbId, season, episode, title) {
     }
   }
 
+  console.log(`[Streams] Combined: ${combined.length} unique streams (Torrentio: ${torrentioStreams.length}, TPB: ${tpbStreams.length}, EZTV filtered: ${filteredEztv.length}, 1337x: ${x1337Streams.length})`);
+  if (combined.length > 0 && combined.length <= 3) {
+    // Log details for debugging when few results
+    for (const s of combined) {
+      console.log(`[Streams]   → [${s.source}] ${(s.title || '').split('\n')[0]} (seeds: ${s.seeds}, hash: ${s.infoHash.substring(0, 8)}...)`);
+    }
+  }
+
   const ranked = filterAndRank(combined);
   const batchCount = ranked.filter(s => s.isBatch).length;
-  console.log(`[Streams] Total: ${ranked.length} streams (${ranked.filter(s => s.browserPlayable).length} native, ${ranked.filter(s => s.remuxPlayable).length} remuxable, ${batchCount} batch) for ${id} ${seTag}`);
+  console.log(`[Streams] Total: ${ranked.length} streams (${ranked.filter(s => s.browserPlayable).length} browser-playable, ${ranked.filter(s => s.remuxPlayable).length} remuxable, ${batchCount} batch) for ${id} ${seTag}`);
   return ranked;
 }
 

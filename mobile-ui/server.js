@@ -446,7 +446,7 @@ app.get('/api/library/:id/stream', rateLimit, async (req, res) => {
   }
 });
 
-// GET /api/library/:id/stream/remux — stream a library MKV remuxed to MP4
+// GET /api/library/:id/stream/remux — stream a library file remuxed to MP4 (AAC audio)
 app.get('/api/library/:id/stream/remux', rateLimit, async (req, res) => {
   const item = library.getItem(req.params.id);
   if (!item) return res.status(404).json({ error: 'Item not found' });
@@ -464,7 +464,7 @@ app.get('/api/library/:id/stream/remux', rateLimit, async (req, res) => {
     return res.status(404).json({ error: 'File not found on disk' });
   }
 
-  const safeFilename = path.basename(filePath).replace(/[^\w\s.\-()[\]]/g, '_').replace(/\.mkv$/i, '.mp4').substring(0, 200);
+  const safeFilename = path.basename(filePath).replace(/[^\w\s.\-()[\]]/g, '_').replace(/\.(mkv|avi|wmv|mp4)$/i, '.mp4').substring(0, 200);
   const { spawn } = require('child_process');
 
   res.status(200);
@@ -482,6 +482,8 @@ app.get('/api/library/:id/stream/remux', rateLimit, async (req, res) => {
     '-probesize', '5000000',
     '-analyzeduration', '5000000',
     '-i', 'pipe:0',
+    '-map', '0:v:0',
+    '-map', '0:a:0?',
     '-c:v', 'copy',
     '-c:a', 'aac',
     '-b:a', '192k',

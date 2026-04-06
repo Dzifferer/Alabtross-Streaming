@@ -1524,19 +1524,10 @@
     `;
 
     try {
-      // Fetch item info to check if MKV remuxing is needed
-      let isMkv = false;
-      try {
-        const infoResp = await fetch(`/api/library/${encodeURIComponent(id)}`);
-        if (infoResp.ok) {
-          const info = await infoResp.json();
-          isMkv = info.fileName && /\.mkv$/i.test(info.fileName);
-        }
-      } catch (_) { /* fall through to direct stream */ }
-
-      const url = isMkv
-        ? `/api/library/${encodeURIComponent(id)}/stream/remux`
-        : `/api/library/${encodeURIComponent(id)}/stream`;
+      // Always use remux endpoint to ensure browser-compatible audio.
+      // Many files use AC3/DTS audio that browsers can't decode natively.
+      // FFmpeg copies video and transcodes audio to AAC — lightweight.
+      const url = `/api/library/${encodeURIComponent(id)}/stream/remux`;
       dom.videoPlayer.src = url;
       dom.videoPlayer.load();
 
@@ -1552,12 +1543,10 @@
           dom.videoPlayer.removeEventListener('error', onError);
           clearTimeout(timer);
         };
-        const timeoutMs = isMkv ? 240000 : 60000;
+        const timeoutMs = 240000;
         const timer = setTimeout(() => {
           cleanup();
-          reject(new Error(isMkv
-            ? 'Remux timed out — MKV conversion is taking too long, try again'
-            : 'Loading timed out — file may be too large or disk is busy'));
+          reject(new Error('Remux timed out — try again'));
         }, timeoutMs);
         dom.videoPlayer.addEventListener('canplay', onCanPlay, { once: true });
         dom.videoPlayer.addEventListener('error', onError, { once: true });

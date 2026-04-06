@@ -253,6 +253,60 @@ async function search1337x(query) {
   return streams;
 }
 
+// ─── Stream Filtering & Ranking ─────────────────────
+
+const MIN_SEEDS = 3;
+
+// Formats browsers can play natively
+const BROWSER_PLAYABLE = /\.(mp4|webm|m4v)$/i;
+// Formats that need external player or won't work in browser
+const NON_BROWSER = /\b(mkv|avi|xvid|divx|wmv|flv|mpeg|mpg)\b/i;
+
+/**
+ * Detect the likely file format from the torrent name.
+ */
+function detectFormat(name) {
+  if (/\.mp4\b/i.test(name) || /\bx264\b/i.test(name) || /\bH\.?264\b/i.test(name)) return 'MP4';
+  if (/\.webm\b/i.test(name)) return 'WebM';
+  if (/\.mkv\b/i.test(name) || /\bx265\b/i.test(name) || /\bH\.?265\b/i.test(name) || /\bHEVC\b/i.test(name)) return 'MKV';
+  if (/\.avi\b/i.test(name) || /\bXviD\b/i.test(name) || /\bDivX\b/i.test(name)) return 'AVI';
+  if (/\.wmv\b/i.test(name)) return 'WMV';
+  if (/\bWEB-?DL\b/i.test(name) || /\bWEB-?Rip\b/i.test(name) || /\bWEBRip\b/i.test(name)) return 'MP4'; // WEB-DL is almost always MP4
+  if (/\bBluRay\b/i.test(name) || /\bBDRip\b/i.test(name)) return 'MKV'; // BluRay rips are usually MKV
+  if (/\bHDRip\b/i.test(name)) return 'MP4'; // HDRip usually MP4
+  return 'Unknown';
+}
+
+/**
+ * Filter and rank streams:
+ * - Remove torrents with too few seeds
+ * - Tag each with detected format
+ * - Sort: browser-playable first, then by seeds
+ */
+function filterAndRank(streams) {
+  // Filter dead torrents
+  let filtered = streams.filter(s => (s.seeds || 0) >= MIN_SEEDS);
+
+  // Tag each stream with format info
+  for (const s of filtered) {
+    s.format = detectFormat(s.title);
+    s.browserPlayable = s.format === 'MP4' || s.format === 'WebM';
+    // Add format to the display title
+    if (s.format !== 'Unknown') {
+      s.title = s.title.replace(/\n/, ` [${s.format}]\n`);
+    }
+  }
+
+  // Sort: browser-playable first, then by seeds descending
+  filtered.sort((a, b) => {
+    if (a.browserPlayable && !b.browserPlayable) return -1;
+    if (!a.browserPlayable && b.browserPlayable) return 1;
+    return (b.seeds || 0) - (a.seeds || 0);
+  });
+
+  return filtered;
+}
+
 // ─── Public API ─────────────────────────────────────
 
 /**
@@ -265,8 +319,6 @@ async function getMovieStreams(imdbId, title) {
 
   console.log(`[Streams] Searching movie streams for ${id} (title: "${title || 'unknown'}")`);
 
-  // TPB searches by title (it doesn't index by IMDB ID)
-  // YTS and 1337x search by IMDB ID
   const tpbQuery = title || id;
   const [tpbStreams, ytsStreams, fallbackStreams] = await Promise.all([
     searchTPB(tpbQuery).catch(e => { console.log(`[TPB] Error: ${e.message}`); return []; }),
@@ -284,10 +336,9 @@ async function getMovieStreams(imdbId, title) {
     }
   }
 
-  // Sort by seeds descending
-  combined.sort((a, b) => (b.seeds || 0) - (a.seeds || 0));
-  console.log(`[Streams] Total: ${combined.length} unique streams for ${id}`);
-  return combined;
+  const ranked = filterAndRank(combined);
+  console.log(`[Streams] Total: ${ranked.length} streams (${ranked.filter(s => s.browserPlayable).length} browser-playable) for ${id}`);
+  return ranked;
 }
 
 /**
@@ -337,9 +388,9 @@ async function getSeriesStreams(imdbId, season, episode, title) {
     }
   }
 
-  combined.sort((a, b) => (b.seeds || 0) - (a.seeds || 0));
-  console.log(`[Streams] Total: ${combined.length} unique streams for ${id} ${seTag}`);
-  return combined;
+  const ranked = filterAndRank(combined);
+  console.log(`[Streams] Total: ${ranked.length} streams (${ranked.filter(s => s.browserPlayable).length} browser-playable) for ${id} ${seTag}`);
+  return ranked;
 }
 
 module.exports = {

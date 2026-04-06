@@ -189,6 +189,22 @@
 # Don't use set -e globally — handle errors per-command instead
 # so one failing step doesn't silently kill the whole script
 
+# ---------------------------------------------------------------
+# HEADLESS MODE — set these env vars to skip all interactive prompts
+# ---------------------------------------------------------------
+#   HEADLESS=1                    — enable unattended mode
+#   DRIVE_PARTITION=sda1          — external drive partition (or "none")
+#   FORMAT_DRIVE=yes              — auto-format unformatted drives
+#   DUCKDNS_SUBDOMAIN=myserver   — DuckDNS subdomain (or empty to skip)
+#   DUCKDNS_AUTH_TOKEN=xxx       — DuckDNS token
+#
+# Example (fully headless over SSH):
+#   sudo HEADLESS=1 DRIVE_PARTITION=sda1 bash jetson_setup.sh
+#
+# Example (no external drive, no DuckDNS):
+#   sudo HEADLESS=1 DRIVE_PARTITION=none bash jetson_setup.sh
+# ---------------------------------------------------------------
+
 # Prevent apt from showing interactive prompts
 export DEBIAN_FRONTEND=noninteractive
 
@@ -265,87 +281,115 @@ ok "Internet connection confirmed"
 # STEP 1 — Collect info upfront
 # ---------------------------------------------------------------
 hdr "Configuration"
-echo "A few quick questions before we start:"
-echo ""
 
-# External drive
-read -p "Is your external USB hard drive plugged in? (yes/no): " HAS_DRIVE
-HAS_DRIVE=$(echo "$HAS_DRIVE" | tr '[:upper:]' '[:lower:]')
-# Normalise y→yes, n→no
-[[ "$HAS_DRIVE" == "y" ]] && HAS_DRIVE="yes"
-[[ "$HAS_DRIVE" == "n" ]] && HAS_DRIVE="no"
 DRIVE_PART=""
 MOUNT_POINT=""
-
-if [[ "$HAS_DRIVE" == "yes" ]]; then
-  info "Detecting drives..."
-  echo ""
-  lsblk -o NAME,SIZE,FSTYPE,TYPE,MOUNTPOINT
-  echo ""
-  echo -e "${YELLOW}  NOTE: Your OS/SD card is usually mmcblk0 or nvme0n1."
-  echo -e "  Do NOT select those — only select your external USB drive.${NC}"
-  echo ""
-  while true; do
-    read -p "Enter your drive partition (e.g. sda1 or sdb1): " DRIVE_PART
-    # Sanitize: only allow alphanumeric and no path separators
-    if [[ "$DRIVE_PART" =~ [^a-zA-Z0-9] ]]; then
-      err "Invalid input '$DRIVE_PART' — only letters and numbers allowed (e.g. sda1)"
-      continue
-    fi
-    if [[ -b "/dev/$DRIVE_PART" ]]; then
-      # Warn if whole disk selected instead of a partition
-      # Catches: sda/sdb (^[a-z]+$) AND nvme0n1/nvme1n1 (nvme pattern without p)
-      IS_WHOLE_DISK=false
-      [[ "$DRIVE_PART" =~ ^[a-z]+$ ]] && IS_WHOLE_DISK=true
-      [[ "$DRIVE_PART" =~ ^nvme[0-9]+n[0-9]+$ ]] && IS_WHOLE_DISK=true
-      if $IS_WHOLE_DISK; then
-        echo -e "${RED}WARNING: '$DRIVE_PART' looks like a whole disk, not a partition.${NC}"
-        echo    "         Formatting a whole disk destroys its partition table."
-        echo    "         Did you mean '${DRIVE_PART}1' or '${DRIVE_PART}p1'?"
-        read -p "         Continue with '$DRIVE_PART' anyway? (yes/no): " CONFIRM_DISK
-        CONFIRM_DISK=$(echo "$CONFIRM_DISK" | tr '[:upper:]' '[:lower:]')
-        [[ "$CONFIRM_DISK" != "yes" && "$CONFIRM_DISK" != "y" ]] && continue
-      fi
-      ok "Drive /dev/$DRIVE_PART found"
-      break
-    else
-      err "/dev/$DRIVE_PART not found. Check the name above and try again."
-    fi
-  done
-  MOUNT_POINT="/mnt/movies"
-else
-  echo "No problem — Stremio will cache locally. Re-run this script later to add a drive."
-  MOUNT_POINT="$REAL_HOME/.stremio-data"
-fi
-
-# DuckDNS
-echo ""
-read -p "Do you have a DuckDNS account set up? (yes/no): " HAS_DUCKDNS
-HAS_DUCKDNS=$(echo "$HAS_DUCKDNS" | tr '[:upper:]' '[:lower:]')
-[[ "$HAS_DUCKDNS" == "y" ]] && HAS_DUCKDNS="yes"
-[[ "$HAS_DUCKDNS" == "n" ]] && HAS_DUCKDNS="no"
 DUCKDNS_DOMAIN=""
 DUCKDNS_TOKEN=""
+HAS_DUCKDNS="no"
 
-if [[ "$HAS_DUCKDNS" == "yes" ]]; then
-  read -p  "Enter your DuckDNS subdomain (e.g. myhomeserver): " DUCKDNS_DOMAIN
-  read -sp "Enter your DuckDNS token (hidden): " DUCKDNS_TOKEN
-  echo ""  # newline after silent input
+if [[ "${HEADLESS:-0}" == "1" ]]; then
+  # ── Headless mode — use env vars, no prompts ──
+  info "Running in headless mode (HEADLESS=1)"
 
-  # Strip .duckdns.org suffix if user typed the full domain
-  DUCKDNS_DOMAIN="${DUCKDNS_DOMAIN%.duckdns.org}"
-  # Lowercase before validation — DuckDNS domains are case-insensitive
-  DUCKDNS_DOMAIN=$(echo "$DUCKDNS_DOMAIN" | tr '[:upper:]' '[:lower:]')
-
-  # Validate domain: only lowercase alphanumeric and hyphens
-  if [[ -n "$DUCKDNS_DOMAIN" && ! "$DUCKDNS_DOMAIN" =~ ^[a-z0-9-]+$ ]]; then
-    err "Invalid DuckDNS subdomain '$DUCKDNS_DOMAIN' — only lowercase letters, numbers, hyphens allowed."
-    HAS_DUCKDNS="no"
+  # Drive
+  if [[ -n "$DRIVE_PARTITION" && "$DRIVE_PARTITION" != "none" ]]; then
+    if [[ -b "/dev/$DRIVE_PARTITION" ]]; then
+      DRIVE_PART="$DRIVE_PARTITION"
+      MOUNT_POINT="/mnt/movies"
+      ok "Using drive /dev/$DRIVE_PART"
+    else
+      err "/dev/$DRIVE_PARTITION not found — falling back to local storage"
+      MOUNT_POINT="$REAL_HOME/.stremio-data"
+    fi
+  else
+    info "No external drive configured — Stremio will cache locally"
+    MOUNT_POINT="$REAL_HOME/.stremio-data"
   fi
 
-  if [[ -z "$DUCKDNS_DOMAIN" || -z "$DUCKDNS_TOKEN" ]]; then
-    err "DuckDNS domain or token was empty — skipping DuckDNS setup."
-    HAS_DUCKDNS="no"
+  # DuckDNS
+  if [[ -n "$DUCKDNS_SUBDOMAIN" && -n "$DUCKDNS_AUTH_TOKEN" ]]; then
+    DUCKDNS_DOMAIN=$(echo "${DUCKDNS_SUBDOMAIN%.duckdns.org}" | tr '[:upper:]' '[:lower:]')
+    DUCKDNS_TOKEN="$DUCKDNS_AUTH_TOKEN"
+    HAS_DUCKDNS="yes"
+    ok "DuckDNS configured: ${DUCKDNS_DOMAIN}.duckdns.org"
+  else
+    info "DuckDNS not configured — skipping"
+  fi
+
+else
+  # ── Interactive mode — prompt the user ──
+  echo "A few quick questions before we start:"
+  echo ""
+
+  # External drive
+  read -p "Is your external USB hard drive plugged in? (yes/no): " HAS_DRIVE
+  HAS_DRIVE=$(echo "$HAS_DRIVE" | tr '[:upper:]' '[:lower:]')
+  [[ "$HAS_DRIVE" == "y" ]] && HAS_DRIVE="yes"
+  [[ "$HAS_DRIVE" == "n" ]] && HAS_DRIVE="no"
+
+  if [[ "$HAS_DRIVE" == "yes" ]]; then
+    info "Detecting drives..."
+    echo ""
+    lsblk -o NAME,SIZE,FSTYPE,TYPE,MOUNTPOINT
+    echo ""
+    echo -e "${YELLOW}  NOTE: Your OS/SD card is usually mmcblk0 or nvme0n1."
+    echo -e "  Do NOT select those — only select your external USB drive.${NC}"
+    echo ""
+    while true; do
+      read -p "Enter your drive partition (e.g. sda1 or sdb1): " DRIVE_PART
+      if [[ "$DRIVE_PART" =~ [^a-zA-Z0-9] ]]; then
+        err "Invalid input '$DRIVE_PART' — only letters and numbers allowed (e.g. sda1)"
+        continue
+      fi
+      if [[ -b "/dev/$DRIVE_PART" ]]; then
+        IS_WHOLE_DISK=false
+        [[ "$DRIVE_PART" =~ ^[a-z]+$ ]] && IS_WHOLE_DISK=true
+        [[ "$DRIVE_PART" =~ ^nvme[0-9]+n[0-9]+$ ]] && IS_WHOLE_DISK=true
+        if $IS_WHOLE_DISK; then
+          echo -e "${RED}WARNING: '$DRIVE_PART' looks like a whole disk, not a partition.${NC}"
+          echo    "         Formatting a whole disk destroys its partition table."
+          echo    "         Did you mean '${DRIVE_PART}1' or '${DRIVE_PART}p1'?"
+          read -p "         Continue with '$DRIVE_PART' anyway? (yes/no): " CONFIRM_DISK
+          CONFIRM_DISK=$(echo "$CONFIRM_DISK" | tr '[:upper:]' '[:lower:]')
+          [[ "$CONFIRM_DISK" != "yes" && "$CONFIRM_DISK" != "y" ]] && continue
+        fi
+        ok "Drive /dev/$DRIVE_PART found"
+        break
+      else
+        err "/dev/$DRIVE_PART not found. Check the name above and try again."
+      fi
+    done
+    MOUNT_POINT="/mnt/movies"
+  else
+    echo "No problem — Stremio will cache locally. Re-run this script later to add a drive."
+    MOUNT_POINT="$REAL_HOME/.stremio-data"
+  fi
+
+  # DuckDNS
+  echo ""
+  read -p "Do you have a DuckDNS account set up? (yes/no): " HAS_DUCKDNS
+  HAS_DUCKDNS=$(echo "$HAS_DUCKDNS" | tr '[:upper:]' '[:lower:]')
+  [[ "$HAS_DUCKDNS" == "y" ]] && HAS_DUCKDNS="yes"
+  [[ "$HAS_DUCKDNS" == "n" ]] && HAS_DUCKDNS="no"
+
+  if [[ "$HAS_DUCKDNS" == "yes" ]]; then
+    read -p  "Enter your DuckDNS subdomain (e.g. myhomeserver): " DUCKDNS_DOMAIN
+    read -sp "Enter your DuckDNS token (hidden): " DUCKDNS_TOKEN
+    echo ""
+
+    DUCKDNS_DOMAIN="${DUCKDNS_DOMAIN%.duckdns.org}"
+    DUCKDNS_DOMAIN=$(echo "$DUCKDNS_DOMAIN" | tr '[:upper:]' '[:lower:]')
+
+    if [[ -n "$DUCKDNS_DOMAIN" && ! "$DUCKDNS_DOMAIN" =~ ^[a-z0-9-]+$ ]]; then
+      err "Invalid DuckDNS subdomain '$DUCKDNS_DOMAIN' — only lowercase letters, numbers, hyphens allowed."
+      HAS_DUCKDNS="no"
+    fi
+
+    if [[ -z "$DUCKDNS_DOMAIN" || -z "$DUCKDNS_TOKEN" ]]; then
+      err "DuckDNS domain or token was empty — skipping DuckDNS setup."
+      HAS_DUCKDNS="no"
+    fi
   fi
 fi
 
@@ -364,10 +408,14 @@ ROOT_FREE_KB=$(df -k / 2>/dev/null | awk 'NR==2{print $4}')
 ROOT_FREE_GB=$(echo "scale=1; ${ROOT_FREE_KB:-0} / 1048576" | bc 2>/dev/null || echo "?")
 if [[ -n "$ROOT_FREE_KB" && "$ROOT_FREE_KB" -lt 3145728 ]]; then
   err "Low disk space: only ${ROOT_FREE_GB}GB free on /. Need at least 3GB for Docker + updates."
-  err "Free up space before continuing or the installation may fail mid-way."
-  read -p "Continue anyway? (yes/no): " CONTINUE_LOW
-  CONTINUE_LOW=$(echo "$CONTINUE_LOW" | tr '[:upper:]' '[:lower:]')
-  [[ "$CONTINUE_LOW" != "yes" && "$CONTINUE_LOW" != "y" ]] && die "Aborted. Free up disk space and re-run."
+  if [[ "${HEADLESS:-0}" == "1" ]]; then
+    err "Continuing anyway (headless mode)..."
+  else
+    err "Free up space before continuing or the installation may fail mid-way."
+    read -p "Continue anyway? (yes/no): " CONTINUE_LOW
+    CONTINUE_LOW=$(echo "$CONTINUE_LOW" | tr '[:upper:]' '[:lower:]')
+    [[ "$CONTINUE_LOW" != "yes" && "$CONTINUE_LOW" != "y" ]] && die "Aborted. Free up disk space and re-run."
+  fi
 else
   ok "Disk space OK — ${ROOT_FREE_GB}GB free on /"
 fi
@@ -439,8 +487,13 @@ if [[ -n "$DRIVE_PART" ]]; then
   if [[ -z "$FS_TYPE" ]]; then
     echo ""
     echo -e "${RED}WARNING: Drive appears unformatted. Formatting will ERASE ALL DATA on it.${NC}"
-    read -p "Format /dev/$DRIVE_PART as ext4? (yes/no): " FORMAT_DRIVE
-    FORMAT_DRIVE=$(echo "$FORMAT_DRIVE" | tr '[:upper:]' '[:lower:]')
+    if [[ "${HEADLESS:-0}" == "1" ]]; then
+      FORMAT_DRIVE="${FORMAT_DRIVE:-no}"
+      info "Headless mode: FORMAT_DRIVE=$FORMAT_DRIVE"
+    else
+      read -p "Format /dev/$DRIVE_PART as ext4? (yes/no): " FORMAT_DRIVE
+      FORMAT_DRIVE=$(echo "$FORMAT_DRIVE" | tr '[:upper:]' '[:lower:]')
+    fi
     if [[ "$FORMAT_DRIVE" == "yes" || "$FORMAT_DRIVE" == "y" ]]; then
       info "Formatting drive as ext4..."
       if mkfs.ext4 -F "$DRIVE_PATH"; then
@@ -722,39 +775,93 @@ step "Installing WireGuard VPN"
 if command -v pivpn &>/dev/null; then
   ok "PiVPN already installed — skipping wizard"
 else
-  echo ""
-  echo "---------------------------------------------"
-  echo "  PiVPN setup wizard is about to launch."
-  echo ""
-  echo "  Choose these options when asked:"
-  echo "  - VPN type :  WireGuard"
-  echo "  - Port     :  51820  (press Enter for default)"
-  echo "  - DNS      :  1.1.1.1  (Cloudflare)"
-  if [[ "$HAS_DUCKDNS" == "yes" && -n "$DUCKDNS_DOMAIN" ]]; then
-  echo "  - Public   :  ${DUCKDNS_DOMAIN}.duckdns.org"
-  else
-  echo "  - Public   :  your current public IP"
-  fi
-  echo ""
-  echo "  NOTE: PiVPN may ask to REBOOT at the end."
-  echo "  If it reboots, run this script again —"
-  echo "  already-completed steps will be skipped."
-  echo "---------------------------------------------"
-  echo ""
-  read -p "Press ENTER to launch PiVPN..."
-
   PIVPN_SCRIPT=$(mktemp /tmp/pivpn-install-XXXXXX.sh)
   TEMP_FILES+=("$PIVPN_SCRIPT")
-  info "Downloading PiVPN installer..."
-  if ! curl -fsSL https://install.pivpn.io -o "$PIVPN_SCRIPT"; then
-    err "Failed to download PiVPN installer. Check your internet connection."
-    PIVPN_EXIT=1
-  elif [[ ! -s "$PIVPN_SCRIPT" ]]; then
-    err "PiVPN installer downloaded but is empty. Try again later."
-    PIVPN_EXIT=1
+
+  if [[ "${HEADLESS:-0}" == "1" ]]; then
+    # ── Headless: generate PiVPN config and run unattended ──
+    info "Setting up PiVPN in unattended mode..."
+
+    # Determine public-facing address
+    if [[ "$HAS_DUCKDNS" == "yes" && -n "$DUCKDNS_DOMAIN" ]]; then
+      PIVPN_HOST="${DUCKDNS_DOMAIN}.duckdns.org"
+      PIVPN_HOST_TYPE="DNS"
+    else
+      PIVPN_HOST=$(curl -s https://api.ipify.org || curl -s https://ifconfig.me || echo "")
+      PIVPN_HOST_TYPE="IP"
+      if [[ -z "$PIVPN_HOST" ]]; then
+        err "Could not detect public IP — PiVPN may need reconfiguration"
+        PIVPN_HOST="0.0.0.0"
+      fi
+    fi
+
+    # Write PiVPN unattended setup config
+    PIVPN_CONF="/tmp/pivpn-unattended.conf"
+    TEMP_FILES+=("$PIVPN_CONF")
+    cat > "$PIVPN_CONF" << PIVPNEOF
+USING_DASHBOARD=0
+IPv4dev=$(ip route get 8.8.8.8 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}')
+install_user=${REAL_USER}
+install_home=${REAL_HOME}
+VPN=wireguard
+pivpnNET=10.6.0.0
+subnetClass=24
+ALLOWED_IPS="0.0.0.0/0, ::0/0"
+pivpnMTU=1420
+pivpnPORT=51820
+pivpnDNS1=1.1.1.1
+pivpnDNS2=1.0.0.1
+pivpnHOST=${PIVPN_HOST}
+pivpnPERSISTENTKEEPALIVE=25
+UNATTUPG=1
+PIVPNEOF
+
+    info "Downloading PiVPN installer..."
+    if ! curl -fsSL https://install.pivpn.io -o "$PIVPN_SCRIPT"; then
+      err "Failed to download PiVPN installer."
+      PIVPN_EXIT=1
+    elif [[ ! -s "$PIVPN_SCRIPT" ]]; then
+      err "PiVPN installer is empty."
+      PIVPN_EXIT=1
+    else
+      bash "$PIVPN_SCRIPT" --unattended "$PIVPN_CONF"
+      PIVPN_EXIT=$?
+    fi
+
   else
-    bash "$PIVPN_SCRIPT"
-    PIVPN_EXIT=$?
+    # ── Interactive: show instructions and launch wizard ──
+    echo ""
+    echo "---------------------------------------------"
+    echo "  PiVPN setup wizard is about to launch."
+    echo ""
+    echo "  Choose these options when asked:"
+    echo "  - VPN type :  WireGuard"
+    echo "  - Port     :  51820  (press Enter for default)"
+    echo "  - DNS      :  1.1.1.1  (Cloudflare)"
+    if [[ "$HAS_DUCKDNS" == "yes" && -n "$DUCKDNS_DOMAIN" ]]; then
+    echo "  - Public   :  ${DUCKDNS_DOMAIN}.duckdns.org"
+    else
+    echo "  - Public   :  your current public IP"
+    fi
+    echo ""
+    echo "  NOTE: PiVPN may ask to REBOOT at the end."
+    echo "  If it reboots, run this script again —"
+    echo "  already-completed steps will be skipped."
+    echo "---------------------------------------------"
+    echo ""
+    read -p "Press ENTER to launch PiVPN..."
+
+    info "Downloading PiVPN installer..."
+    if ! curl -fsSL https://install.pivpn.io -o "$PIVPN_SCRIPT"; then
+      err "Failed to download PiVPN installer. Check your internet connection."
+      PIVPN_EXIT=1
+    elif [[ ! -s "$PIVPN_SCRIPT" ]]; then
+      err "PiVPN installer downloaded but is empty. Try again later."
+      PIVPN_EXIT=1
+    else
+      bash "$PIVPN_SCRIPT"
+      PIVPN_EXIT=$?
+    fi
   fi
 
   if [[ $PIVPN_EXIT -eq 0 ]]; then
@@ -811,6 +918,18 @@ DUCKEOF
   fi
 else
   info "Skipping DuckDNS"
+fi
+
+# ---------------------------------------------------------------
+# Headless mode: disable desktop GUI to save resources
+# ---------------------------------------------------------------
+if [[ "${HEADLESS:-0}" == "1" ]]; then
+  if systemctl get-default 2>/dev/null | grep -q "graphical"; then
+    info "Disabling desktop GUI for headless operation..."
+    systemctl set-default multi-user.target
+    ok "Desktop GUI disabled — system will boot to console only"
+    info "To re-enable later: sudo systemctl set-default graphical.target"
+  fi
 fi
 
 # ---------------------------------------------------------------

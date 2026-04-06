@@ -18,7 +18,121 @@ A fully automated setup that turns an NVIDIA Jetson Orin Nano into a secure home
 - Optional: external USB hard drive for content caching
 - Optional: free [DuckDNS](https://www.duckdns.org) account for dynamic DNS
 
-## Quick Start
+## Headless Setup (from your laptop)
+
+The entire setup can be done from your laptop over SSH — no monitor or keyboard needed on the Jetson.
+
+### Step 1 — Flash JetPack
+
+On your laptop:
+
+1. Download the [JetPack SD card image](https://developer.nvidia.com/embedded/jetpack) for Orin Nano
+2. Flash it to a microSD card using [Etcher](https://etcher.balena.io) or NVIDIA SDK Manager
+3. Insert the microSD into the Jetson
+
+### Step 2 — First Boot + Serial Console
+
+4. Connect the Jetson to your router with an **ethernet cable**
+5. Connect the Jetson's **USB-C port** to your laptop with a USB cable
+6. Plug in the Jetson's **power supply** — it boots automatically
+7. On your laptop, connect to the serial console:
+
+   **macOS:**
+   ```bash
+   ls /dev/tty.usb*           # find the device
+   screen /dev/tty.usbmodem* 115200
+   ```
+
+   **Linux:**
+   ```bash
+   ls /dev/ttyACM*            # find the device
+   screen /dev/ttyACM0 115200
+   ```
+
+   **Windows:** Use PuTTY — connect to the COM port at 115200 baud
+
+8. Walk through the Ubuntu setup in the serial console:
+   - Accept the license
+   - Pick language, timezone, keyboard
+   - **Create your user** (e.g. `jetson`) — remember the password
+   - Let it finish and reboot
+
+### Step 3 — SSH In
+
+9. Find the Jetson's IP address. Either:
+   - Check your router's admin page for connected devices, or
+   - In the serial console after reboot, run: `ip addr show eth0 | grep inet`
+
+10. From your laptop, SSH in:
+    ```bash
+    ssh jetson@192.168.1.XX
+    ```
+
+### Step 4 — Run the Setup (headless)
+
+11. Plug in your **external USB drive** if using one. Then find the partition name:
+    ```bash
+    lsblk -o NAME,SIZE,FSTYPE,TYPE
+    ```
+    Look for your USB drive (e.g. `sda1`). The OS drive is `mmcblk0` or `nvme0n1` — don't use those.
+
+12. Run the setup in fully headless mode:
+    ```bash
+    sudo apt-get update && sudo apt-get install -y git
+    git clone https://github.com/Dzifferer/Alabtross-Streaming.git
+    cd Alabtross-Streaming
+
+    # With external drive + DuckDNS:
+    sudo HEADLESS=1 \
+         DRIVE_PARTITION=sda1 \
+         DUCKDNS_SUBDOMAIN=myserver \
+         DUCKDNS_AUTH_TOKEN=your-token-here \
+         bash jetson_setup.sh
+
+    # Or minimal (no drive, no DuckDNS):
+    sudo HEADLESS=1 DRIVE_PARTITION=none bash jetson_setup.sh
+    ```
+
+13. If PiVPN triggers a reboot, SSH back in and re-run:
+    ```bash
+    ssh jetson@192.168.1.XX
+    cd Alabtross-Streaming
+    sudo HEADLESS=1 DRIVE_PARTITION=sda1 bash jetson_setup.sh
+    ```
+    It skips completed steps and picks up where it left off.
+
+### Step 5 — Router + VPN Profiles
+
+All from your laptop over SSH:
+
+14. **Port forward** on your router: `51820 UDP` to the Jetson's IP
+
+15. Create a VPN profile for your phone:
+    ```bash
+    pivpn add
+    ```
+
+16. Get the QR code:
+    ```bash
+    pivpn -qr myphone
+    ```
+    Scan it with the WireGuard app on your phone.
+
+### Step 6 — Done
+
+17. The Jetson is now running headless. Disconnect the USB cable if you want — everything runs over ethernet.
+
+18. On your phone: connect WireGuard, open `http://<jetson-ip>:8080`
+
+19. To SSH in anytime:
+    ```bash
+    ssh jetson@192.168.1.XX      # from home network
+    ssh jetson@10.6.0.1          # from VPN
+    ```
+
+## Quick Start (interactive, with monitor)
+
+If you prefer using a monitor and keyboard on the Jetson:
 
 ```bash
 sudo apt-get update && sudo apt-get install -y git
@@ -27,7 +141,17 @@ cd Alabtross-Streaming
 sudo bash jetson_setup.sh
 ```
 
-The script asks a few questions upfront (external drive, DuckDNS credentials) then runs fully automatically. If PiVPN requests a reboot, re-run the script afterward — it detects completed steps and picks up where it left off.
+The script asks a few questions upfront (external drive, DuckDNS credentials) then runs fully automatically.
+
+## Headless Mode Environment Variables
+
+| Variable | Required | Example | Description |
+|----------|----------|---------|-------------|
+| `HEADLESS` | Yes | `1` | Enables unattended mode, skips all prompts |
+| `DRIVE_PARTITION` | Yes | `sda1` or `none` | External drive partition, or `none` for local storage |
+| `FORMAT_DRIVE` | No | `yes` | Auto-format unformatted drives as ext4 |
+| `DUCKDNS_SUBDOMAIN` | No | `myserver` | DuckDNS subdomain (omit to skip DuckDNS) |
+| `DUCKDNS_AUTH_TOKEN` | No | `abc123...` | DuckDNS token |
 
 ## After Setup
 
@@ -119,4 +243,10 @@ docker restart alabtross-mobile
 ```bash
 sudo mount /mnt/movies
 sudo systemctl status systemd-fsck@dev-sdX.service
+```
+
+**Re-enable desktop GUI (if needed):**
+```bash
+sudo systemctl set-default graphical.target
+sudo reboot
 ```

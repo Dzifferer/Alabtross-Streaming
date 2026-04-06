@@ -1486,7 +1486,13 @@
           dom.videoPlayer.removeEventListener('error', onError);
           clearTimeout(timer);
         };
-        const timer = setTimeout(() => { cleanup(); reject(new Error('Loading timed out')); }, 30000);
+        const timeoutMs = isMkv ? 90000 : 60000;
+        const timer = setTimeout(() => {
+          cleanup();
+          reject(new Error(isMkv
+            ? 'Remux timed out — MKV conversion is taking too long, try again'
+            : 'Loading timed out — file may be too large or disk is busy'));
+        }, timeoutMs);
         dom.videoPlayer.addEventListener('canplay', onCanPlay, { once: true });
         dom.videoPlayer.addEventListener('error', onError, { once: true });
       });
@@ -1497,6 +1503,8 @@
       let hint = escapeHTML(e.message);
       if (e.message.includes('Media error')) {
         hint += '<br><span style="font-size:12px">The file format may not be supported by your browser</span>';
+      } else if (e.message.includes('timed out')) {
+        hint += '<br><span style="font-size:12px">Try again — playback may work on a second attempt</span>';
       }
       dom.playerOverlay.innerHTML = `
         <p style="color:var(--danger)">Playback failed</p>

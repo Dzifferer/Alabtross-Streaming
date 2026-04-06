@@ -626,6 +626,34 @@ html, body {
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
 }
 
+/* ===== Live TV Source Management ===== */
+.catalog-row-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 3px;
+  background: rgba(220, 38, 38, 0.85);
+  color: white;
+  letter-spacing: 0.5px;
+  margin-left: 8px;
+}
+
+.livetv-source-remove {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 6px;
+  transition: color 0.2s, background 0.2s;
+  flex-shrink: 0;
+}
+
+.livetv-source-remove:hover {
+  color: var(--danger);
+  background: rgba(255, 107, 107, 0.1);
+}
+
 /* ===== Grid View (Search, Browse) ===== */
 .grid-view {
   display: grid;

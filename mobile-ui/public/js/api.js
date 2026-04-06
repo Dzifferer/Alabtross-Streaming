@@ -621,6 +621,22 @@ class StremioAPI {
   }
   // ─── Live TV / IPTV ──────────────────────────────
 
+  // Known Stremio TV addons that users can quick-add
+  static KNOWN_TV_ADDONS = [
+    {
+      url: 'https://www.usatv.click',
+      name: 'USA TV',
+      description: 'US live TV channels — news, sports, entertainment',
+    },
+    {
+      url: 'https://iptv-addon.fly.dev',
+      name: 'IPTV Addon',
+      description: 'Community IPTV channels from around the world',
+    },
+  ];
+
+  // ─── Legacy single-playlist support (migration) ──
+
   getPlaylistUrl() {
     return localStorage.getItem('iptv_playlist_url') || '';
   }
@@ -629,23 +645,194 @@ class StremioAPI {
     localStorage.setItem('iptv_playlist_url', url);
   }
 
-  async getChannels() {
-    const playlistUrl = this.getPlaylistUrl();
-    if (!playlistUrl) return [];
+  // ─── Multi-source Live TV management ─────────────
 
+  _loadLiveTVSources() {
     try {
-      const resp = await fetch('/api/iptv/channels?url=' + encodeURIComponent(playlistUrl));
-      if (!resp.ok) return [];
-      const data = await resp.json();
-      return data.channels || [];
+      const saved = localStorage.getItem('livetv_sources');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed;
+      }
     } catch {
+      localStorage.removeItem('livetv_sources');
+    }
+
+    // Migrate from legacy single playlist URL
+    const legacyUrl = this.getPlaylistUrl();
+    if (legacyUrl) {
+      const sources = [{ type: 'playlist', url: legacyUrl, name: 'My Playlist', enabled: true }];
+      this._saveLiveTVSources(sources);
+      return sources;
+    }
+
+    return [];
+  }
+
+  _saveLiveTVSources(sources) {
+    localStorage.setItem('livetv_sources', JSON.stringify(sources));
+  }
+
+  getLiveTVSources() {
+    return this._loadLiveTVSources();
+  }
+
+  addLiveTVSource(source) {
+    const sources = this._loadLiveTVSources();
+    // Prevent duplicates by URL
+    if (sources.find(s => s.url === source.url)) {
+      return { error: 'Source already added' };
+    }
+    sources.push({ ...source, enabled: true });
+    this._saveLiveTVSources(sources);
+    // Also keep legacy field in sync for first playlist
+    if (source.type === 'playlist') {
+      const firstPlaylist = sources.find(s => s.type === 'playlist' && s.enabled);
+      if (firstPlaylist) this.setPlaylistUrl(firstPlaylist.url);
+    }
+    return { ok: true };
+  }
+
+  removeLiveTVSource(url) {
+    const sources = this._loadLiveTVSources().filter(s => s.url !== url);
+    this._saveLiveTVSources(sources);
+  }
+
+  toggleLiveTVSource(url, enabled) {
+    const sources = this._loadLiveTVSources();
+    const source = sources.find(s => s.url === url);
+    if (source) {
+      source.enabled = enabled;
+      this._saveLiveTVSources(sources);
+    }
+  }
+
+  /**
+   * Fetch channels from ALL enabled live TV sources.
+   * Returns an array of { sourceName, channels[] } groups.
+   */
+  async getAllLiveTVChannels() {
+    const sources = this._loadLiveTVSources().filter(s => s.enabled);
+    if (sources.length === 0) return [];
+
+    const results = await Promise.all(sources.map(async (source) => {
+      try {
+        if (source.type === 'playlist') {
+          return { sourceName: source.name || 'Playlist', channels: await this._fetchPlaylistChannels(source.url) };
+        } else if (source.type === 'stremio-tv') {
+          return { sourceName: source.name || 'TV Addon', channels: await this._fetchStremioTVChannels(source.url) };
+        }
+      } catch (e) {
+        console.warn('[LiveTV] Failed to fetch from', source.url, e);
+      }
+      return { sourceName: source.name || 'Unknown', channels: [] };
+    }));
+
+    return results.filter(r => r.channels.length > 0);
+  }
+
+  async _fetchPlaylistChannels(playlistUrl) {
+    const resp = await fetch('/api/iptv/channels?url=' + encodeURIComponent(playlistUrl));
+    if (!resp.ok) return [];
+    const data = await resp.json();
+    return (data.channels || []).map(ch => ({
+      ...ch,
+      _sourceType: 'playlist',
+    }));
+  }
+
+  async _fetchStremioTVChannels(addonUrl) {
+    try {
+      // Fetch the addon manifest to discover TV catalogs
+      const manifest = await this._fetchManifest(addonUrl);
+      if (!manifest.catalogs) return [];
+
+      const tvCatalogs = manifest.catalogs.filter(c => c.type === 'tv');
+      if (tvCatalogs.length === 0) return [];
+
+      const allChannels = [];
+      for (const catalog of tvCatalogs.slice(0, 5)) {
+        try {
+          const resp = await fetch(`${addonUrl}/catalog/tv/${catalog.id}.json`, {
+            signal: AbortSignal.timeout(15000),
+          });
+          if (!resp.ok) continue;
+          const data = await resp.json();
+          const metas = data.metas || [];
+          for (const meta of metas) {
+            allChannels.push({
+              id: meta.id || '',
+              name: meta.name || 'Channel',
+              logo: meta.logo || meta.poster || '',
+              group: catalog.name || '',
+              _sourceType: 'stremio-tv',
+              _addonUrl: addonUrl,
+              _stremioId: meta.id,
+            });
+          }
+        } catch (e) {
+          console.warn('[LiveTV] Catalog fetch failed:', catalog.id, e);
+        }
+      }
+      return allChannels;
+    } catch (e) {
+      console.warn('[LiveTV] Manifest fetch failed:', addonUrl, e);
       return [];
     }
   }
 
-  getChannelStreamUrl(channel) {
-    if (!channel || !channel.url) return null;
-    return '/api/iptv/stream?url=' + encodeURIComponent(channel.url);
+  /**
+   * Get the playable stream URL for a channel.
+   * For playlists, proxy through IPTV endpoint.
+   * For Stremio TV addons, fetch stream from addon then proxy.
+   */
+  async getChannelStreamUrl(channel) {
+    if (!channel) return null;
+
+    // Playlist-based channel — direct proxy
+    if (channel._sourceType === 'playlist' || (!channel._sourceType && channel.url)) {
+      if (!channel.url) return null;
+      return '/api/iptv/stream?url=' + encodeURIComponent(channel.url);
+    }
+
+    // Stremio TV addon — fetch stream URL from addon, then proxy
+    if (channel._sourceType === 'stremio-tv' && channel._addonUrl && channel._stremioId) {
+      try {
+        const resp = await fetch(`${channel._addonUrl}/stream/tv/${encodeURIComponent(channel._stremioId)}.json`, {
+          signal: AbortSignal.timeout(15000),
+        });
+        if (!resp.ok) return null;
+        const data = await resp.json();
+        const streams = data.streams || [];
+        if (streams.length === 0) return null;
+
+        // Pick the first stream with a URL
+        const stream = streams.find(s => s.url) || streams[0];
+        if (stream.url) {
+          return '/api/iptv/stream?url=' + encodeURIComponent(stream.url);
+        }
+        if (stream.externalUrl) {
+          return stream.externalUrl;
+        }
+      } catch (e) {
+        console.warn('[LiveTV] Stream fetch failed for', channel.name, e);
+      }
+      return null;
+    }
+
+    return null;
+  }
+
+  /**
+   * Legacy compatibility — returns flat channel list from all sources.
+   */
+  async getChannels() {
+    const groups = await this.getAllLiveTVChannels();
+    const flat = [];
+    for (const group of groups) {
+      flat.push(...group.channels);
+    }
+    return flat;
   }
 }
 

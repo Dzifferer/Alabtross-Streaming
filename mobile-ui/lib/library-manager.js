@@ -14,18 +14,7 @@
 const torrentStream = require('torrent-stream');
 const path = require('path');
 const fs = require('fs');
-
-const VIDEO_EXTENSIONS = new Set([
-  '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg',
-]);
-
-const DANGEROUS_EXTENSIONS = new Set([
-  '.exe', '.bat', '.cmd', '.com', '.scr', '.pif', '.msi', '.msp',
-  '.ps1', '.vbs', '.vbe', '.js', '.jse', '.wsf', '.wsh', '.sh',
-  '.bash', '.csh', '.app', '.action', '.command', '.run', '.bin',
-  '.dll', '.so', '.dylib', '.deb', '.rpm', '.apk', '.dmg', '.iso',
-  '.jar', '.py', '.rb', '.pl', '.php', '.html', '.htm', '.svg',
-]);
+const { TRACKERS, isFileNameSafe, getMimeType } = require('./file-safety');
 
 const MAX_CONCURRENT_DOWNLOADS = 2;
 const MAX_FILE_SIZE = 20 * 1024 * 1024 * 1024; // 20 GB
@@ -186,13 +175,7 @@ class LibraryManager {
    * Get MIME type for a video file.
    */
   getMimeType(filename) {
-    const ext = path.extname(filename).toLowerCase();
-    const types = {
-      '.mp4': 'video/mp4', '.mkv': 'video/x-matroska', '.avi': 'video/x-msvideo',
-      '.mov': 'video/quicktime', '.wmv': 'video/x-ms-wmv', '.flv': 'video/x-flv',
-      '.webm': 'video/webm', '.m4v': 'video/mp4', '.mpg': 'video/mpeg', '.mpeg': 'video/mpeg',
-    };
-    return types[ext] || 'application/octet-stream';
+    return getMimeType(filename);
   }
 
   destroy() {
@@ -217,18 +200,7 @@ class LibraryManager {
       uploads: 0,
       dht: true,
       path: itemDir,
-      trackers: [
-        'udp://tracker.opentrackr.org:1337/announce',
-        'udp://open.stealth.si:80/announce',
-        'udp://tracker.openbittorrent.com:6969/announce',
-        'udp://exodus.desync.com:6969/announce',
-        'udp://tracker.torrent.eu.org:451/announce',
-        'udp://open.demonii.com:1337/announce',
-        'udp://tracker.coppersurfer.tk:6969',
-        'udp://p4p.arenabg.com:1337',
-        'udp://tracker.leechers-paradise.org:6969',
-        'udp://explodie.org:6969/announce',
-      ],
+      trackers: TRACKERS,
     });
 
     this._engines.set(id, engine);
@@ -335,7 +307,7 @@ class LibraryManager {
   }
 
   _selectVideoFile(files) {
-    const videoFiles = files.filter(f => this._isFileNameSafe(f.name));
+    const videoFiles = files.filter(f => isFileNameSafe(f.name));
     if (videoFiles.length === 0) return null;
     if (videoFiles.length === 1) return videoFiles[0];
 
@@ -346,23 +318,6 @@ class LibraryManager {
 
     // Pick the largest file (likely the main video)
     return candidates.reduce((a, b) => (a.length > b.length ? a : b));
-  }
-
-  // ─── File Safety ────────────────────────────────
-
-  _isFileNameSafe(filename) {
-    if (!filename) return false;
-    const normalized = path.normalize(filename);
-    if (normalized.startsWith('..') || path.isAbsolute(normalized)) return false;
-    if (filename.includes('..')) return false;
-    const parts = path.basename(filename).split('.');
-    for (let i = 1; i < parts.length; i++) {
-      const ext = '.' + parts[i].toLowerCase();
-      if (DANGEROUS_EXTENSIONS.has(ext)) return false;
-    }
-    const finalExt = path.extname(filename).toLowerCase();
-    if (!VIDEO_EXTENSIONS.has(finalExt)) return false;
-    return true;
   }
 
   // ─── Metadata Persistence ──────────────────────
@@ -390,7 +345,11 @@ class LibraryManager {
   _saveMetadata() {
     try {
       const data = [...this._items.values()];
-      fs.writeFileSync(this._metadataFile, JSON.stringify(data, null, 2), 'utf8');
+      const json = JSON.stringify(data, null, 2);
+      // Atomic write: write to temp file then rename to prevent corruption
+      const tmpFile = this._metadataFile + '.tmp.' + process.pid;
+      fs.writeFileSync(tmpFile, json, 'utf8');
+      fs.renameSync(tmpFile, this._metadataFile);
     } catch (err) {
       console.error(`[Library] Failed to save metadata: ${err.message}`);
     }

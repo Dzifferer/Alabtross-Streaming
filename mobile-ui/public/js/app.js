@@ -845,13 +845,37 @@
     navigateTo('player');
     dom.playerOverlay.classList.remove('hidden');
 
-    // Custom mode torrents need time to connect — show status
-    if (stream._customMode) {
-      dom.playerOverlay.innerHTML = `
-        <div class="spinner"></div>
-        <p>Connecting to torrent peers...</p>
-        <p style="font-size:12px;color:var(--text-muted)">This may take 30-60 seconds</p>
-      `;
+    // Build loading screen with poster
+    const poster = state.currentMeta?.poster || '';
+    const title = state.currentMeta?.name || '';
+    const statusLabel = stream._customMode ? 'Connecting to torrent peers...' : 'Loading stream...';
+    dom.playerOverlay.innerHTML = `
+      ${poster ? `<img class="loading-poster" src="${poster}" alt="">` : ''}
+      ${title ? `<div class="loading-title">${escapeHTML(title)}</div>` : ''}
+      <div class="loading-bar-container"><div class="loading-bar"></div></div>
+      <div class="loading-status">${statusLabel}</div>
+      ${stream._customMode ? '<div class="loading-sub">This may take 30-60 seconds</div>' : ''}
+    `;
+
+    // Poll torrent status for custom mode streams
+    let statusInterval = null;
+    if (stream._customMode && stream.infoHash) {
+      statusInterval = setInterval(async () => {
+        try {
+          const res = await fetch(`/api/torrent-status/${stream.infoHash}`);
+          if (!res.ok) return;
+          const data = await res.json();
+          const statusEl = dom.playerOverlay.querySelector('.loading-status');
+          if (statusEl) {
+            const speed = data.downloadSpeed > 0
+              ? (data.downloadSpeed / 1024).toFixed(0) + ' KB/s'
+              : '';
+            statusEl.textContent = data.numPeers > 0
+              ? `Buffering from ${data.numPeers} peer${data.numPeers !== 1 ? 's' : ''}${speed ? ' · ' + speed : ''}`
+              : 'Connecting to torrent peers...';
+          }
+        } catch (_) { /* ignore polling errors */ }
+      }, 2000);
     }
 
     try {
@@ -880,9 +904,11 @@
         dom.videoPlayer.addEventListener('error', onError, { once: true });
       });
 
+      if (statusInterval) clearInterval(statusInterval);
       await dom.videoPlayer.play();
       dom.playerOverlay.classList.add('hidden');
     } catch (e) {
+      if (statusInterval) clearInterval(statusInterval);
       let hint = escapeHTML(e.message);
       if (e.message.includes('Media error') || e.message.includes('no supported source')) {
         hint += '<br><span style="font-size:12px">The file may be MKV format — browsers only support MP4/WebM</span>';

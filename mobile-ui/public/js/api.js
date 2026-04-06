@@ -10,7 +10,7 @@ const CINEMETA_URL = 'https://v3-cinemeta.strem.io';
 
 class StremioAPI {
   constructor() {
-    this.mode = localStorage.getItem('streaming_mode') || 'stremio';
+    this.mode = localStorage.getItem('streaming_mode') || 'custom';
     this.addons = this._loadAddons();
     this.serverUrl = localStorage.getItem('stremio_server') || '';
     this._manifestCache = new Map();

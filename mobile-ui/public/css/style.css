@@ -27,6 +27,147 @@
   --safe-bottom: env(safe-area-inset-bottom, 0px);
 }
 
+/* ===== Custom Mode — Movie Theater Theme ===== */
+.theme-custom {
+  --bg: #0d0808;
+  --bg-card: #1a1010;
+  --bg-elevated: #241616;
+  --bg-input: #1c1010;
+  --text: #f0e6e6;
+  --text-dim: #a08888;
+  --text-muted: #6b5050;
+  --accent: #c41a1a;
+  --accent-glow: rgba(196, 26, 26, 0.3);
+}
+
+/* Curtain side decorations */
+.theme-custom #content {
+  background:
+    linear-gradient(90deg,
+      rgba(139, 15, 15, 0.25) 0%,
+      rgba(139, 15, 15, 0.08) 3%,
+      transparent 6%
+    ),
+    linear-gradient(270deg,
+      rgba(139, 15, 15, 0.25) 0%,
+      rgba(139, 15, 15, 0.08) 3%,
+      transparent 6%
+    ),
+    var(--bg);
+}
+
+/* Curtain valance on top bar */
+.theme-custom #top-bar {
+  background: linear-gradient(180deg, #2a0a0a 0%, var(--bg) 100%);
+  border-bottom: 2px solid rgba(139, 15, 15, 0.4);
+  box-shadow: 0 2px 12px rgba(139, 15, 15, 0.15);
+}
+
+/* Gold title text for theater feel */
+.theme-custom #page-title {
+  background: linear-gradient(135deg, #d4a847, #f2d68a, #d4a847);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Curtain drape on bottom nav */
+.theme-custom #bottom-nav {
+  background: linear-gradient(0deg, #0d0808 60%, #1a0a0a 100%);
+  border-top: 2px solid rgba(139, 15, 15, 0.3);
+}
+
+.theme-custom .nav-btn.active {
+  color: #d4a847;
+}
+
+/* Cards get a subtle theater poster frame */
+.theme-custom .card-poster {
+  border: 1px solid rgba(139, 15, 15, 0.3);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+/* Stream items in custom mode */
+.theme-custom .stream-icon {
+  background: rgba(139, 15, 15, 0.2);
+}
+
+.theme-custom .stream-icon svg {
+  color: #d4a847;
+}
+
+.theme-custom .stream-item:active {
+  border-color: #c41a1a;
+}
+
+/* Season tabs in theater mode */
+.theme-custom .season-tab.active {
+  background: #c41a1a;
+  border-color: #c41a1a;
+}
+
+/* Detail hero gets a vignette */
+.theme-custom .detail-hero-gradient {
+  background: linear-gradient(transparent 30%, var(--bg));
+}
+
+.theme-custom .detail-hero::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at center, transparent 50%, rgba(13, 8, 8, 0.6) 100%);
+  z-index: 1;
+  pointer-events: none;
+}
+
+/* Rating stars go gold */
+.theme-custom .detail-tag.rating {
+  background: rgba(212, 168, 71, 0.15);
+  color: #d4a847;
+}
+
+/* Catalog row titles */
+.theme-custom .catalog-row-title {
+  color: #f0e6e6;
+}
+
+/* Search bar in theater mode */
+.theme-custom .search-input-wrap:focus-within {
+  border-color: #c41a1a;
+  box-shadow: 0 0 0 3px rgba(196, 26, 26, 0.2);
+}
+
+/* Mode toggle slider goes red in custom */
+.theme-custom .mode-slider {
+  background: #c41a1a;
+}
+
+/* Source icons go gold */
+.theme-custom .source-icon {
+  color: #d4a847;
+  background: rgba(212, 168, 71, 0.1);
+}
+
+/* Spinner in custom mode */
+.theme-custom .spinner {
+  border-top-color: #c41a1a;
+}
+
+/* Toast in custom mode */
+.theme-custom .toast {
+  background: #241616;
+  border-color: rgba(139, 15, 15, 0.3);
+}
+
+/* Settings buttons */
+.theme-custom .btn-sm {
+  background: #c41a1a;
+}
+
+.theme-custom .setting-row input:focus {
+  border-color: #c41a1a;
+}
+
 html, body {
   height: 100%;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;

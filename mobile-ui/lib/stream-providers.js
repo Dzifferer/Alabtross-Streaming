@@ -24,8 +24,13 @@ function sanitizeImdbId(id) {
 
 // Use Node's https module instead of undici fetch — undici has connectivity
 // issues on ARM/Jetson with Cloudflare IPs, while https module works fine.
-function httpGet(url, timeoutMs = 10000) {
+const MAX_REDIRECTS = 5;
+
+function httpGet(url, timeoutMs = 10000, _redirectCount = 0) {
   return new Promise((resolve, reject) => {
+    if (_redirectCount > MAX_REDIRECTS) {
+      return reject(new Error('Too many redirects'));
+    }
     const mod = url.startsWith('https') ? https : http;
     const req = mod.get(url, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
@@ -33,7 +38,7 @@ function httpGet(url, timeoutMs = 10000) {
       family: 4, // Force IPv4
     }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        httpGet(res.headers.location, timeoutMs).then(resolve, reject);
+        httpGet(res.headers.location, timeoutMs, _redirectCount + 1).then(resolve, reject);
         res.resume();
         return;
       }
@@ -225,15 +230,28 @@ async function searchEZTV(imdbId) {
   const streams = [];
   // EZTV wants numeric IMDB ID without 'tt' prefix
   const numericId = imdbId.replace(/^tt0*/, '');
-  const data = await fetchJSON(
-    `https://eztv.re/api/get-torrents?imdb_id=${numericId}&limit=50`
-  );
-  if (!data || !data.torrents) {
+
+  // Fetch multiple pages for long-running series (up to 200 results)
+  const pages = [1, 2, 3, 4];
+  const limit = 50;
+  const allTorrents = [];
+
+  for (const page of pages) {
+    const data = await fetchJSON(
+      `https://eztv.re/api/get-torrents?imdb_id=${numericId}&limit=${limit}&page=${page}`
+    );
+    if (!data || !data.torrents || data.torrents.length === 0) break;
+    allTorrents.push(...data.torrents);
+    // Stop if we got fewer than limit (no more pages)
+    if (data.torrents.length < limit) break;
+  }
+
+  if (allTorrents.length === 0) {
     console.log(`[EZTV] No results for ${imdbId} (numeric: ${numericId})`);
     return streams;
   }
 
-  for (const t of data.torrents) {
+  for (const t of allTorrents) {
     if (!t.hash) continue;
     const hash = t.hash.toLowerCase();
     const seeds = t.seeds || 0;
@@ -316,9 +334,106 @@ async function search1337x(query) {
   return streams;
 }
 
+// ─── Nyaa.si Provider (Anime) ──────────────────────
+
+async function searchNyaa(query, season, episode) {
+  const streams = [];
+
+  // Build search query — for anime, try title + episode number
+  let searchQuery = query;
+  if (season !== undefined && episode !== undefined) {
+    // Anime uses multiple numbering conventions
+    const epPadded = String(episode).padStart(2, '0');
+    const epPadded3 = String(episode).padStart(3, '0');
+    // Try absolute episode number (most common for anime)
+    searchQuery = `${query} ${epPadded}`;
+  }
+
+  // Nyaa.si RSS feed returns XML with torrent data
+  // Category 1_2 = Anime - English-translated
+  const url = `https://nyaa.si/?f=0&c=1_2&q=${encodeURIComponent(searchQuery)}&s=seeders&o=desc&page=rss`;
+  const xml = await fetchHTML(url, 12000);
+  if (!xml) {
+    console.log(`[Nyaa] No response for "${searchQuery}"`);
+    return streams;
+  }
+
+  // Parse RSS XML manually (no cheerio needed for simple RSS)
+  const items = xml.split('<item>').slice(1);
+  for (const item of items.slice(0, 20)) {
+    const titleMatch = item.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>|<title>(.*?)<\/title>/);
+    const linkMatch = item.match(/<nyaa:infoHash>(.*?)<\/nyaa:infoHash>/);
+    const seedMatch = item.match(/<nyaa:seeders>(.*?)<\/nyaa:seeders>/);
+    const sizeMatch = item.match(/<nyaa:size>(.*?)<\/nyaa:size>/);
+
+    if (!linkMatch) continue;
+    const hash = linkMatch[1].toLowerCase();
+    const title = (titleMatch ? (titleMatch[1] || titleMatch[2]) : 'Unknown').trim();
+    const seeds = seedMatch ? parseInt(seedMatch[1], 10) : 0;
+    const sizeStr = sizeMatch ? sizeMatch[1] : '';
+
+    const quality = title.match(/\b(2160p|1080p|720p|480p)\b/i);
+
+    // Detect if this is a batch/pack release
+    const isBatch = /\bbatch\b/i.test(title) || /\bcomplete\b/i.test(title) ||
+      /\d+\s*[-~]\s*\d+/.test(title) || /\bseason\s*\d/i.test(title) ||
+      /\bS\d+\b/i.test(title) && !/\bS\d+E\d+\b/i.test(title);
+
+    streams.push({
+      infoHash: hash,
+      title: `${title}\n${quality ? quality[1] + ' ' : ''}${sizeStr} | Seeds: ${seeds}${isBatch ? ' | BATCH' : ''}`,
+      magnetUri: buildMagnet(hash, title),
+      quality: quality ? quality[1] : '',
+      size: sizeStr,
+      seeds,
+      source: 'Nyaa',
+      isBatch,
+    });
+  }
+
+  // If we didn't find individual episodes, try batch/pack search
+  if (streams.length < 3 && season !== undefined) {
+    const batchQuery = `${query} batch`;
+    const batchUrl = `https://nyaa.si/?f=0&c=1_2&q=${encodeURIComponent(batchQuery)}&s=seeders&o=desc&page=rss`;
+    const batchXml = await fetchHTML(batchUrl, 12000);
+    if (batchXml) {
+      const batchItems = batchXml.split('<item>').slice(1);
+      for (const item of batchItems.slice(0, 10)) {
+        const titleMatch = item.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>|<title>(.*?)<\/title>/);
+        const linkMatch = item.match(/<nyaa:infoHash>(.*?)<\/nyaa:infoHash>/);
+        const seedMatch = item.match(/<nyaa:seeders>(.*?)<\/nyaa:seeders>/);
+        const sizeMatch = item.match(/<nyaa:size>(.*?)<\/nyaa:size>/);
+
+        if (!linkMatch) continue;
+        const hash = linkMatch[1].toLowerCase();
+        if (streams.some(s => s.infoHash === hash)) continue; // dedup
+
+        const title = (titleMatch ? (titleMatch[1] || titleMatch[2]) : 'Unknown').trim();
+        const seeds = seedMatch ? parseInt(seedMatch[1], 10) : 0;
+        const sizeStr = sizeMatch ? sizeMatch[1] : '';
+        const quality = title.match(/\b(2160p|1080p|720p|480p)\b/i);
+
+        streams.push({
+          infoHash: hash,
+          title: `${title}\n${quality ? quality[1] + ' ' : ''}${sizeStr} | Seeds: ${seeds} | BATCH`,
+          magnetUri: buildMagnet(hash, title),
+          quality: quality ? quality[1] : '',
+          size: sizeStr,
+          seeds,
+          source: 'Nyaa',
+          isBatch: true,
+        });
+      }
+    }
+  }
+
+  console.log(`[Nyaa] Found ${streams.length} results for "${searchQuery}"`);
+  return streams;
+}
+
 // ─── Stream Filtering & Ranking ─────────────────────
 
-const MIN_SEEDS = 3;
+const MIN_SEEDS = 1;
 
 /**
  * Detect the likely file format from the torrent name.
@@ -336,10 +451,19 @@ function detectFormat(name) {
 }
 
 /**
+ * Check if a stream needs FFmpeg remuxing to be playable.
+ * x265/HEVC content needs remuxing but IS playable with our FFmpeg pipeline.
+ */
+function needsRemux(name) {
+  return /\bx265\b/i.test(name) || /\bH\.?265\b/i.test(name) || /\bHEVC\b/i.test(name);
+}
+
+/**
  * Filter and rank streams:
  * - Remove torrents with too few seeds
  * - Tag each with detected format
- * - Sort: browser-playable first, then by seeds
+ * - x265/HEVC streams are kept but marked as needing remux
+ * - Sort: native-playable first, then remuxable, then by seeds
  */
 function filterAndRank(streams) {
   // Filter dead torrents
@@ -348,25 +472,27 @@ function filterAndRank(streams) {
   // Tag each stream with format info
   for (const s of filtered) {
     s.format = detectFormat(s.title);
-    s.browserPlayable = s.format === 'MP4' || s.format === 'WebM' || s.format === 'MKV';
+    s.needsRemux = needsRemux(s.title);
+    s.browserPlayable = (s.format === 'MP4' || s.format === 'WebM') && !s.needsRemux;
+    s.remuxPlayable = s.format === 'MKV' || s.needsRemux;
     // Add format to the display title
     if (s.format !== 'Unknown') {
-      s.title = s.title.replace(/\n/, ` [${s.format}]\n`);
+      const remuxTag = s.needsRemux ? ' ⟳REMUX' : '';
+      s.title = s.title.replace(/\n/, ` [${s.format}${remuxTag}]\n`);
     }
   }
 
-  // Remove streams with codecs browsers can't play
+  // Only remove truly unplayable formats (AVI, WMV) — keep x265 since we can remux
   filtered = filtered.filter(s => {
-    const t = s.title || '';
-    if (/\bx265\b/i.test(t) || /\bH\.?265\b/i.test(t) || /\bHEVC\b/i.test(t)) return false;
     if (s.format === 'AVI' || s.format === 'WMV') return false;
     return true;
   });
 
-  // Sort: browser-playable first, then by seeds descending
+  // Sort: native browser-playable > remuxable > unknown, then by seeds descending
   filtered.sort((a, b) => {
-    if (a.browserPlayable && !b.browserPlayable) return -1;
-    if (!a.browserPlayable && b.browserPlayable) return 1;
+    const scoreA = a.browserPlayable ? 2 : (a.remuxPlayable ? 1 : 0);
+    const scoreB = b.browserPlayable ? 2 : (b.remuxPlayable ? 1 : 0);
+    if (scoreA !== scoreB) return scoreB - scoreA;
     return (b.seeds || 0) - (a.seeds || 0);
   });
 
@@ -377,7 +503,8 @@ function filterAndRank(streams) {
 
 /**
  * Get streams for a movie by IMDB ID.
- * Queries TPB first, then YTS and 1337x in parallel.
+ * Queries Torrentio first, then fallback scrapers.
+ * Always runs fallbacks if filtered results are too few.
  */
 async function getMovieStreams(imdbId, title) {
   const id = sanitizeImdbId(imdbId);
@@ -391,9 +518,12 @@ async function getMovieStreams(imdbId, title) {
     return [];
   });
 
-  // If Torrentio returned enough results, skip flaky scrapers
+  // Check how many Torrentio results survive filtering (not just raw count)
+  const usableTorrentio = filterAndRank(torrentioStreams);
+
   let fallbackStreams = [];
-  if (torrentioStreams.length < 3) {
+  if (usableTorrentio.length < 3) {
+    console.log(`[Streams] Only ${usableTorrentio.length} usable Torrentio results, querying fallbacks...`);
     const tpbQuery = title || id;
     const [tpb, yts, x1337] = await Promise.all([
       searchTPB(tpbQuery).catch(e => { console.log(`[TPB] Error: ${e.message}`); return []; }),
@@ -414,13 +544,25 @@ async function getMovieStreams(imdbId, title) {
   }
 
   const ranked = filterAndRank(combined);
-  console.log(`[Streams] Total: ${ranked.length} streams (${ranked.filter(s => s.browserPlayable).length} browser-playable) for ${id}`);
+  console.log(`[Streams] Total: ${ranked.length} streams (${ranked.filter(s => s.browserPlayable).length} native, ${ranked.filter(s => s.remuxPlayable).length} remuxable) for ${id}`);
   return ranked;
 }
 
 /**
+ * Detect if a title is likely anime based on common patterns.
+ */
+function isLikelyAnime(title) {
+  if (!title) return false;
+  const t = title.toLowerCase();
+  // Common anime keywords/patterns
+  return /\b(anime|sub|dub|dual[\s-]?audio|multi[\s-]?sub)\b/i.test(t) ||
+    /\b(shippuden|boruto|piece|naruto|bleach|dragon\s*ball|attack\s*on\s*titan|jujutsu|demon\s*slayer|one\s*punch|hunter\s*x|fullmetal|my\s*hero|sword\s*art)\b/i.test(t);
+}
+
+/**
  * Get streams for a TV episode by IMDB ID + season/episode.
- * Queries TPB and EZTV first, then 1337x as fallback.
+ * Queries Torrentio, fallback scrapers, and Nyaa (for anime) in parallel.
+ * Supports absolute episode numbering and batch/pack torrents.
  */
 async function getSeriesStreams(imdbId, season, episode, title) {
   const id = sanitizeImdbId(imdbId);
@@ -439,31 +581,68 @@ async function getSeriesStreams(imdbId, season, episode, title) {
     return [];
   });
 
-  // If Torrentio returned enough results, skip flaky scrapers
+  // Check how many Torrentio results survive filtering
+  const usableTorrentio = filterAndRank(torrentioStreams);
+
+  // Determine if this might be anime (for Nyaa search)
+  const anime = isLikelyAnime(title);
+
   let fallbackCombined = [];
-  if (torrentioStreams.length < 3) {
+  if (usableTorrentio.length < 3) {
+    console.log(`[Streams] Only ${usableTorrentio.length} usable Torrentio results, querying fallbacks...`);
     const tpbQuery = se ? `${title || id} ${seTag}` : (title || id);
 
-    const [tpbStreams, eztvStreams, x1337Streams] = await Promise.all([
+    const promises = [
       searchTPB(tpbQuery).catch(e => { console.log(`[TPB] Error: ${e.message}`); return []; }),
       searchEZTV(id).catch(e => { console.log(`[EZTV] Error: ${e.message}`); return []; }),
       se ? search1337x(`${title || id} ${seTag}`).catch(e => { console.log(`[1337x] Error: ${e.message}`); return []; }) : Promise.resolve([]),
-    ]);
+    ];
+
+    // Always search Nyaa for anime, or if title suggests it
+    if (anime || usableTorrentio.length === 0) {
+      promises.push(
+        searchNyaa(title || id, season, episode).catch(e => { console.log(`[Nyaa] Error: ${e.message}`); return []; })
+      );
+    }
+
+    const results = await Promise.all(promises);
+    const [tpbStreams, eztvStreams, x1337Streams] = results;
+    const nyaaStreams = results[3] || [];
 
     // Filter EZTV results to matching season/episode if specified
     let filteredEztv = eztvStreams;
     if (se) {
+      // Try exact season/episode match first
       filteredEztv = eztvStreams.filter(s =>
         s.season === season && s.episode === episode
       );
+      // Fallback: match S01E05 pattern in title
       if (filteredEztv.length === 0) {
         filteredEztv = eztvStreams.filter(s =>
           s.title && s.title.toUpperCase().includes(seTag)
         );
       }
+      // For anime: also try absolute episode number (e.g., "- 05" or "E05" without season)
+      if (filteredEztv.length === 0 && episode !== undefined) {
+        const absEp = String(episode).padStart(2, '0');
+        const absEp3 = String(episode).padStart(3, '0');
+        filteredEztv = eztvStreams.filter(s => {
+          const t = (s.title || '').toUpperCase();
+          return t.includes(`- ${absEp}`) || t.includes(`- ${absEp3}`) ||
+            t.includes(`E${absEp}`) || t.includes(`EP${absEp}`) ||
+            t.includes(`EPISODE ${episode}`);
+        });
+      }
     }
 
-    fallbackCombined = [...tpbStreams, ...filteredEztv, ...x1337Streams];
+    fallbackCombined = [...tpbStreams, ...filteredEztv, ...x1337Streams, ...nyaaStreams];
+  } else if (anime) {
+    // Even if Torrentio has results, also check Nyaa for anime (often better quality)
+    const nyaaStreams = await searchNyaa(title || id, season, episode).catch(e => {
+      console.log(`[Nyaa] Error: ${e.message}`);
+      return [];
+    });
+    fallbackCombined = [...nyaaStreams];
   }
 
   const seen = new Set();
@@ -476,7 +655,8 @@ async function getSeriesStreams(imdbId, season, episode, title) {
   }
 
   const ranked = filterAndRank(combined);
-  console.log(`[Streams] Total: ${ranked.length} streams (${ranked.filter(s => s.browserPlayable).length} browser-playable) for ${id} ${seTag}`);
+  const batchCount = ranked.filter(s => s.isBatch).length;
+  console.log(`[Streams] Total: ${ranked.length} streams (${ranked.filter(s => s.browserPlayable).length} native, ${ranked.filter(s => s.remuxPlayable).length} remuxable, ${batchCount} batch) for ${id} ${seTag}`);
   return ranked;
 }
 

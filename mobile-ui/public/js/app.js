@@ -192,10 +192,14 @@
       if (e.name === 'NotAllowedError') {
         videoEl.muted = true;
         await videoEl.play();
-        showUnmuteOverlay(videoEl);
       } else {
         throw e;
       }
+    }
+    // Some browsers silently mute instead of throwing NotAllowedError —
+    // always check after play succeeds and show the unmute overlay if needed
+    if (videoEl.muted) {
+      showUnmuteOverlay(videoEl);
     }
   }
 

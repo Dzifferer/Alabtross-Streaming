@@ -86,8 +86,9 @@ app.get('/api/streams/movie/:imdbId', rateLimit, async (req, res) => {
   if (!/^tt\d{1,10}$/.test(imdbId)) {
     return res.status(400).json({ error: 'Invalid IMDB ID' });
   }
+  const title = req.query.title || '';
   try {
-    const streams = await getMovieStreams(imdbId);
+    const streams = await getMovieStreams(imdbId, title);
     res.json({ streams });
   } catch (err) {
     console.error('[API] Movie stream error:', err.message);
@@ -103,8 +104,9 @@ app.get('/api/streams/series/:imdbId', rateLimit, async (req, res) => {
   }
   const season = req.query.season ? parseInt(req.query.season, 10) : undefined;
   const episode = req.query.episode ? parseInt(req.query.episode, 10) : undefined;
+  const title = req.query.title || '';
   try {
-    const streams = await getSeriesStreams(imdbId, season, episode);
+    const streams = await getSeriesStreams(imdbId, season, episode, title);
     res.json({ streams });
   } catch (err) {
     console.error('[API] Series stream error:', err.message);

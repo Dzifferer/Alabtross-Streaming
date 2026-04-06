@@ -355,11 +355,20 @@ function filterAndRank(streams) {
     }
   }
 
-  // Only return browser-playable streams (MP4/WebM)
-  filtered = filtered.filter(s => s.browserPlayable);
+  // Remove streams with codecs browsers can't play
+  filtered = filtered.filter(s => {
+    const t = s.title || '';
+    if (/\bx265\b/i.test(t) || /\bH\.?265\b/i.test(t) || /\bHEVC\b/i.test(t)) return false;
+    if (s.format === 'AVI' || s.format === 'WMV') return false;
+    return true;
+  });
 
-  // Sort by seeds descending
-  filtered.sort((a, b) => (b.seeds || 0) - (a.seeds || 0));
+  // Sort: browser-playable first, then by seeds descending
+  filtered.sort((a, b) => {
+    if (a.browserPlayable && !b.browserPlayable) return -1;
+    if (!a.browserPlayable && b.browserPlayable) return 1;
+    return (b.seeds || 0) - (a.seeds || 0);
+  });
 
   return filtered;
 }

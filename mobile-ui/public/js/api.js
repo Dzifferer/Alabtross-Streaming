@@ -333,12 +333,61 @@ class StremioAPI {
     const streams = await this._fetchBackendStreams(backendUrl);
 
     // Filter out truly unplayable formats — keep x265/HEVC since server can remux
-    return streams.filter(s => {
+    const filtered = streams.filter(s => {
       const t = s.title || '';
       if (/\.avi\b/i.test(t) || /\bXviD\b/i.test(t) || /\bDivX\b/i.test(t)) return false;
       if (/\.wmv\b/i.test(t)) return false;
       return true;
     });
+
+    return this._narrowStreams(filtered);
+  }
+
+  /**
+   * Narrow streams to the best ~6 options by scoring quality, format, seeds, and size.
+   * Reduces cognitive load and makes preload hit rate high.
+   */
+  _narrowStreams(streams) {
+    const qualityScore = { '2160p': 4, '4K': 4, '1080p': 3, '720p': 2, '480p': 1 };
+    const formatScore = { 'MP4': 2, 'WebM': 2, 'MKV': 1 };
+
+    const scored = streams
+      .filter(s => (s.seeds || 0) >= 3) // drop dead torrents
+      .map(s => {
+        const title = s.title || '';
+        // Detect quality from title
+        const qMatch = title.match(/\b(4K|2160p|1080p|720p|480p)\b/i);
+        const q = qMatch ? (qualityScore[qMatch[1].toUpperCase()] || 0) : 0;
+        const f = formatScore[s.format] || 0;
+        const seeds = s.seeds || 0;
+        const seedScore = Math.min(Math.log10(seeds + 1) * 2, 4);
+        // Penalise very large files (slow to buffer)
+        const sizeVal = parseFloat(s.size);
+        const sizePenalty = (sizeVal > 5 && /GB/i.test(s.size || '')) ? -1 : 0;
+        const qualityKey = qMatch ? qMatch[1].toUpperCase() : 'unknown';
+        return { ...s, _score: q + f + seedScore + sizePenalty, _qualityKey: qualityKey };
+      })
+      .sort((a, b) => b._score - a._score);
+
+    if (scored.length === 0) return streams.slice(0, 6); // fallback if all <3 seeds
+
+    // Keep best per quality tier so user has resolution choice
+    const bestPerQuality = new Map();
+    for (const s of scored) {
+      if (!bestPerQuality.has(s._qualityKey)) bestPerQuality.set(s._qualityKey, s);
+    }
+
+    // Merge top-3 by score + best-per-quality, dedup by infoHash
+    const top3 = scored.slice(0, 3);
+    const merged = new Map();
+    for (const s of [...top3, ...bestPerQuality.values()]) {
+      if (s.infoHash && !merged.has(s.infoHash)) merged.set(s.infoHash, s);
+      else if (!s.infoHash) merged.set(Math.random(), s);
+    }
+
+    const result = [...merged.values()].slice(0, 6);
+    // Clean up internal scoring fields
+    return result.map(({ _score, _qualityKey, ...rest }) => rest);
   }
 
   async _fetchBackendStreams(url) {

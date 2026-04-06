@@ -546,7 +546,7 @@
 
     if (streams.length === 0) {
       const hint = api.getMode() === 'custom'
-        ? 'No torrents found on YTS, EZTV, or 1337x'
+        ? 'No torrents found on TPB, YTS, EZTV, or 1337x — check server terminal for details'
         : 'Try adding more stream addons in Settings';
       container.innerHTML = `
         <div class="empty-state" style="padding:32px 0">

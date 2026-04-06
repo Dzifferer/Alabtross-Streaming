@@ -83,7 +83,7 @@ app.use('/stremio-api', (req, res, next) => {
 // GET /api/streams/movie/:imdbId
 app.get('/api/streams/movie/:imdbId', rateLimit, async (req, res) => {
   const { imdbId } = req.params;
-  if (!/^tt\d{7,10}$/.test(imdbId)) {
+  if (!/^tt\d{1,10}$/.test(imdbId)) {
     return res.status(400).json({ error: 'Invalid IMDB ID' });
   }
   try {
@@ -98,7 +98,7 @@ app.get('/api/streams/movie/:imdbId', rateLimit, async (req, res) => {
 // GET /api/streams/series/:imdbId?season=N&episode=N
 app.get('/api/streams/series/:imdbId', rateLimit, async (req, res) => {
   const { imdbId } = req.params;
-  if (!/^tt\d{7,10}$/.test(imdbId)) {
+  if (!/^tt\d{1,10}$/.test(imdbId)) {
     return res.status(400).json({ error: 'Invalid IMDB ID' });
   }
   const season = req.query.season ? parseInt(req.query.season, 10) : undefined;

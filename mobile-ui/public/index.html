@@ -250,6 +250,15 @@
           </div>
 
           <div class="setting-group">
+            <label>Tunnel Mode</label>
+            <div class="tunnel-mode-toggle">
+              <button class="tunnel-mode-btn active" id="tunnel-full" data-mode="full">Full Tunnel</button>
+              <button class="tunnel-mode-btn" id="tunnel-split" data-mode="split">Split Tunnel</button>
+            </div>
+            <span id="tunnel-mode-hint" class="setting-hint">All traffic goes through VPN — most secure, but local casting won't work</span>
+          </div>
+
+          <div class="setting-group">
             <label>VPN Profile</label>
             <div id="vpn-profile-list" class="vpn-profile-list">
               <div class="loading-state" style="padding: 24px;">
@@ -320,6 +329,19 @@
           <div id="player-overlay" class="hidden">
             <div class="spinner"></div>
             <p>Loading stream...</p>
+          </div>
+          <!-- Cast Device Picker (server-side discovery for VPN users) -->
+          <div id="cast-device-picker" class="cast-picker-backdrop hidden">
+            <div class="cast-picker-panel">
+              <div class="cast-picker-header">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M2 16.1A5 5 0 015.9 20M2 12.05A9 9 0 019.95 20M2 8V6a2 2 0 012-2h16a2 2 0 012 2v12a2 2 0 01-2 2h-6"/>
+                  <circle cx="2" cy="20" r="1" fill="currentColor"/>
+                </svg>
+                <h3>Cast to device</h3>
+              </div>
+              <div id="cast-device-list" class="cast-device-list"></div>
+            </div>
           </div>
         </div>
       </div>

@@ -9,6 +9,8 @@ const { createProxyMiddleware } = require('http-proxy-middleware');
 const { getMovieStreams, getSeriesStreams, diagnoseProviders } = require('./lib/stream-providers');
 const TorrentEngine = require('./lib/torrent-engine');
 const LibraryManager = require('./lib/library-manager');
+const { discoverDevices, getLocalIP } = require('./lib/local-discovery');
+const castManager = require('./lib/cast-manager');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -778,6 +780,52 @@ app.get('/api/vpn/profile/:name', (req, res) => {
   }
 });
 
+// GET /api/vpn/profile/:name/split-tunnel — return a modified config for split tunneling
+// Rewrites AllowedIPs from 0.0.0.0/0 to just the server's VPN IP, so the phone's
+// local WiFi stays active for device discovery and casting.
+app.get('/api/vpn/profile/:name/split-tunnel', (req, res) => {
+  const name = req.params.name.replace(/[^a-zA-Z0-9_-]/g, '');
+  const confPath = path.join(WG_CONFIGS_DIR, `${name}.conf`);
+  try {
+    if (!fs.existsSync(confPath)) {
+      return res.status(404).json({ error: 'Profile not found' });
+    }
+    let config = fs.readFileSync(confPath, 'utf-8');
+
+    // Extract the server's VPN Address from the [Interface] section
+    // (the Address in the [Interface] is the CLIENT's VPN IP, not the server's)
+    // The server's VPN IP is the Endpoint's resolved IP or the Peer's AllowedIPs
+    // For split tunneling, we want to route only the VPN subnet through the tunnel
+
+    // Find the [Interface] Address (e.g., Address = 10.6.0.2/32)
+    const addrMatch = config.match(/^\s*Address\s*=\s*([^\n]+)/mi);
+    if (addrMatch) {
+      // Extract the subnet (e.g., 10.6.0.0/24 from 10.6.0.2/32)
+      const clientAddr = addrMatch[1].trim().split(',')[0].trim();
+      const ipParts = clientAddr.split('/');
+      const ip = ipParts[0];
+      // Build the VPN subnet: replace last octet with 0 and use /24
+      const octets = ip.split('.');
+      if (octets.length === 4) {
+        const vpnSubnet = `${octets[0]}.${octets[1]}.${octets[2]}.0/24`;
+
+        // Replace AllowedIPs = 0.0.0.0/0 (full tunnel) with just the VPN subnet
+        config = config.replace(
+          /^(\s*AllowedIPs\s*=\s*)0\.0\.0\.0\/0.*$/mi,
+          `$1${vpnSubnet}`
+        );
+
+        // Also remove ::/0 if present (IPv6 full tunnel)
+        config = config.replace(/,\s*::\/0/g, '');
+      }
+    }
+
+    res.json({ name, config, splitTunnel: true });
+  } catch (e) {
+    res.status(500).json({ error: 'Cannot read profile' });
+  }
+});
+
 // ─── Concurrent Streams Settings API ──────────────────────────────────
 app.get('/api/settings/max-streams', (req, res) => {
   res.json({ maxConcurrentStreams: MAX_CONCURRENT_STREAMS });
@@ -794,6 +842,116 @@ app.post('/api/settings/max-streams', (req, res) => {
   library._maxConcurrentDownloads = value;
   console.log(`[Settings] Max concurrent streams updated to ${value}`);
   res.json({ maxConcurrentStreams: value });
+});
+
+// ─── Cast / Local Discovery API ──────────────────────────────────────
+// These endpoints let a VPN-connected phone discover and cast to devices
+// on the Jetson's local network. The Jetson acts as the casting bridge.
+
+// Device discovery cache (refreshed on demand, cached briefly)
+let discoveryCache = { devices: [], fetchedAt: 0 };
+const DISCOVERY_CACHE_TTL = 15 * 1000; // 15 seconds
+
+// GET /api/cast/devices — discover castable devices on LAN
+app.get('/api/cast/devices', rateLimit, async (req, res) => {
+  const forceRefresh = req.query.refresh === '1';
+  const now = Date.now();
+
+  if (!forceRefresh && discoveryCache.devices.length > 0 &&
+      now - discoveryCache.fetchedAt < DISCOVERY_CACHE_TTL) {
+    return res.json({
+      devices: discoveryCache.devices,
+      cached: true,
+      localIP: getLocalIP(),
+      chromecastSupported: castManager.isCastv2Available(),
+    });
+  }
+
+  try {
+    console.log('[Cast API] Scanning for local devices...');
+    const devices = await discoverDevices(5000);
+    discoveryCache = { devices, fetchedAt: Date.now() };
+    console.log(`[Cast API] Found ${devices.length} castable device(s)`);
+    res.json({
+      devices,
+      cached: false,
+      localIP: getLocalIP(),
+      chromecastSupported: castManager.isCastv2Available(),
+    });
+  } catch (err) {
+    console.error('[Cast API] Discovery error:', err.message);
+    res.status(500).json({ error: 'Device discovery failed' });
+  }
+});
+
+// POST /api/cast/play — start casting to a device
+// Body: { device, streamUrl, title, mimeType }
+//   - device: a device object from /api/cast/devices
+//   - streamUrl: the path to the stream (e.g. /api/play/<hash> or /api/library/<id>/stream)
+//   - title: display title
+//   - mimeType: optional, defaults to video/mp4
+app.post('/api/cast/play', rateLimit, async (req, res) => {
+  const { device, streamPath, title, mimeType } = req.body;
+
+  if (!device || !device.id || !device.type) {
+    return res.status(400).json({ error: 'Invalid device' });
+  }
+  if (!streamPath) {
+    return res.status(400).json({ error: 'Missing streamPath' });
+  }
+
+  // Build a LAN-reachable URL for the cast device
+  // The stream path is relative to this server, so we build an absolute URL
+  // using the server's LAN IP (not VPN IP)
+  const lanIP = getLocalIP();
+  const mediaUrl = `http://${lanIP}:${PORT}${streamPath}`;
+
+  try {
+    console.log(`[Cast API] Casting to ${device.friendlyName}: ${mediaUrl}`);
+    await castManager.castToDevice(device, mediaUrl, title || 'Alabtross', mimeType || 'video/mp4');
+    res.json({ success: true, mediaUrl, device: device.friendlyName });
+  } catch (err) {
+    console.error(`[Cast API] Cast failed: ${err.message}`);
+    res.status(500).json({ error: `Cast failed: ${err.message}` });
+  }
+});
+
+// POST /api/cast/stop — stop casting on a device
+app.post('/api/cast/stop', rateLimit, async (req, res) => {
+  const { deviceId } = req.body;
+  if (!deviceId) return res.status(400).json({ error: 'Missing deviceId' });
+
+  try {
+    await castManager.stopDevice(deviceId);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/cast/pause — toggle pause on a device
+app.post('/api/cast/pause', rateLimit, async (req, res) => {
+  const { deviceId } = req.body;
+  if (!deviceId) return res.status(400).json({ error: 'Missing deviceId' });
+
+  try {
+    const status = await castManager.pauseDevice(deviceId);
+    res.json({ success: true, status });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/cast/status/:deviceId — get playback status
+app.get('/api/cast/status/:deviceId', async (req, res) => {
+  const status = await castManager.getDeviceStatus(req.params.deviceId);
+  if (!status) return res.status(404).json({ error: 'No active session' });
+  res.json(status);
+});
+
+// GET /api/cast/sessions — list all active cast sessions
+app.get('/api/cast/sessions', (req, res) => {
+  res.json({ sessions: castManager.getAllSessions() });
 });
 
 // Serve static files (no caching for JS/CSS to avoid stale code)

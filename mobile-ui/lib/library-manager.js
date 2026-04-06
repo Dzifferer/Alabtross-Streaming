@@ -34,6 +34,9 @@ class LibraryManager {
 
     this._loadMetadata();
     console.log(`[Library] Initialized at ${this._libraryPath}, ${this._items.size} items loaded`);
+
+    // Auto-resume any downloads that were interrupted (power loss, crash, restart)
+    this._resumeInterruptedDownloads();
   }
 
   // ─── Public API ──────────────────────────────────
@@ -179,10 +182,13 @@ class LibraryManager {
   }
 
   destroy() {
+    console.log('[Library] Shutting down — saving download state for resumption...');
     for (const [id] of this._engines) {
       this._stopDownload(id);
     }
+    // Downloads keep status='downloading' so they auto-resume on next startup
     this._saveMetadata();
+    console.log('[Library] State saved — downloads will resume on next start');
   }
 
   // ─── Download Management ────────────────────────
@@ -328,10 +334,11 @@ class LibraryManager {
         const data = JSON.parse(fs.readFileSync(this._metadataFile, 'utf8'));
         if (Array.isArray(data)) {
           for (const item of data) {
-            // Reset any in-progress downloads from last session
+            // Mark interrupted downloads for auto-resume instead of failing them
             if (item.status === 'downloading') {
-              item.status = 'failed';
-              item.error = 'Server restarted during download';
+              item._needsResume = true;
+              item.downloadSpeed = 0;
+              item.numPeers = 0;
             }
             this._items.set(item.id, item);
           }
@@ -340,6 +347,42 @@ class LibraryManager {
     } catch (err) {
       console.error(`[Library] Failed to load metadata: ${err.message}`);
     }
+  }
+
+  _resumeInterruptedDownloads() {
+    const toResume = [...this._items.values()].filter(i => i._needsResume);
+    if (toResume.length === 0) return;
+
+    console.log(`[Library] Found ${toResume.length} interrupted download(s) — resuming...`);
+
+    for (const item of toResume) {
+      delete item._needsResume;
+
+      // Check if partial file exists on disk to log resume progress
+      if (item.filePath) {
+        const fullPath = path.join(this._libraryPath, item.filePath);
+        try {
+          if (fs.existsSync(fullPath) && item.fileSize > 0) {
+            const stat = fs.statSync(fullPath);
+            const resumeProgress = Math.round((stat.size / item.fileSize) * 100);
+            console.log(`[Library] Resuming "${item.name}" from ${resumeProgress}% (${(stat.size / 1e6).toFixed(1)} / ${(item.fileSize / 1e6).toFixed(1)} MB)`);
+          } else {
+            console.log(`[Library] Resuming "${item.name}" from 0% (no partial file found)`);
+            item.progress = 0;
+          }
+        } catch {
+          console.log(`[Library] Resuming "${item.name}" from 0%`);
+          item.progress = 0;
+        }
+      } else {
+        console.log(`[Library] Resuming "${item.name}" (metadata not yet resolved)`);
+        item.progress = 0;
+      }
+
+      this._startDownload(item.id);
+    }
+
+    this._saveMetadata();
   }
 
   _saveMetadata() {

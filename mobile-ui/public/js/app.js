@@ -309,19 +309,41 @@
 
     // Live TV — append after catalog rows (same as custom mode)
     if (!type) {
-      const tvGroups = await api.getAllLiveTVChannels();
-      for (const group of tvGroups) {
-        const tvRow = document.createElement('div');
-        tvRow.className = 'catalog-row fade-in';
-        tvRow.innerHTML = `
-          <div class="catalog-row-header">
-            <h3 class="catalog-row-title">${escapeHTML(group.sourceName)}</h3>
-            <span class="catalog-row-badge">LIVE</span>
-          </div>
-          <div class="catalog-scroll">${group.channels.slice(0, 30).map(ch => channelCardHTML(ch)).join('')}</div>
-        `;
-        dom.homeCatalogs.appendChild(tvRow);
-        attachChannelListeners(tvRow);
+      try {
+        const tvGroups = await api.getAllLiveTVChannels();
+        if (tvGroups.length > 0) {
+          for (const group of tvGroups) {
+            const tvRow = document.createElement('div');
+            tvRow.className = 'catalog-row fade-in';
+            tvRow.innerHTML = `
+              <div class="catalog-row-header">
+                <h3 class="catalog-row-title">${escapeHTML(group.sourceName)}</h3>
+                <span class="catalog-row-badge">LIVE</span>
+              </div>
+              <div class="catalog-scroll">${group.channels.slice(0, 30).map(ch => channelCardHTML(ch)).join('')}</div>
+            `;
+            dom.homeCatalogs.appendChild(tvRow);
+            attachChannelListeners(tvRow);
+          }
+        } else {
+          const sources = api.getLiveTVSources();
+          if (sources.length > 0) {
+            const tvRow = document.createElement('div');
+            tvRow.className = 'catalog-row fade-in';
+            tvRow.innerHTML = `
+              <div class="catalog-row-header">
+                <h3 class="catalog-row-title">Live TV</h3>
+                <span class="catalog-row-badge">LIVE</span>
+              </div>
+              <div style="padding:16px;color:var(--text-muted);font-size:13px;">
+                Unable to load channels — sources may be offline. Check Live TV settings.
+              </div>
+            `;
+            dom.homeCatalogs.appendChild(tvRow);
+          }
+        }
+      } catch (e) {
+        console.warn('[LiveTV] Error loading channels for homepage:', e);
       }
     }
   }
@@ -383,19 +405,41 @@
     }
 
     // Row 4+: Live TV — from all configured sources (playlists + Stremio TV addons)
-    const tvGroups = await api.getAllLiveTVChannels();
-    for (const group of tvGroups) {
-      const tvRow = document.createElement('div');
-      tvRow.className = 'catalog-row fade-in';
-      tvRow.innerHTML = `
-        <div class="catalog-row-header">
-          <h3 class="catalog-row-title">${escapeHTML(group.sourceName)}</h3>
-          <span class="catalog-row-badge">LIVE</span>
-        </div>
-        <div class="catalog-scroll">${group.channels.slice(0, 30).map(ch => channelCardHTML(ch)).join('')}</div>
-      `;
-      dom.homeCatalogs.appendChild(tvRow);
-      attachChannelListeners(tvRow);
+    try {
+      const tvGroups = await api.getAllLiveTVChannels();
+      if (tvGroups.length > 0) {
+        for (const group of tvGroups) {
+          const tvRow = document.createElement('div');
+          tvRow.className = 'catalog-row fade-in';
+          tvRow.innerHTML = `
+            <div class="catalog-row-header">
+              <h3 class="catalog-row-title">${escapeHTML(group.sourceName)}</h3>
+              <span class="catalog-row-badge">LIVE</span>
+            </div>
+            <div class="catalog-scroll">${group.channels.slice(0, 30).map(ch => channelCardHTML(ch)).join('')}</div>
+          `;
+          dom.homeCatalogs.appendChild(tvRow);
+          attachChannelListeners(tvRow);
+        }
+      } else {
+        const sources = api.getLiveTVSources();
+        if (sources.length > 0) {
+          const tvRow = document.createElement('div');
+          tvRow.className = 'catalog-row fade-in';
+          tvRow.innerHTML = `
+            <div class="catalog-row-header">
+              <h3 class="catalog-row-title">Live TV</h3>
+              <span class="catalog-row-badge">LIVE</span>
+            </div>
+            <div style="padding:16px;color:var(--text-muted);font-size:13px;">
+              Unable to load channels — sources may be offline. Check Live TV settings.
+            </div>
+          `;
+          dom.homeCatalogs.appendChild(tvRow);
+        }
+      }
+    } catch (e) {
+      console.warn('[LiveTV] Error loading channels for homepage:', e);
     }
 
     // If nothing at all loaded, show empty state

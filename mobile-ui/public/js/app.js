@@ -44,6 +44,10 @@
     detailContent: $('#detail-content'),
     videoPlayer: $('#video-player'),
     playerOverlay: $('#player-overlay'),
+    castBtn: $('#cast-btn'),
+    castOverlay: $('#cast-overlay'),
+    castDeviceName: $('#cast-device-name'),
+    castStopBtn: $('#cast-stop-btn'),
     bottomNav: $('#bottom-nav'),
     navBtns: $$('.nav-btn'),
     // Library
@@ -173,6 +177,7 @@
       'detail': 'view-detail',
       'settings': 'view-settings',
       'library': 'view-library',
+      'share': 'view-share',
       'player': 'view-player',
     };
 
@@ -197,7 +202,7 @@
         'home': 'view-home', 'movies': 'view-home', 'series': 'view-home',
         'search': 'view-search', 'detail': 'view-detail',
         'settings': 'view-settings', 'library': 'view-library',
-        'player': 'view-player',
+        'share': 'view-share', 'player': 'view-player',
       };
       const target = $('#' + (viewMap[prev] || 'view-home'));
       if (target) target.classList.add('active');
@@ -215,7 +220,7 @@
   function updateNavUI(view) {
     dom.navBtns.forEach(btn => {
       btn.classList.toggle('active', btn.dataset.view === view ||
-        (btn.dataset.view === 'home' && !['movies', 'series', 'search', 'detail', 'settings', 'library', 'player'].includes(view)));
+        (btn.dataset.view === 'home' && !['movies', 'series', 'search', 'detail', 'settings', 'library', 'share', 'player'].includes(view)));
     });
 
     // Show/hide bottom nav
@@ -224,7 +229,7 @@
   }
 
   function updateTopBar(view, opts = {}) {
-    const showBack = ['detail', 'settings', 'player'].includes(view);
+    const showBack = ['detail', 'settings', 'share', 'player'].includes(view);
     dom.backBtn.classList.toggle('hidden', !showBack);
 
     const titles = {
@@ -235,6 +240,7 @@
       'detail': opts.title || 'Details',
       'settings': 'Settings',
       'library': 'Library',
+      'share': 'Share',
       'player': 'Now Playing',
     };
     dom.pageTitle.textContent = titles[view] || 'Alabtross';
@@ -868,13 +874,37 @@
     navigateTo('player');
     dom.playerOverlay.classList.remove('hidden');
 
-    // Custom mode torrents need time to connect — show status
-    if (stream._customMode) {
-      dom.playerOverlay.innerHTML = `
-        <div class="spinner"></div>
-        <p>Connecting to torrent peers...</p>
-        <p style="font-size:12px;color:var(--text-muted)">This may take 30-60 seconds</p>
-      `;
+    // Build loading screen with poster
+    const poster = state.currentMeta?.poster || '';
+    const title = state.currentMeta?.name || '';
+    const statusLabel = stream._customMode ? 'Connecting to torrent peers...' : 'Loading stream...';
+    dom.playerOverlay.innerHTML = `
+      ${poster ? `<img class="loading-poster" src="${poster}" alt="">` : ''}
+      ${title ? `<div class="loading-title">${escapeHTML(title)}</div>` : ''}
+      <div class="loading-bar-container"><div class="loading-bar"></div></div>
+      <div class="loading-status">${statusLabel}</div>
+      ${stream._customMode ? '<div class="loading-sub">This may take 30-60 seconds</div>' : ''}
+    `;
+
+    // Poll torrent status for custom mode streams
+    let statusInterval = null;
+    if (stream._customMode && stream.infoHash) {
+      statusInterval = setInterval(async () => {
+        try {
+          const res = await fetch(`/api/torrent-status/${stream.infoHash}`);
+          if (!res.ok) return;
+          const data = await res.json();
+          const statusEl = dom.playerOverlay.querySelector('.loading-status');
+          if (statusEl) {
+            const speed = data.downloadSpeed > 0
+              ? (data.downloadSpeed / 1024).toFixed(0) + ' KB/s'
+              : '';
+            statusEl.textContent = data.numPeers > 0
+              ? `Buffering from ${data.numPeers} peer${data.numPeers !== 1 ? 's' : ''}${speed ? ' · ' + speed : ''}`
+              : 'Connecting to torrent peers...';
+          }
+        } catch (_) { /* ignore polling errors */ }
+      }, 2000);
     }
 
     try {
@@ -903,9 +933,11 @@
         dom.videoPlayer.addEventListener('error', onError, { once: true });
       });
 
+      if (statusInterval) clearInterval(statusInterval);
       await dom.videoPlayer.play();
       dom.playerOverlay.classList.add('hidden');
     } catch (e) {
+      if (statusInterval) clearInterval(statusInterval);
       let hint = escapeHTML(e.message);
       if (e.message.includes('Media error') || e.message.includes('no supported source')) {
         hint += '<br><span style="font-size:12px">The file may be MKV format — browsers only support MP4/WebM</span>';
@@ -1254,6 +1286,60 @@
     return bytes + ' B';
   }
 
+  // ─── Share / QR Code ─────────────────────────────
+
+  function getShareURL() {
+    const custom = $('#share-custom-url');
+    if (custom && custom.value.trim()) return custom.value.trim();
+    // Auto-detect: use current page URL
+    return window.location.origin;
+  }
+
+  function generateShareQR() {
+    const container = $('#qr-code-container');
+    const urlText = $('#share-url-text');
+    const url = getShareURL();
+
+    try {
+      const svg = QRCode.toSVG(url, {
+        moduleSize: 8,
+        margin: 3,
+        dark: '#000000',
+        light: '#ffffff',
+      });
+      container.innerHTML = svg;
+      urlText.textContent = url;
+    } catch (e) {
+      container.innerHTML = '<p style="color:#ff6b6b;">URL too long for QR code</p>';
+      urlText.textContent = url;
+    }
+  }
+
+  function initShare() {
+    const copyBtn = $('#share-copy-btn');
+    const regenBtn = $('#share-regenerate-btn');
+
+    copyBtn.addEventListener('click', () => {
+      const url = getShareURL();
+      navigator.clipboard.writeText(url).then(() => {
+        showToast('URL copied to clipboard');
+      }).catch(() => {
+        // Fallback for older browsers
+        const ta = document.createElement('textarea');
+        ta.value = url;
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        showToast('URL copied to clipboard');
+      });
+    });
+
+    regenBtn.addEventListener('click', generateShareQR);
+  }
+
   // ─── Settings ────────────────────────────────────
 
   function initSettings() {
@@ -1424,6 +1510,83 @@
     return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
+  // ─── Casting ─────────────────────────────────────
+
+  const castState = { available: false, active: false };
+
+  function initCasting() {
+    const video = dom.videoPlayer;
+
+    // Remote Playback API — supported in Chrome, Edge, Safari (Chromecast + AirPlay)
+    if (!video.remote) {
+      // Fallback: if the browser doesn't support Remote Playback API, keep button hidden
+      return;
+    }
+
+    // Disable the default browser remote playback prompt that some browsers show
+    // so we control the UX through our own button
+    video.disableRemotePlayback = false;
+
+    // Watch for device availability
+    video.remote.watchAvailability((available) => {
+      castState.available = available;
+      dom.castBtn.classList.toggle('hidden', !available);
+    }).catch(() => {
+      // watchAvailability not supported — show button and let prompt() fail gracefully
+      castState.available = true;
+      dom.castBtn.classList.remove('hidden');
+    });
+
+    // Cast button: prompt device picker
+    dom.castBtn.addEventListener('click', async () => {
+      try {
+        await video.remote.prompt();
+      } catch (e) {
+        if (e.name !== 'NotAllowedError') {
+          showToast('No cast devices found');
+        }
+      }
+    });
+
+    // Track connection state changes
+    video.remote.addEventListener('connecting', () => {
+      dom.castBtn.classList.add('casting');
+      dom.castDeviceName.textContent = 'Connecting to device...';
+      dom.castOverlay.classList.remove('hidden');
+    });
+
+    video.remote.addEventListener('connect', () => {
+      castState.active = true;
+      dom.castBtn.classList.add('casting');
+      dom.castDeviceName.textContent = 'Casting to device';
+      dom.castOverlay.classList.remove('hidden');
+      showToast('Connected — casting to device');
+    });
+
+    video.remote.addEventListener('disconnect', () => {
+      castState.active = false;
+      dom.castBtn.classList.remove('casting');
+      dom.castOverlay.classList.add('hidden');
+      showToast('Casting stopped');
+    });
+
+    // Stop casting button
+    dom.castStopBtn.addEventListener('click', () => {
+      try {
+        // Pause the remote playback — the connection will trigger disconnect
+        video.pause();
+        if (video.remote.state === 'connected') {
+          video.remote.prompt(); // re-opening prompt allows disconnecting
+        }
+      } catch {
+        // Fallback — just hide overlay
+        castState.active = false;
+        dom.castBtn.classList.remove('casting');
+        dom.castOverlay.classList.add('hidden');
+      }
+    });
+  }
+
   // ─── Init ────────────────────────────────────────
 
   function init() {
@@ -1441,6 +1604,9 @@
         } else if (view === 'library') {
           navigateTo('library');
           loadLibrary();
+        } else if (view === 'share') {
+          navigateTo('share');
+          generateShareQR();
         } else {
           navigateTo('home');
           loadHome();
@@ -1456,6 +1622,12 @@
 
     // Settings
     initSettings();
+
+    // Share / QR Code
+    initShare();
+
+    // Casting (Chromecast / AirPlay)
+    initCasting();
 
     // Apply theme based on current mode
     applyTheme(api.getMode());

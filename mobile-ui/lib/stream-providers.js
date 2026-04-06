@@ -617,10 +617,15 @@ function detectFormat(name) {
 
 /**
  * Check if a stream needs FFmpeg remuxing to be playable.
- * x265/HEVC content needs remuxing but IS playable with our FFmpeg pipeline.
+ * x265/HEVC video needs remuxing. Non-browser audio codecs (AC3, DTS, etc.)
+ * also need remuxing — browsers only natively support AAC/MP3/Opus audio.
  */
 function needsRemux(name) {
-  return /\bx265\b/i.test(name) || /\bH\.?265\b/i.test(name) || /\bHEVC\b/i.test(name);
+  // Video codecs that need remux
+  if (/\bx265\b/i.test(name) || /\bH\.?265\b/i.test(name) || /\bHEVC\b/i.test(name)) return true;
+  // Audio codecs that browsers can't play natively
+  if (/\b(AC-?3|DTS|DTS-HD|EAC-?3|DD[P+]|TrueHD|Atmos|FLAC)\b/i.test(name)) return true;
+  return false;
 }
 
 /**

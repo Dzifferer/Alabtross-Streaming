@@ -453,13 +453,10 @@ class StremioAPI {
     // Custom mode: use local streaming endpoint
     if (stream._customMode && stream.infoHash) {
       if (!/^[0-9a-f]{40}$/i.test(stream.infoHash)) return null;
-      // Use remux endpoint for MKV and x265/HEVC streams (FFmpeg remuxes to fragmented MP4)
-      const title = stream.title || '';
-      const isHEVC = /\bx265\b/i.test(title) || /\bH\.?265\b/i.test(title) || /\bHEVC\b/i.test(title);
-      const needsRemux = stream.format === 'MKV' || stream.needsRemux || isHEVC;
-      let url = needsRemux
-        ? `/api/play/${stream.infoHash}/remux`
-        : `/api/play/${stream.infoHash}`;
+      // Always use remux endpoint to ensure browser-compatible audio.
+      // Many torrents use AC3/DTS audio which browsers can't decode natively.
+      // FFmpeg copies video (-c:v copy) and transcodes audio to AAC — lightweight.
+      let url = `/api/play/${stream.infoHash}/remux`;
       const params = new URLSearchParams();
       if (stream.fileIdx !== undefined) {
         params.set('fileIdx', stream.fileIdx);

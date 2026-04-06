@@ -15,8 +15,17 @@
  *   7. Idle cleanup + concurrency limit bound resource usage
  */
 
-const WebTorrent = require('webtorrent');
 const path = require('path');
+
+// WebTorrent v2+ is ESM-only — use dynamic import
+let _WebTorrent = null;
+async function loadWebTorrent() {
+  if (!_WebTorrent) {
+    const mod = await import('webtorrent');
+    _WebTorrent = mod.default || mod;
+  }
+  return _WebTorrent;
+}
 
 const IDLE_TIMEOUT = 30 * 60 * 1000; // 30 minutes
 const MAX_CONCURRENT = 5;
@@ -61,12 +70,22 @@ const VIDEO_SIGNATURES = [
 
 class TorrentEngine {
   constructor(opts = {}) {
-    this.client = new WebTorrent({
-      maxConns: opts.maxConns || 55,
-    });
+    this.client = null;
+    this._clientReady = null;
+    this._maxConns = opts.maxConns || 55;
     this._active = new Map(); // infoHash -> { torrent, lastAccess, timer }
     this._downloadPath = opts.downloadPath || path.join(process.cwd(), '.torrent-cache');
     this._maxFileSize = opts.maxFileSize || MAX_FILE_SIZE;
+  }
+
+  async _ensureClient() {
+    if (this.client) return this.client;
+    if (this._clientReady) return this._clientReady;
+    this._clientReady = loadWebTorrent().then(WebTorrent => {
+      this.client = new WebTorrent({ maxConns: this._maxConns });
+      return this.client;
+    });
+    return this._clientReady;
   }
 
   /**
@@ -90,12 +109,14 @@ class TorrentEngine {
       this._evictOldest();
     }
 
+    const client = await this._ensureClient();
+
     return new Promise((resolve, reject) => {
       const magnetOrHash = infoHashOrMagnet.startsWith('magnet:')
         ? infoHashOrMagnet
         : hash;
 
-      this.client.add(magnetOrHash, { path: this._downloadPath }, (torrent) => {
+      client.add(magnetOrHash, { path: this._downloadPath }, (torrent) => {
         // Security: deselect all non-video files so they are never downloaded
         this._deselectNonVideoFiles(torrent);
 
@@ -272,7 +293,7 @@ class TorrentEngine {
       clearTimeout(entry.timer);
     }
     this._active.clear();
-    this.client.destroy();
+    if (this.client) this.client.destroy();
   }
 
   // ─── Security Checks ─────────────────────────────

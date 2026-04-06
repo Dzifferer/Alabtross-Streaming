@@ -671,11 +671,17 @@ function filterAndRank(streams) {
     console.log(`[FilterRank] After format filter: ${filtered.length} (removed ${beforeFormat - filtered.length} AVI/WMV)`);
   }
 
-  // Sort: native browser-playable > remuxable > unknown, then by seeds descending
+  // Sort: native browser-playable > remuxable > unknown,
+  // then prefer direct sources (TPB/YTS/1337x/EZTV) over Torrentio,
+  // then by seeds descending
   filtered.sort((a, b) => {
     const scoreA = a.browserPlayable ? 2 : (a.remuxPlayable ? 1 : 0);
     const scoreB = b.browserPlayable ? 2 : (b.remuxPlayable ? 1 : 0);
     if (scoreA !== scoreB) return scoreB - scoreA;
+    // Prefer direct provider results over Torrentio (aggregator)
+    const directA = (a.source && a.source !== 'Torrentio') ? 1 : 0;
+    const directB = (b.source && b.source !== 'Torrentio') ? 1 : 0;
+    if (directA !== directB) return directB - directA;
     return (b.seeds || 0) - (a.seeds || 0);
   });
 
@@ -709,13 +715,13 @@ async function getMovieStreams(imdbId, title) {
     search1337x(title || id).catch(e => { console.log(`[1337x] Error: ${e.message}`); return []; }),
   ]);
 
-  const fallbackStreams = [...tpb, ...yts, ...x1337];
   console.log(`[Streams] Provider results — Torrentio: ${torrentioStreams.length}, TPB: ${tpb.length}, YTS: ${yts.length}, 1337x: ${x1337.length}`);
 
-  // Deduplicate by infoHash, prefer Torrentio > fallbacks
+  // Deduplicate by infoHash, prefer TPB first (most reliable direct results),
+  // then other fallbacks, then Torrentio
   const seen = new Set();
   const combined = [];
-  for (const s of [...torrentioStreams, ...fallbackStreams]) {
+  for (const s of [...tpb, ...yts, ...x1337, ...torrentioStreams]) {
     if (!seen.has(s.infoHash)) {
       seen.add(s.infoHash);
       combined.push(s);
@@ -822,9 +828,11 @@ async function getSeriesStreams(imdbId, season, episode, title) {
     });
   }
 
+  // Deduplicate by infoHash, prefer TPB first (most reliable direct results),
+  // then other fallbacks, then Torrentio
   const seen = new Set();
   const combined = [];
-  for (const s of [...torrentioStreams, ...tpbStreams, ...filteredEztv, ...x1337Streams, ...nyaaStreams, ...lateNyaaStreams]) {
+  for (const s of [...tpbStreams, ...filteredEztv, ...x1337Streams, ...torrentioStreams, ...nyaaStreams, ...lateNyaaStreams]) {
     if (!seen.has(s.infoHash)) {
       seen.add(s.infoHash);
       combined.push(s);

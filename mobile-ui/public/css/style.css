@@ -29,43 +29,65 @@
 
 /* ===== Custom Mode — British Racing Green Theme ===== */
 .theme-custom {
-  --bg: #040a06;
-  --bg-card: #091509;
-  --bg-elevated: #0c1e0e;
-  --bg-input: #091609;
-  --text: #e6f0e8;
-  --text-dim: #80a085;
-  --text-muted: #456b48;
-  --accent: #004225;
-  --accent-glow: rgba(0, 66, 37, 0.35);
+  --bg: #080c09;
+  --bg-card: #0e1410;
+  --bg-elevated: #141c16;
+  --bg-input: #0f1511;
+  --text: #d8ddd9;
+  --text-dim: #7a8a7d;
+  --text-muted: #4a584d;
+  --accent: #1a5c38;
+  --accent-glow: rgba(26, 92, 56, 0.2);
 }
 
-/* Subtle side accents */
+/* Stage curtain background — layered vertical drapes with folds */
 .theme-custom #content {
   background:
+    /* Left curtain — gathered fabric folds */
     linear-gradient(90deg,
-      rgba(0, 66, 37, 0.25) 0%,
-      rgba(0, 50, 28, 0.1) 2.5%,
-      transparent 5%
+      rgba(10, 40, 22, 0.6) 0%,
+      rgba(14, 52, 30, 0.35) 1.5%,
+      rgba(8, 34, 18, 0.5) 3%,
+      rgba(14, 52, 30, 0.2) 5%,
+      rgba(8, 34, 18, 0.3) 7%,
+      rgba(14, 52, 30, 0.08) 10%,
+      transparent 14%
     ),
+    /* Right curtain — mirror of left */
     linear-gradient(270deg,
-      rgba(0, 66, 37, 0.25) 0%,
-      rgba(0, 50, 28, 0.1) 2.5%,
-      transparent 5%
+      rgba(10, 40, 22, 0.6) 0%,
+      rgba(14, 52, 30, 0.35) 1.5%,
+      rgba(8, 34, 18, 0.5) 3%,
+      rgba(14, 52, 30, 0.2) 5%,
+      rgba(8, 34, 18, 0.3) 7%,
+      rgba(14, 52, 30, 0.08) 10%,
+      transparent 14%
+    ),
+    /* Subtle vertical fabric texture across full width */
+    repeating-linear-gradient(90deg,
+      transparent 0px,
+      rgba(20, 60, 35, 0.03) 40px,
+      transparent 80px
+    ),
+    /* Top valance shadow — the swag across the top */
+    linear-gradient(180deg,
+      rgba(6, 24, 12, 0.5) 0%,
+      rgba(8, 30, 16, 0.2) 3%,
+      transparent 8%
     ),
     var(--bg);
 }
 
-/* Top bar */
+/* Top bar — valance edge */
 .theme-custom #top-bar {
-  background: linear-gradient(180deg, #041a0a 0%, var(--bg) 100%);
-  border-bottom: 1px solid rgba(0, 80, 40, 0.4);
-  box-shadow: 0 2px 12px rgba(0, 40, 20, 0.2);
+  background: linear-gradient(180deg, #0a140c 0%, var(--bg) 100%);
+  border-bottom: 1px solid rgba(26, 92, 56, 0.2);
+  box-shadow: 0 1px 8px rgba(0, 0, 0, 0.3);
 }
 
-/* Silver title text */
+/* Muted silver-green title */
 .theme-custom #page-title {
-  background: linear-gradient(135deg, #b0c4b8, #dce8e0, #b0c4b8);
+  background: linear-gradient(135deg, #8a9e8e, #b8c8bc, #8a9e8e);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -73,37 +95,37 @@
 
 /* Bottom nav */
 .theme-custom #bottom-nav {
-  background: linear-gradient(0deg, #040a06 60%, #061206 100%);
-  border-top: 1px solid rgba(0, 80, 40, 0.3);
+  background: linear-gradient(0deg, #080c09 60%, #0b100c 100%);
+  border-top: 1px solid rgba(26, 92, 56, 0.15);
 }
 
 .theme-custom .nav-btn.active {
-  color: #4caf6a;
+  color: #5a9e70;
 }
 
-/* Cards */
+/* Cards — subtle border */
 .theme-custom .card-poster {
-  border: 1px solid rgba(0, 66, 37, 0.3);
-  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.5);
+  border: 1px solid rgba(26, 92, 56, 0.15);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
 }
 
-/* Stream items in custom mode */
+/* Stream items */
 .theme-custom .stream-icon {
-  background: rgba(0, 66, 37, 0.25);
+  background: rgba(26, 92, 56, 0.12);
 }
 
 .theme-custom .stream-icon svg {
-  color: #4caf6a;
+  color: #5a9e70;
 }
 
 .theme-custom .stream-item:active {
-  border-color: #004225;
+  border-color: rgba(26, 92, 56, 0.4);
 }
 
 /* Season tabs */
 .theme-custom .season-tab.active {
-  background: #004225;
-  border-color: #004225;
+  background: #1a5c38;
+  border-color: #1a5c38;
 }
 
 /* Detail hero vignette */
@@ -115,62 +137,62 @@
   content: '';
   position: absolute;
   inset: 0;
-  background: radial-gradient(ellipse at center, transparent 40%, rgba(4, 10, 6, 0.7) 100%);
+  background: radial-gradient(ellipse at center, transparent 40%, rgba(8, 12, 9, 0.6) 100%);
   z-index: 1;
   pointer-events: none;
 }
 
-/* Rating stars */
+/* Rating — muted green */
 .theme-custom .detail-tag.rating {
-  background: rgba(76, 175, 106, 0.15);
-  color: #4caf6a;
+  background: rgba(90, 158, 112, 0.1);
+  color: #5a9e70;
 }
 
 /* Catalog row titles */
 .theme-custom .catalog-row-title {
-  color: #e6f0e8;
+  color: #d8ddd9;
 }
 
 /* Search bar */
 .theme-custom .search-input-wrap:focus-within {
-  border-color: #004225;
-  box-shadow: 0 0 0 3px rgba(0, 66, 37, 0.25);
+  border-color: rgba(26, 92, 56, 0.5);
+  box-shadow: 0 0 0 3px rgba(26, 92, 56, 0.12);
 }
 
 /* Mode toggle slider */
 .theme-custom .mode-slider {
-  background: #004225;
+  background: #1a5c38;
 }
 
 /* Source icons */
 .theme-custom .source-icon {
-  color: #4caf6a;
-  background: rgba(0, 66, 37, 0.15);
+  color: #5a9e70;
+  background: rgba(26, 92, 56, 0.08);
 }
 
-/* Spinner in custom mode */
+/* Spinner */
 .theme-custom .spinner {
-  border-top-color: #004225;
+  border-top-color: #1a5c38;
 }
 
-/* Toast in custom mode */
+/* Toast */
 .theme-custom .toast {
-  background: #0c1e0e;
-  border-color: rgba(0, 66, 37, 0.4);
+  background: #141c16;
+  border-color: rgba(26, 92, 56, 0.2);
 }
 
 /* Settings buttons */
 .theme-custom .btn-sm {
-  background: #004225;
+  background: #1a5c38;
 }
 
 .theme-custom .setting-row input:focus {
-  border-color: #004225;
+  border-color: rgba(26, 92, 56, 0.5);
 }
 
 /* VPN banner */
 .theme-custom .vpn-banner {
-  background: linear-gradient(135deg, #003318, #002210) !important;
+  background: linear-gradient(135deg, #143d24, #0e2a18) !important;
 }
 
 html, body {

@@ -1396,58 +1396,118 @@
     return bytes + ' B';
   }
 
-  // ─── Share / QR Code ─────────────────────────────
+  // ─── Share / VPN QR Code ──────────────────────────
 
-  function getShareURL() {
-    const custom = $('#share-custom-url');
-    if (custom && custom.value.trim()) return custom.value.trim();
-    // Auto-detect: use current page URL
-    return window.location.origin;
-  }
+  let currentVPNConfig = '';
 
-  function generateShareQR() {
+  function generateConfigQR(config) {
     const container = $('#qr-code-container');
-    const urlText = $('#share-url-text');
-    const url = getShareURL();
-
     try {
-      const svg = QRCode.toSVG(url, {
-        moduleSize: 8,
+      const svg = QRCode.toSVG(config, {
+        moduleSize: 6,
         margin: 3,
         dark: '#000000',
         light: '#ffffff',
       });
       container.innerHTML = svg;
-      urlText.textContent = url;
     } catch (e) {
-      container.innerHTML = '<p style="color:#ff6b6b;">URL too long for QR code</p>';
-      urlText.textContent = url;
+      container.innerHTML = '<p style="color:#ff6b6b;">Config too long for QR code — try a shorter config</p>';
     }
   }
 
-  function initShare() {
-    const copyBtn = $('#share-copy-btn');
-    const regenBtn = $('#share-regenerate-btn');
+  async function loadVPNProfiles() {
+    const list = $('#vpn-profile-list');
+    try {
+      const resp = await fetch('/api/vpn/profiles');
+      const data = await resp.json();
 
-    copyBtn.addEventListener('click', () => {
-      const url = getShareURL();
-      navigator.clipboard.writeText(url).then(() => {
-        showToast('URL copied to clipboard');
-      }).catch(() => {
-        // Fallback for older browsers
-        const ta = document.createElement('textarea');
-        ta.value = url;
-        ta.style.position = 'fixed';
-        ta.style.left = '-9999px';
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand('copy');
-        document.body.removeChild(ta);
-        showToast('URL copied to clipboard');
+      if (data.profiles.length === 0) {
+        list.innerHTML = `<div class="vpn-profile-empty">
+          <p>${data.error || 'No VPN profiles found'}</p>
+          <p style="margin-top:8px;">Create profiles with: <code>pivpn add</code></p>
+        </div>`;
+        return;
+      }
+
+      list.innerHTML = data.profiles.map(name => `
+        <button class="vpn-profile-btn" data-profile="${name}">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4-4v2"/>
+            <circle cx="8.5" cy="7" r="4"/><path d="M20 8v6M23 11h-6"/>
+          </svg>
+          ${name}
+        </button>
+      `).join('');
+
+      list.querySelectorAll('.vpn-profile-btn').forEach(btn => {
+        btn.addEventListener('click', () => selectVPNProfile(btn.dataset.profile));
       });
+    } catch (e) {
+      list.innerHTML = '<div class="vpn-profile-empty">Failed to load VPN profiles</div>';
+    }
+  }
+
+  async function selectVPNProfile(name) {
+    const container = $('#qr-code-container');
+    const profileName = $('#vpn-profile-name');
+    const urlBox = $('#share-url-display');
+    const urlText = $('#share-url-text');
+
+    // Highlight selected button
+    $$('.vpn-profile-btn').forEach(b => b.classList.toggle('active', b.dataset.profile === name));
+
+    container.innerHTML = '<div class="spinner"></div><p>Loading config...</p>';
+
+    try {
+      const resp = await fetch(`/api/vpn/profile/${encodeURIComponent(name)}`);
+      if (!resp.ok) throw new Error('Profile not found');
+      const data = await resp.json();
+      currentVPNConfig = data.config;
+
+      generateConfigQR(data.config);
+      profileName.textContent = name;
+      profileName.classList.remove('hidden');
+      urlBox.classList.remove('hidden');
+      urlText.textContent = `${name}.conf`;
+    } catch (e) {
+      container.innerHTML = '<p style="color:#ff6b6b;">Failed to load profile</p>';
+      currentVPNConfig = '';
+    }
+  }
+
+  function copyToClipboard(text) {
+    navigator.clipboard.writeText(text).then(() => {
+      showToast('Copied to clipboard');
+    }).catch(() => {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      showToast('Copied to clipboard');
+    });
+  }
+
+  function initShare() {
+    $('#share-copy-btn').addEventListener('click', () => {
+      if (currentVPNConfig) copyToClipboard(currentVPNConfig);
     });
 
-    regenBtn.addEventListener('click', generateShareQR);
+    $('#share-manual-btn').addEventListener('click', () => {
+      const input = $('#share-custom-config');
+      const config = input.value.trim();
+      if (!config) { showToast('Paste a WireGuard config first'); return; }
+      currentVPNConfig = config;
+      generateConfigQR(config);
+      $('#vpn-profile-name').textContent = 'Manual Config';
+      $('#vpn-profile-name').classList.remove('hidden');
+      $('#share-url-display').classList.remove('hidden');
+      $('#share-url-text').textContent = 'manual.conf';
+      $$('.vpn-profile-btn').forEach(b => b.classList.remove('active'));
+    });
   }
 
   // ─── Settings ────────────────────────────────────
@@ -1731,7 +1791,7 @@
           loadLibrary();
         } else if (view === 'share') {
           navigateTo('share');
-          generateShareQR();
+          loadVPNProfiles();
         } else {
           navigateTo('home');
           loadHome();

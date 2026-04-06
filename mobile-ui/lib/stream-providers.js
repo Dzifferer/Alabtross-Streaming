@@ -31,6 +31,14 @@ function httpGet(url, timeoutMs = 10000, _redirectCount = 0) {
     if (_redirectCount > MAX_REDIRECTS) {
       return reject(new Error('Too many redirects'));
     }
+
+    // Hard deadline covers DNS + connect + transfer (Node's `timeout` option
+    // only starts after the socket is assigned, so DNS hangs bypass it).
+    const deadline = setTimeout(() => {
+      if (req) req.destroy();
+      reject(new Error(`Timeout after ${timeoutMs}ms (including DNS)`));
+    }, timeoutMs);
+
     const mod = url.startsWith('https') ? https : http;
     const req = mod.get(url, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
@@ -38,11 +46,13 @@ function httpGet(url, timeoutMs = 10000, _redirectCount = 0) {
       family: 4, // Force IPv4
     }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        clearTimeout(deadline);
         httpGet(res.headers.location, timeoutMs, _redirectCount + 1).then(resolve, reject);
         res.resume();
         return;
       }
       if (res.statusCode !== 200) {
+        clearTimeout(deadline);
         res.resume();
         resolve({ ok: false, status: res.statusCode, body: '' });
         return;
@@ -50,39 +60,47 @@ function httpGet(url, timeoutMs = 10000, _redirectCount = 0) {
       let body = '';
       res.setEncoding('utf8');
       res.on('data', chunk => body += chunk);
-      res.on('end', () => resolve({ ok: true, status: 200, body }));
+      res.on('end', () => { clearTimeout(deadline); resolve({ ok: true, status: 200, body }); });
     });
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
+    req.on('error', (e) => { clearTimeout(deadline); reject(e); });
+    req.on('timeout', () => { clearTimeout(deadline); req.destroy(); reject(new Error('Socket timeout')); });
   });
 }
 
-async function fetchJSON(url, timeoutMs = 10000) {
-  try {
-    const res = await httpGet(url, timeoutMs);
-    if (!res.ok) {
-      console.log(`[Provider] fetchJSON ${res.status} for ${url}`);
-      return null;
+async function fetchJSON(url, timeoutMs = 10000, retries = 1) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await httpGet(url, timeoutMs);
+      if (!res.ok) {
+        console.log(`[Provider] fetchJSON ${res.status} for ${url}`);
+        return null;
+      }
+      return JSON.parse(res.body);
+    } catch (e) {
+      const isLast = attempt === retries;
+      console.log(`[Provider] fetchJSON error (attempt ${attempt + 1}/${retries + 1}) for ${url}: ${e.message}`);
+      if (!isLast) await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
     }
-    return JSON.parse(res.body);
-  } catch (e) {
-    console.log(`[Provider] fetchJSON error for ${url}: ${e.message}`);
-    return null;
   }
+  return null;
 }
 
-async function fetchHTML(url, timeoutMs = 10000) {
-  try {
-    const res = await httpGet(url, timeoutMs);
-    if (!res.ok) {
-      console.log(`[Provider] fetchHTML ${res.status} for ${url}`);
-      return null;
+async function fetchHTML(url, timeoutMs = 10000, retries = 1) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await httpGet(url, timeoutMs);
+      if (!res.ok) {
+        console.log(`[Provider] fetchHTML ${res.status} for ${url}`);
+        return null;
+      }
+      return res.body;
+    } catch (e) {
+      const isLast = attempt === retries;
+      console.log(`[Provider] fetchHTML error (attempt ${attempt + 1}/${retries + 1}) for ${url}: ${e.message}`);
+      if (!isLast) await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
     }
-    return res.body;
-  } catch (e) {
-    console.log(`[Provider] fetchHTML error for ${url}: ${e.message}`);
-    return null;
   }
+  return null;
 }
 
 function buildMagnet(infoHash, name) {
@@ -95,9 +113,19 @@ function buildMagnet(infoHash, name) {
 
 // Torrentio requires a configuration prefix to return results from all providers.
 // The bare URL (no config) may return empty or limited results.
-// This default config enables all major providers sorted by quality+size.
-const TORRENTIO_CONFIG = process.env.TORRENTIO_CONFIG || 'sort=qualitysize|qualityfilter=other';
+// We try multiple config variations in case the API has changed.
+const TORRENTIO_CONFIG = process.env.TORRENTIO_CONFIG || '';
 const TORRENTIO_BASE = process.env.TORRENTIO_BASE || 'https://torrentio.strem.io';
+
+// Config variations to try — ordered by most likely to work.
+// Torrentio may require explicit provider selection depending on version.
+const TORRENTIO_CONFIGS = TORRENTIO_CONFIG
+  ? [TORRENTIO_CONFIG]
+  : [
+    'providers=yts,eztv,rarbg,1337x,thepiratebay,kickasstorrents,torrentgalaxy|sort=qualitysize|qualityfilter=other',
+    'sort=qualitysize|qualityfilter=other',
+    '',
+  ];
 
 async function searchTorrentio(type, imdbId, season, episode) {
   const streams = [];
@@ -106,12 +134,21 @@ async function searchTorrentio(type, imdbId, season, episode) {
     stremioId = `${imdbId}:${season}:${episode}`;
   }
 
-  const url = TORRENTIO_CONFIG
-    ? `${TORRENTIO_BASE}/${TORRENTIO_CONFIG}/stream/${type}/${stremioId}.json`
-    : `${TORRENTIO_BASE}/stream/${type}/${stremioId}.json`;
-  const data = await fetchJSON(url);
+  // Try each config variation until one returns results
+  let data = null;
+  for (const config of TORRENTIO_CONFIGS) {
+    const url = config
+      ? `${TORRENTIO_BASE}/${config}/stream/${type}/${stremioId}.json`
+      : `${TORRENTIO_BASE}/stream/${type}/${stremioId}.json`;
+    data = await fetchJSON(url, 12000, 1);
+    if (data && Array.isArray(data.streams) && data.streams.length > 0) {
+      console.log(`[Torrentio] Config "${config || '(bare)'}" returned ${data.streams.length} results`);
+      break;
+    }
+  }
+
   if (!data || !Array.isArray(data.streams)) {
-    console.log(`[Torrentio] No results for ${type}/${stremioId}`);
+    console.log(`[Torrentio] No results for ${type}/${stremioId} (tried ${TORRENTIO_CONFIGS.length} configs)`);
     return streams;
   }
 
@@ -561,26 +598,22 @@ async function getMovieStreams(imdbId, title) {
 
   console.log(`[Streams] Searching movie streams for ${id} (title: "${title || 'unknown'}")`);
 
-  // Torrentio first (most reliable), then fallback scrapers in parallel
-  const torrentioStreams = await searchTorrentio('movie', id).catch(e => {
-    console.log(`[Torrentio] Error: ${e.message}`);
-    return [];
-  });
+  // Run Torrentio AND fallbacks in parallel — don't wait for Torrentio first.
+  // This halves latency when Torrentio is slow/down, and ensures fallbacks
+  // always contribute results regardless of Torrentio's response.
+  const tpbQuery = title || id;
+  const [torrentioStreams, tpb, yts, x1337] = await Promise.all([
+    searchTorrentio('movie', id).catch(e => {
+      console.log(`[Torrentio] Error: ${e.message}`);
+      return [];
+    }),
+    searchTPB(tpbQuery).catch(e => { console.log(`[TPB] Error: ${e.message}`); return []; }),
+    searchYTS(id).catch(e => { console.log(`[YTS] Error: ${e.message}`); return []; }),
+    search1337x(title || id).catch(e => { console.log(`[1337x] Error: ${e.message}`); return []; }),
+  ]);
 
-  // Check how many Torrentio results survive filtering (not just raw count)
-  const usableTorrentio = filterAndRank(torrentioStreams);
-
-  let fallbackStreams = [];
-  if (usableTorrentio.length < 3) {
-    console.log(`[Streams] Only ${usableTorrentio.length} usable Torrentio results, querying fallbacks...`);
-    const tpbQuery = title || id;
-    const [tpb, yts, x1337] = await Promise.all([
-      searchTPB(tpbQuery).catch(e => { console.log(`[TPB] Error: ${e.message}`); return []; }),
-      searchYTS(id).catch(e => { console.log(`[YTS] Error: ${e.message}`); return []; }),
-      search1337x(title || id).catch(e => { console.log(`[1337x] Error: ${e.message}`); return []; }),
-    ]);
-    fallbackStreams = [...tpb, ...yts, ...x1337];
-  }
+  const fallbackStreams = [...tpb, ...yts, ...x1337];
+  console.log(`[Streams] Provider results — Torrentio: ${torrentioStreams.length}, TPB: ${tpb.length}, YTS: ${yts.length}, 1337x: ${x1337.length}`);
 
   // Deduplicate by infoHash, prefer Torrentio > fallbacks
   const seen = new Set();
@@ -624,97 +657,68 @@ async function getSeriesStreams(imdbId, season, episode, title) {
 
   console.log(`[Streams] Searching series streams for ${id} ${seTag} (title: "${title || 'unknown'}")`);
 
-  // Torrentio first (most reliable)
-  const torrentioStreams = await searchTorrentio('series', id, season, episode).catch(e => {
-    console.log(`[Torrentio] Error: ${e.message}`);
-    return [];
-  });
-
-  // Check how many Torrentio results survive filtering
-  const usableTorrentio = filterAndRank(torrentioStreams);
-
   // Determine if this might be anime (for Nyaa search)
   const anime = isLikelyAnime(title);
+  const tpbQuery = se ? `${title || id} ${seTag}` : (title || id);
 
-  let fallbackCombined = [];
-  // For series, always run fallbacks in parallel with Torrentio results,
-  // since multi-season shows need broader coverage
-  const needsFallback = usableTorrentio.length < 5;
-  if (needsFallback) {
-    if (usableTorrentio.length < 3) {
-      console.log(`[Streams] Only ${usableTorrentio.length} usable Torrentio results, querying all fallbacks...`);
-    } else {
-      console.log(`[Streams] ${usableTorrentio.length} Torrentio results, supplementing with EZTV...`);
-    }
-    const tpbQuery = se ? `${title || id} ${seTag}` : (title || id);
+  // Run ALL providers in parallel — don't wait for Torrentio first.
+  // This eliminates the sequential bottleneck when Torrentio is slow/down.
+  const providerPromises = [
+    searchTorrentio('series', id, season, episode).catch(e => { console.log(`[Torrentio] Error: ${e.message}`); return []; }),
+    searchEZTV(id, season, episode).catch(e => { console.log(`[EZTV] Error: ${e.message}`); return []; }),
+    searchTPB(tpbQuery).catch(e => { console.log(`[TPB] Error: ${e.message}`); return []; }),
+    se ? search1337x(`${title || id} ${seTag}`).catch(e => { console.log(`[1337x] Error: ${e.message}`); return []; }) : Promise.resolve([]),
+  ];
 
-    const promises = [
-      // Always search EZTV for series (it has good season/episode tagging)
-      searchEZTV(id, season, episode).catch(e => { console.log(`[EZTV] Error: ${e.message}`); return []; }),
-    ];
+  // Always search Nyaa for anime
+  if (anime) {
+    providerPromises.push(
+      searchNyaa(title || id, season, episode).catch(e => { console.log(`[Nyaa] Error: ${e.message}`); return []; })
+    );
+  }
 
-    // Only run expensive scrapers if Torrentio results are very low
-    if (usableTorrentio.length < 3) {
-      promises.push(
-        searchTPB(tpbQuery).catch(e => { console.log(`[TPB] Error: ${e.message}`); return []; }),
-        se ? search1337x(`${title || id} ${seTag}`).catch(e => { console.log(`[1337x] Error: ${e.message}`); return []; }) : Promise.resolve([]),
-      );
-    }
+  const [torrentioStreams, eztvStreams, tpbStreams, x1337Streams, ...rest] = await Promise.all(providerPromises);
+  const nyaaStreams = anime ? (rest[0] || []) : [];
 
-    // Always search Nyaa for anime, or if title suggests it
-    if (anime || usableTorrentio.length === 0) {
-      promises.push(
-        searchNyaa(title || id, season, episode).catch(e => { console.log(`[Nyaa] Error: ${e.message}`); return []; })
-      );
-    }
+  console.log(`[Streams] Provider results — Torrentio: ${torrentioStreams.length}, EZTV: ${eztvStreams.length}, TPB: ${tpbStreams.length}, 1337x: ${x1337Streams.length}${anime ? `, Nyaa: ${nyaaStreams.length}` : ''}`);
 
-    const results = await Promise.all(promises);
-    const eztvStreams = results[0] || [];
-    const tpbStreams = usableTorrentio.length < 3 ? (results[1] || []) : [];
-    const x1337Streams = usableTorrentio.length < 3 ? (results[2] || []) : [];
-    const nyaaStreams = (anime || usableTorrentio.length === 0)
-      ? (results[results.length - 1] || [])
-      : [];
-
-    // Filter EZTV results to matching season/episode if specified
-    let filteredEztv = eztvStreams;
-    if (se) {
-      // Try exact season/episode match first
+  // Filter EZTV results to matching season/episode if specified
+  let filteredEztv = eztvStreams;
+  if (se) {
+    filteredEztv = eztvStreams.filter(s =>
+      s.season === season && s.episode === episode
+    );
+    if (filteredEztv.length === 0) {
       filteredEztv = eztvStreams.filter(s =>
-        s.season === season && s.episode === episode
+        s.title && s.title.toUpperCase().includes(seTag)
       );
-      // Fallback: match S01E05 pattern in title
-      if (filteredEztv.length === 0) {
-        filteredEztv = eztvStreams.filter(s =>
-          s.title && s.title.toUpperCase().includes(seTag)
-        );
-      }
-      // For anime: also try absolute episode number (e.g., "- 05" or "E05" without season)
-      if (filteredEztv.length === 0 && episode !== undefined) {
-        const absEp = String(episode).padStart(2, '0');
-        const absEp3 = String(episode).padStart(3, '0');
-        filteredEztv = eztvStreams.filter(s => {
-          const t = (s.title || '').toUpperCase();
-          return t.includes(`- ${absEp}`) || t.includes(`- ${absEp3}`) ||
-            t.includes(`E${absEp}`) || t.includes(`EP${absEp}`) ||
-            t.includes(`EPISODE ${episode}`);
-        });
-      }
     }
+    // For anime: also try absolute episode number (e.g., "- 05" or "E05" without season)
+    if (filteredEztv.length === 0 && episode !== undefined) {
+      const absEp = String(episode).padStart(2, '0');
+      const absEp3 = String(episode).padStart(3, '0');
+      filteredEztv = eztvStreams.filter(s => {
+        const t = (s.title || '').toUpperCase();
+        return t.includes(`- ${absEp}`) || t.includes(`- ${absEp3}`) ||
+          t.includes(`E${absEp}`) || t.includes(`EP${absEp}`) ||
+          t.includes(`EPISODE ${episode}`);
+      });
+    }
+  }
 
-    fallbackCombined = [...tpbStreams, ...filteredEztv, ...x1337Streams, ...nyaaStreams];
-  } else if (anime) {
-    // Even if Torrentio has results, also check Nyaa for anime (often better quality)
-    const nyaaStreams = await searchNyaa(title || id, season, episode).catch(e => {
+  // Also try Nyaa on non-anime titles if all other providers returned nothing
+  let lateNyaaStreams = [];
+  if (!anime && torrentioStreams.length === 0 && tpbStreams.length === 0 && x1337Streams.length === 0 && filteredEztv.length === 0) {
+    console.log(`[Streams] All providers empty, trying Nyaa as last resort...`);
+    lateNyaaStreams = await searchNyaa(title || id, season, episode).catch(e => {
       console.log(`[Nyaa] Error: ${e.message}`);
       return [];
     });
-    fallbackCombined = [...nyaaStreams];
   }
 
   const seen = new Set();
   const combined = [];
-  for (const s of [...torrentioStreams, ...fallbackCombined]) {
+  for (const s of [...torrentioStreams, ...tpbStreams, ...filteredEztv, ...x1337Streams, ...nyaaStreams, ...lateNyaaStreams]) {
     if (!seen.has(s.infoHash)) {
       seen.add(s.infoHash);
       combined.push(s);
@@ -727,7 +731,67 @@ async function getSeriesStreams(imdbId, season, episode, title) {
   return ranked;
 }
 
+// ─── Diagnostics ──────────────────────────────────
+
+/**
+ * Test connectivity to each provider and return status.
+ * Uses a well-known IMDB ID (The Shawshank Redemption) for testing.
+ */
+async function diagnoseProviders() {
+  const testImdb = 'tt0111161'; // The Shawshank Redemption
+  const results = {};
+
+  const testProvider = async (name, fn) => {
+    const start = Date.now();
+    try {
+      const data = await fn();
+      const ms = Date.now() - start;
+      results[name] = { ok: true, count: Array.isArray(data) ? data.length : 0, ms };
+    } catch (e) {
+      const ms = Date.now() - start;
+      results[name] = { ok: false, error: e.message, ms };
+    }
+  };
+
+  await Promise.all([
+    testProvider('torrentio', async () => {
+      for (const config of TORRENTIO_CONFIGS) {
+        const url = config
+          ? `${TORRENTIO_BASE}/${config}/stream/movie/${testImdb}.json`
+          : `${TORRENTIO_BASE}/stream/movie/${testImdb}.json`;
+        const data = await fetchJSON(url, 12000, 0);
+        if (data && Array.isArray(data.streams) && data.streams.length > 0) {
+          results._torrentioConfig = config || '(bare)';
+          return data.streams;
+        }
+      }
+      return [];
+    }),
+    testProvider('tpb', () => searchTPB('Shawshank Redemption')),
+    testProvider('yts', () => searchYTS(testImdb)),
+    testProvider('eztv', async () => {
+      // EZTV is TV-only, just test connectivity
+      const data = await fetchJSON('https://eztv.re/api/get-torrents?imdb_id=303461&limit=5&page=1', 10000, 0);
+      return data && data.torrents ? data.torrents : [];
+    }),
+    testProvider('1337x', () => search1337x('Shawshank Redemption')),
+  ]);
+
+  // Overall status
+  const working = Object.entries(results)
+    .filter(([k, v]) => !k.startsWith('_') && v.ok && v.count > 0)
+    .map(([k]) => k);
+  results._summary = {
+    working,
+    total: Object.keys(results).filter(k => !k.startsWith('_')).length,
+    allDown: working.length === 0,
+  };
+
+  return results;
+}
+
 module.exports = {
   getMovieStreams,
   getSeriesStreams,
+  diagnoseProviders,
 };

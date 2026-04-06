@@ -872,15 +872,66 @@
     const streams = await api.getStreams(type, id, seasonEpisode);
 
     if (streams.length === 0) {
-      const hint = api.getMode() === 'custom'
-        ? 'No torrents found on Torrentio, TPB, YTS, EZTV, 1337x, or Nyaa — check server terminal for details'
+      const isCustom = api.getMode() === 'custom';
+      const hint = isCustom
+        ? 'All providers returned empty — this usually means a network issue on the server'
         : 'Try adding more stream addons in Settings';
       container.innerHTML = `
         <div class="empty-state" style="padding:32px 0">
           <p>No streams found</p>
           <p style="font-size:12px;color:var(--text-muted)">${hint}</p>
+          ${isCustom ? `<button id="diagnose-btn" style="
+            margin-top:12px; padding:8px 16px; border:1px solid var(--text-muted);
+            border-radius:var(--radius-sm); background:transparent; color:var(--text);
+            font-size:13px; cursor:pointer;
+          ">Run Provider Diagnostics</button>
+          <div id="diagnose-results" style="margin-top:12px;font-size:12px;text-align:left;display:none"></div>` : ''}
         </div>
       `;
+      if (isCustom) {
+        const diagBtn = document.getElementById('diagnose-btn');
+        if (diagBtn) {
+          diagBtn.addEventListener('click', async () => {
+            diagBtn.textContent = 'Testing providers...';
+            diagBtn.disabled = true;
+            try {
+              const resp = await fetch('/api/streams/diagnose');
+              const data = await resp.json();
+              const resultsDiv = document.getElementById('diagnose-results');
+              if (resultsDiv) {
+                resultsDiv.style.display = 'block';
+                const providers = Object.entries(data).filter(([k]) => !k.startsWith('_'));
+                let html = '<div style="font-family:monospace">';
+                for (const [name, info] of providers) {
+                  const icon = info.ok && info.count > 0 ? '&#9989;' : (info.ok ? '&#9888;' : '&#10060;');
+                  const detail = info.ok
+                    ? `${info.count} results (${info.ms}ms)`
+                    : `${info.error} (${info.ms}ms)`;
+                  html += `<div style="margin:4px 0">${icon} <strong>${name}</strong>: ${detail}</div>`;
+                }
+                if (data._torrentioConfig) {
+                  html += `<div style="margin:4px 0;color:var(--text-dim)">Torrentio config: ${data._torrentioConfig}</div>`;
+                }
+                const summary = data._summary || {};
+                html += `<div style="margin-top:8px;color:${summary.allDown ? 'var(--accent-red)' : 'var(--text-dim)'}">`;
+                html += summary.allDown
+                  ? 'All providers unreachable — check server network/DNS'
+                  : `${summary.working.length}/${summary.total} providers working`;
+                html += '</div></div>';
+                resultsDiv.innerHTML = html;
+              }
+            } catch (e) {
+              const resultsDiv = document.getElementById('diagnose-results');
+              if (resultsDiv) {
+                resultsDiv.style.display = 'block';
+                resultsDiv.innerHTML = `<div style="color:var(--accent-red)">Diagnostics failed: ${e.message}</div>`;
+              }
+            }
+            diagBtn.textContent = 'Re-run Diagnostics';
+            diagBtn.disabled = false;
+          });
+        }
+      }
       return;
     }
 

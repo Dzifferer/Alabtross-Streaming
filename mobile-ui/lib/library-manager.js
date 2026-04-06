@@ -210,7 +210,7 @@ class LibraryManager {
 
     const engine = torrentStream(item.magnetUri, {
       connections: 500,
-      uploads: 10,
+      uploads: 0,
       dht: true,
       verify: true,
       path: itemDir,

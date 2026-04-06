@@ -476,8 +476,12 @@ app.get('/api/library/:id/stream/remux', rateLimit, async (req, res) => {
     'Transfer-Encoding': 'chunked',
   });
 
+  // Pipe file through stdin (like the working torrent stream remux) so ffmpeg
+  // processes sequentially instead of seeking around the file on disk.
   const ffmpeg = spawn('ffmpeg', [
-    '-i', filePath,
+    '-probesize', '5000000',
+    '-analyzeduration', '5000000',
+    '-i', 'pipe:0',
     '-c:v', 'copy',
     '-c:a', 'aac',
     '-b:a', '192k',
@@ -487,7 +491,19 @@ app.get('/api/library/:id/stream/remux', rateLimit, async (req, res) => {
     'pipe:1',
   ]);
 
+  const source = fs.createReadStream(filePath);
+  source.pipe(ffmpeg.stdin);
+
   ffmpeg.stdout.pipe(res);
+
+  source.on('error', (err) => {
+    console.error(`[Library] Source stream error during remux: ${err.message}`);
+    ffmpeg.kill('SIGTERM');
+  });
+
+  ffmpeg.stdin.on('error', () => {
+    // FFmpeg closed stdin early (e.g., client disconnected) — not a real error
+  });
 
   ffmpeg.stderr.on('data', (data) => {
     const msg = data.toString().trim();
@@ -505,10 +521,12 @@ app.get('/api/library/:id/stream/remux', rateLimit, async (req, res) => {
     if (code && code !== 0 && code !== 255) {
       console.warn(`[Library] FFmpeg exited with code ${code}`);
     }
+    source.destroy();
     res.end();
   });
 
   res.on('close', () => {
+    source.destroy();
     ffmpeg.kill('SIGTERM');
   });
 });

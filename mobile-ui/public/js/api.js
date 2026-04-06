@@ -351,11 +351,9 @@ class StremioAPI {
       }
     }
 
-    // Filter out formats that definitely won't play in browsers
+    // Filter out codecs/formats that browsers can't play
     return combined.filter(s => {
       const t = s.title || '';
-      // Definitely not browser-playable
-      if (/\.mkv\b/i.test(t)) return false;
       if (/\bx265\b/i.test(t) || /\bH\.?265\b/i.test(t) || /\bHEVC\b/i.test(t)) return false;
       if (/\.avi\b/i.test(t) || /\bXviD\b/i.test(t) || /\bDivX\b/i.test(t)) return false;
       if (/\.wmv\b/i.test(t)) return false;

@@ -355,10 +355,12 @@ function filterAndRank(streams) {
     }
   }
 
-  // Remove streams that are definitely not browser-playable, keep unknowns
+  // Remove streams with codecs browsers can't play
   filtered = filtered.filter(s => {
-    const fmt = s.format;
-    return fmt !== 'MKV' && fmt !== 'AVI' && fmt !== 'WMV';
+    const t = s.title || '';
+    if (/\bx265\b/i.test(t) || /\bH\.?265\b/i.test(t) || /\bHEVC\b/i.test(t)) return false;
+    if (s.format === 'AVI' || s.format === 'WMV') return false;
+    return true;
   });
 
   // Sort: browser-playable first, then by seeds descending

@@ -70,7 +70,7 @@ app.use((req, res, next) => {
     "script-src 'self'",
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' https: data:",
-    "connect-src 'self' https://v3-cinemeta.strem.io https://torrentio.strem.io https://*.strem.io https://*.stremio.com",
+    "connect-src 'self' https://v3-cinemeta.strem.io https://torrentio.strem.io https://*.strem.io https://*.stremio.com https://api.themoviedb.org",
     "media-src 'self' blob: http: https:",
     "frame-ancestors 'none'",
   ].join('; '));
@@ -90,6 +90,100 @@ app.use('/stremio-api', (req, res, next) => {
   changeOrigin: true,
   pathRewrite: { '^/stremio-api': '' },
 }));
+
+// ─── TMDB Search API ─────────────────────────────────────────────────
+
+const TMDB_API_KEY = process.env.TMDB_API_KEY || '';
+const TMDB_BASE = 'https://api.themoviedb.org/3';
+
+function tmdbFetch(endpoint, params = {}) {
+  if (!TMDB_API_KEY) return Promise.reject(new Error('No TMDB API key'));
+  const qs = new URLSearchParams({ api_key: TMDB_API_KEY, ...params });
+  const url = `${TMDB_BASE}${endpoint}?${qs}`;
+  return new Promise((resolve, reject) => {
+    https.get(url, { timeout: 8000 }, (res) => {
+      if (res.statusCode !== 200) return reject(new Error(`TMDB HTTP ${res.statusCode}`));
+      let body = '';
+      res.on('data', chunk => body += chunk);
+      res.on('end', () => {
+        try { resolve(JSON.parse(body)); }
+        catch (e) { reject(e); }
+      });
+    }).on('error', reject).on('timeout', function() { this.destroy(); reject(new Error('Timeout')); });
+  });
+}
+
+// GET /api/search?q=query&type=movie|series
+app.get('/api/search', rateLimit, async (req, res) => {
+  const query = (req.query.q || '').trim();
+  if (!query || query.length > 200) return res.json({ results: [] });
+
+  const type = req.query.type; // 'movie', 'series', or undefined for both
+  const results = [];
+
+  if (!TMDB_API_KEY) {
+    return res.json({ results: [], error: 'TMDB API key not configured' });
+  }
+
+  try {
+    const types = type === 'movie' ? ['movie'] : type === 'series' ? ['tv'] : ['movie', 'tv'];
+    const searches = types.map(t =>
+      tmdbFetch(`/search/${t}`, { query, include_adult: 'false' })
+        .then(data => (data.results || []).map(item => ({ ...item, media_type: t })))
+        .catch(() => [])
+    );
+    const searchResults = await Promise.all(searches);
+
+    for (const items of searchResults) {
+      for (const item of items) {
+        // Get IMDB ID via external IDs lookup
+        const tmdbType = item.media_type;
+        const tmdbId = item.id;
+        const title = tmdbType === 'movie' ? item.title : item.name;
+        const year = (item.release_date || item.first_air_date || '').slice(0, 4);
+        const poster = item.poster_path
+          ? `https://image.tmdb.org/t/p/w342${item.poster_path}`
+          : null;
+
+        results.push({
+          tmdb_id: tmdbId,
+          type: tmdbType === 'tv' ? 'series' : 'movie',
+          name: title,
+          year,
+          poster,
+          popularity: item.popularity || 0,
+          vote_average: item.vote_average || 0,
+          overview: item.overview || '',
+        });
+      }
+    }
+
+    // Sort by popularity descending
+    results.sort((a, b) => b.popularity - a.popularity);
+
+    // Fetch IMDB IDs for top results (parallel, limited to top 20)
+    const topResults = results.slice(0, 20);
+    const imdbLookups = topResults.map(async (item) => {
+      try {
+        const tmdbType = item.type === 'series' ? 'tv' : 'movie';
+        const ext = await tmdbFetch(`/${tmdbType}/${item.tmdb_id}/external_ids`);
+        item.imdb_id = ext.imdb_id || null;
+        item.id = ext.imdb_id || `tmdb:${item.tmdb_id}`;
+      } catch {
+        item.id = `tmdb:${item.tmdb_id}`;
+      }
+    });
+    await Promise.all(imdbLookups);
+
+    // Filter out results without IMDB IDs (can't stream without them)
+    const withImdb = topResults.filter(r => r.imdb_id);
+
+    res.json({ results: withImdb });
+  } catch (err) {
+    console.error('[TMDB] Search error:', err.message);
+    res.json({ results: [], error: 'Search failed' });
+  }
+});
 
 // ─── Custom Mode API Routes ───────────────────────────────────────────
 

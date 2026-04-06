@@ -188,6 +188,22 @@ class StremioAPI {
   async search(query, type) {
     if (!query || query.length > 200) return [];
 
+    // Try TMDB first (better relevance and fuzzy matching)
+    try {
+      const params = new URLSearchParams({ q: query });
+      if (type) params.set('type', type);
+      const resp = await fetch(`/api/search?${params}`);
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data.results && data.results.length > 0) {
+          return data.results;
+        }
+      }
+    } catch (e) {
+      console.warn('TMDB search failed, falling back to Cinemeta', e);
+    }
+
+    // Fallback to Cinemeta addon search
     const allResults = [];
     const types = type ? [type] : ['movie', 'series'];
 

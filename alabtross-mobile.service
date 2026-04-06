@@ -1,0 +1,15 @@
+[Unit]
+Description=Alabtross Mobile UI (Docker)
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/docker start -a alabtross-mobile
+ExecStop=/usr/bin/docker stop alabtross-mobile
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

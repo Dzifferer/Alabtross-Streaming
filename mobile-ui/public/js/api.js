@@ -418,7 +418,11 @@ class StremioAPI {
     // Custom mode: use local streaming endpoint
     if (stream._customMode && stream.infoHash) {
       if (!/^[0-9a-f]{40}$/i.test(stream.infoHash)) return null;
-      let url = `/api/play/${stream.infoHash}`;
+      // Use remux endpoint for MKV streams (FFmpeg remuxes to fragmented MP4)
+      const needsRemux = stream.format === 'MKV';
+      let url = needsRemux
+        ? `/api/play/${stream.infoHash}/remux`
+        : `/api/play/${stream.infoHash}`;
       const params = new URLSearchParams();
       if (stream.fileIdx !== undefined) {
         params.set('fileIdx', stream.fileIdx);

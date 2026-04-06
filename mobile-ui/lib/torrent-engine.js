@@ -17,6 +17,7 @@
  */
 
 const torrentStream = require('torrent-stream');
+const { spawn } = require('child_process');
 const path = require('path');
 const { TRACKERS, isFileNameSafe, getMimeType, sanitizeFilename } = require('./file-safety');
 
@@ -270,6 +271,114 @@ class TorrentEngine {
       stream.on('error', () => res.end());
       res.on('close', () => stream.destroy());
     }
+  }
+
+  /**
+   * Serve a torrent's video file remuxed from MKV to fragmented MP4.
+   * Uses FFmpeg to copy video and transcode audio to AAC for browser compat.
+   * No range-request support (output size is unknown); browser buffers progressively.
+   */
+  async serveRemuxedStream(req, res, magnetOrHash, fileIdx) {
+    const hash = this._extractHash(magnetOrHash);
+    console.log(`[TorrentEngine] serveRemuxedStream: hash=${hash}, fileIdx=${fileIdx}`);
+
+    let entry;
+    try {
+      entry = await this.getTorrent(magnetOrHash);
+    } catch (err) {
+      console.error(`[TorrentEngine] Failed to load torrent ${hash}: ${err.message}`);
+      res.status(503).json({ error: 'Failed to load torrent: ' + err.message });
+      return;
+    }
+
+    const file = this.getVideoFile(entry, fileIdx);
+    if (!file) {
+      console.warn(`[TorrentEngine] No safe video file in "${entry.name}"`);
+      res.status(404).json({ error: 'No safe video file found in torrent' });
+      return;
+    }
+
+    console.log(`[TorrentEngine] Remuxing: "${file.name}" (${(file.length / 1e6).toFixed(0)}MB)`);
+    file.select();
+
+    // Validate magic bytes
+    try {
+      const isVideo = await Promise.race([
+        this._validateMagicBytes(file),
+        new Promise(resolve => setTimeout(() => resolve(true), 10000)),
+      ]);
+      if (!isVideo) {
+        console.warn(`[Security] Magic byte check failed for "${file.name}"`);
+        res.status(403).json({ error: 'File failed video format validation' });
+        return;
+      }
+    } catch (err) {
+      console.warn(`[Security] Magic byte error for "${file.name}": ${err.message} — allowing`);
+    }
+
+    this._touchTorrent(hash);
+
+    const safeFilename = sanitizeFilename(file.name).replace(/\.mkv$/i, '.mp4');
+
+    res.status(200);
+    res.set({
+      'Content-Type': 'video/mp4',
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Disposition': `inline; filename="${safeFilename}"`,
+      'Cache-Control': 'no-store',
+      'Transfer-Encoding': 'chunked',
+    });
+
+    // Pipe torrent file through FFmpeg: copy video, transcode audio to AAC,
+    // output fragmented MP4 that can stream progressively
+    const ffmpeg = spawn('ffmpeg', [
+      '-i', 'pipe:0',
+      '-c:v', 'copy',
+      '-c:a', 'aac',
+      '-b:a', '192k',
+      '-movflags', 'frag_keyframe+empty_moov+faststart',
+      '-f', 'mp4',
+      '-loglevel', 'warning',
+      'pipe:1',
+    ]);
+
+    const source = file.createReadStream();
+    source.pipe(ffmpeg.stdin);
+
+    ffmpeg.stdout.pipe(res);
+
+    source.on('error', (err) => {
+      console.error(`[TorrentEngine] Source stream error during remux: ${err.message}`);
+      ffmpeg.kill('SIGTERM');
+    });
+
+    ffmpeg.stdin.on('error', () => {
+      // FFmpeg closed stdin early (e.g., client disconnected) — not a real error
+    });
+
+    ffmpeg.stderr.on('data', (data) => {
+      const msg = data.toString().trim();
+      if (msg) console.log(`[FFmpeg] ${msg}`);
+    });
+
+    ffmpeg.on('error', (err) => {
+      console.error(`[TorrentEngine] FFmpeg spawn error: ${err.message}`);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Remux failed — FFmpeg not available' });
+      }
+    });
+
+    ffmpeg.on('close', (code) => {
+      if (code && code !== 0 && code !== 255) {
+        console.warn(`[TorrentEngine] FFmpeg exited with code ${code}`);
+      }
+      res.end();
+    });
+
+    res.on('close', () => {
+      source.destroy();
+      ffmpeg.kill('SIGTERM');
+    });
   }
 
   /**

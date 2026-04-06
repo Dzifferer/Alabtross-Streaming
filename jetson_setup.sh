@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ================================================================
-#  JETSON ORIN NANO — STREMIO + WIREGUARD HOME SERVER SETUP
+#  JETSON ORIN NANO — STREMIO + TAILSCALE HOME SERVER SETUP
 #  jetson_setup.sh
 # ================================================================
 #
@@ -14,7 +14,7 @@
 #    - Stream movies and TV shows via Stremio from anywhere in
 #      the world, with content cached to an external hard drive
 #    - Connect securely to your home network from any device using
-#      WireGuard VPN (set up via PiVPN)
+#      Tailscale VPN (no port forwarding needed, works behind CGNAT)
 #    - Access your Stremio server privately through the VPN —
 #      the streaming port is never exposed to the public internet
 #    - Keep your server reachable even when your home IP changes,
@@ -37,12 +37,8 @@
 #    sudo bash jetson_setup.sh
 #
 #  The script will ask a few questions upfront (external drive,
-#  DuckDNS credentials) then run fully automatically. The only
-#  manual step is the PiVPN wizard which launches mid-way through.
-#
-#  If PiVPN requests a reboot at the end of its wizard, let it
-#  reboot — then run this script again. It detects completed steps
-#  and skips them, picking up where it left off.
+#  DuckDNS credentials) then run fully automatically.
+#  It detects completed steps and skips them, so it's safe to re-run.
 #
 #  WHAT IT DOES (Step by Step)
 #  ---------------------------
@@ -89,10 +85,9 @@
 #    - Verifies Docker is responding before continuing
 #
 #  [6/9] Configuring firewall
-#    - If UFW is active, opens port 51820/UDP for WireGuard
-#      and 22/TCP for SSH
+#    - If UFW is active, opens 22/TCP for SSH
 #    - Stremio port 11470 is intentionally NOT opened — it is
-#      only accessible through the VPN tunnel
+#      only accessible through the Tailscale VPN tunnel
 #
 #  [7/9] Starting Stremio Server
 #    - Checks if Stremio is already running and healthy first
@@ -107,15 +102,11 @@
 #          route through the LAN IP so they can still connect)
 #    - Waits up to 30 seconds confirming server responds on 11470
 #
-#  [8/9] Installing WireGuard VPN
-#    - Checks if PiVPN is already installed (skips if so)
-#    - Downloads PiVPN installer to a temp file and validates it
-#    - Pauses and shows you exactly what options to choose in the
-#      PiVPN wizard before launching it
-#    - Handles PiVPN reboot requests gracefully
-#    - After PiVPN is set up, add client devices with:
-#        pivpn add          (creates a profile)
-#        pivpn -qr <name>   (shows QR code for mobile)
+#  [8/9] Installing Tailscale VPN
+#    - Installs Tailscale (no port forwarding needed, works behind CGNAT)
+#    - Enables and starts the tailscaled service
+#    - Prompts to authenticate (interactive mode)
+#    - Install Tailscale on your phone/laptop and sign in with same account
 #
 #  [9/9] Setting up DuckDNS (optional)
 #    - Creates /opt/duckdns/duck.sh with your credentials
@@ -131,19 +122,12 @@
 #
 #  AFTER SETUP — CONNECTING STREMIO
 #  ---------------------------------
-#  1. Connect your phone/laptop to WireGuard VPN
-#  2. Open https://web.stremio.com in a browser
-#  3. Go to Settings → Advanced → Streaming Server URL
-#  4. Set it to: http://<your-jetson-ip>:11470
-#  5. Install the Torrentio addon from the Stremio addon catalog
-#  6. Search for any movie and press play
+#  1. Install Tailscale on your phone/laptop (https://tailscale.com/download)
+#  2. Sign in with the same account used on the Jetson
+#  3. Open http://<tailscale-ip>:8080 in a browser
+#  4. Search for any movie and press play
 #
-#  ROUTER SETUP (required for remote access)
-#  ------------------------------------------
-#  Log into your router admin panel and add a port forward:
-#    External port : 51820
-#    Internal IP   : <your jetson LAN IP>
-#    Protocol      : UDP
+#  No port forwarding or router setup needed — Tailscale handles it.
 #
 #  FILES CREATED BY THIS SCRIPT
 #  -----------------------------
@@ -158,9 +142,8 @@
 #    docker logs stremio-server     — view Stremio server logs
 #    docker restart stremio-server  — restart Stremio
 #    docker stats stremio-server    — live CPU/RAM usage
-#    pivpn add                      — add a new VPN client device
-#    pivpn -c                       — list connected VPN clients
-#    pivpn -qr <name>               — show QR code for a client
+#    tailscale status               — check Tailscale VPN status
+#    tailscale ip                   — show Tailscale IP
 #    df -h /mnt/movies              — check external drive space
 #    cat /var/log/jetson_setup.log  — review this setup log
 #
@@ -170,10 +153,10 @@
 #    docker logs stremio-server
 #    docker restart stremio-server
 #
-#  Can't connect via VPN from outside home:
-#    - Confirm port 51820 UDP is forwarded on your router
-#    - Check your DuckDNS hostname resolves: ping yourdomain.duckdns.org
-#    - Check WireGuard is running: sudo systemctl status wg-quick@wg0
+#  Can't connect via Tailscale:
+#    - Check Tailscale is running: sudo tailscale status
+#    - Re-authenticate: sudo tailscale up
+#    - Make sure both devices use the same Tailscale account
 #
 #  External drive not mounting on reboot:
 #    - Check: sudo systemctl status systemd-fsck@dev-sdX.service
@@ -197,14 +180,11 @@
 #   FORMAT_DRIVE=yes                    — auto-format unformatted drives
 #   DUCKDNS_SUBDOMAIN=albatrossburt    — DuckDNS subdomain (or empty to skip)
 #   DUCKDNS_AUTH_TOKEN=xxx             — DuckDNS token
-#   VPN_PROFILE_NAMES=myphone,laptop   — comma-separated VPN profiles to create
 #   ENABLE_HEALTH=yes                  — auto-restart crashed services (default: yes)
-#   ENABLE_UPNP=yes                    — auto port forward via UPnP (default: yes)
 #   DISABLE_GUI=yes                    — disable desktop for headless (default: yes)
 #
 # Example (fully headless over SSH):
 #   sudo HEADLESS=1 DRIVE_PARTITION=sda1 \
-#        VPN_PROFILE_NAMES=myphone,laptop \
 #        DUCKDNS_SUBDOMAIN=albatrossburt \
 #        DUCKDNS_AUTH_TOKEN=your-token \
 #        bash jetson_setup.sh
@@ -325,16 +305,9 @@ if [[ "${HEADLESS:-0}" == "1" ]]; then
     info "DuckDNS not configured — skipping"
   fi
 
-  # VPN profiles (comma-separated: VPN_PROFILES="myphone,laptop")
-  VPN_PROFILES=()
-  if [[ -n "$VPN_PROFILE_NAMES" ]]; then
-    IFS=',' read -ra VPN_PROFILES <<< "$VPN_PROFILE_NAMES"
-  fi
-
   # Features default to yes in headless mode
   ENABLE_HEALTH="${ENABLE_HEALTH:-yes}"
   DISABLE_GUI="${DISABLE_GUI:-yes}"
-  ENABLE_UPNP="${ENABLE_UPNP:-yes}"
 
 else
   # ── Interactive mode — prompt the user ──
@@ -432,26 +405,6 @@ else
     fi
   fi
 
-  # ── VPN client profiles ──
-  echo ""
-  echo -e "${BLUE}  Create VPN profiles now so you can connect immediately after setup."
-  echo -e "  You can always add more later with: pivpn add${NC}"
-  echo ""
-  VPN_PROFILES=()
-  read -p "How many VPN device profiles to create? (0-10) [1]: " VPN_COUNT
-  VPN_COUNT=${VPN_COUNT:-1}
-  if [[ "$VPN_COUNT" =~ ^[0-9]+$ ]] && [[ $VPN_COUNT -gt 0 ]] && [[ $VPN_COUNT -le 10 ]]; then
-    for i in $(seq 1 "$VPN_COUNT"); do
-      read -p "  Name for device $i (e.g. myphone, laptop, tablet): " PROFILE_NAME
-      PROFILE_NAME=$(echo "$PROFILE_NAME" | tr -cd '[:alnum:]-_')
-      if [[ -n "$PROFILE_NAME" ]]; then
-        VPN_PROFILES+=("$PROFILE_NAME")
-      else
-        err "  Invalid name — skipping"
-      fi
-    done
-  fi
-
   # ── Health monitoring ──
   echo ""
   read -p "Enable auto health monitoring? (restarts crashed services) [yes]: " ENABLE_HEALTH
@@ -464,13 +417,6 @@ else
   DISABLE_GUI=$(echo "${DISABLE_GUI:-yes}" | tr '[:upper:]' '[:lower:]')
   [[ "$DISABLE_GUI" == "y" ]] && DISABLE_GUI="yes"
 
-  # ── UPnP auto port forward ──
-  echo ""
-  echo -e "${BLUE}  The script can try to auto-forward port 51820 on your router"
-  echo -e "  using UPnP. This saves you from logging into your router manually.${NC}"
-  read -p "Try automatic router port forwarding (UPnP)? [yes]: " ENABLE_UPNP
-  ENABLE_UPNP=$(echo "${ENABLE_UPNP:-yes}" | tr '[:upper:]' '[:lower:]')
-  [[ "$ENABLE_UPNP" == "y" ]] && ENABLE_UPNP="yes"
 fi
 
 STEP=0
@@ -722,12 +668,11 @@ if command -v ufw &>/dev/null; then
   UFW_STATUS=$(ufw status 2>/dev/null | head -1)
   if echo "$UFW_STATUS" | grep -qi "active"; then
     info "UFW is active — adding port rules..."
-    ufw allow 51820/udp  comment 'WireGuard VPN'  || true
     ufw allow 22/tcp     comment 'SSH'             || true
     # Stremio on 11470 is intentionally NOT opened to internet
-    # — access via WireGuard VPN only
-    ok "Firewall rules added (51820/UDP WireGuard, 22/TCP SSH)"
-    info "Note: Stremio port 11470 is NOT opened to internet — access via VPN only"
+    # — access via Tailscale VPN only
+    ok "Firewall rules added (22/TCP SSH)"
+    info "Note: Stremio port 11470 is NOT opened to internet — access via Tailscale only"
   else
     info "UFW is inactive — skipping firewall rules"
   fi
@@ -769,7 +714,7 @@ if [[ "$STREMIO_ALREADY_OK" != "true" ]]; then
 
   # STREMIO_BIND_IP was detected above (before the health check).
   # Bind to LAN IP only — not 0.0.0.0 (exposes to everyone) and not
-  # 127.0.0.1 (blocks VPN clients). LAN binding lets WireGuard VPN
+  # 127.0.0.1 (blocks VPN clients). LAN binding lets Tailscale VPN
   # clients reach Stremio while UFW keeps port 11470 off the internet.
   if [[ "$STREMIO_BIND_IP" == "0.0.0.0" ]]; then
     info "Could not detect LAN IP — binding Stremio to all interfaces as fallback"
@@ -857,110 +802,72 @@ fi
 # Allow port 8080 through firewall (same LAN-only binding as Stremio)
 ufw allow 8080/tcp comment "Alabtross Mobile UI" 2>/dev/null || true
 
-
-# ---------------------------------------------------------------
-# STEP 8/9 — WireGuard via PiVPN
-# ---------------------------------------------------------------
-step "Installing WireGuard VPN"
-
-if command -v pivpn &>/dev/null; then
-  ok "PiVPN already installed — skipping wizard"
+# Install systemd service for on-boot startup
+SETUP_DIR="$(cd "$(dirname "$0")" && pwd)"
+SERVICE_SRC="$SETUP_DIR/alabtross-mobile.service"
+if [[ -f "$SERVICE_SRC" ]]; then
+  cp "$SERVICE_SRC" /etc/systemd/system/alabtross-mobile.service
+  systemctl daemon-reload
+  systemctl enable alabtross-mobile.service
+  ok "Alabtross Mobile UI will start automatically on boot"
 else
-  PIVPN_SCRIPT=$(mktemp /tmp/pivpn-install-XXXXXX.sh) || die "Failed to create temp file"
-  TEMP_FILES+=("$PIVPN_SCRIPT")
+  info "Service file not found — on-boot startup not configured"
+fi
 
-  if [[ "${HEADLESS:-0}" == "1" ]]; then
-    # ── Headless: generate PiVPN config and run unattended ──
-    info "Setting up PiVPN in unattended mode..."
 
-    # Determine public-facing address
-    if [[ "$HAS_DUCKDNS" == "yes" && -n "$DUCKDNS_DOMAIN" ]]; then
-      PIVPN_HOST="${DUCKDNS_DOMAIN}.duckdns.org"
-      PIVPN_HOST_TYPE="DNS"
-    else
-      PIVPN_HOST=$(curl -s https://api.ipify.org || curl -s https://ifconfig.me || echo "")
-      PIVPN_HOST_TYPE="IP"
-      if [[ -z "$PIVPN_HOST" ]]; then
-        err "Could not detect public IP — PiVPN may need reconfiguration"
-        PIVPN_HOST="0.0.0.0"
+# ---------------------------------------------------------------
+# STEP 8/9 — Tailscale VPN
+# ---------------------------------------------------------------
+step "Installing Tailscale VPN"
+
+if command -v tailscale &>/dev/null; then
+  ok "Tailscale already installed"
+  # Check if already connected
+  if tailscale status &>/dev/null; then
+    TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || echo "")
+    ok "Tailscale is connected — IP: ${TAILSCALE_IP:-unknown}"
+  else
+    info "Tailscale is installed but not connected."
+    info "Run: sudo tailscale up"
+  fi
+else
+  info "Installing Tailscale..."
+  if curl -fsSL https://tailscale.com/install.sh | sh; then
+    ok "Tailscale installed"
+
+    info "Starting Tailscale..."
+    systemctl enable tailscaled 2>/dev/null || true
+    systemctl start tailscaled 2>/dev/null || true
+
+    echo ""
+    echo "---------------------------------------------"
+    echo "  Tailscale needs to be authenticated."
+    echo ""
+    echo "  Run this command and follow the link:"
+    echo ""
+    echo "    sudo tailscale up"
+    echo ""
+    echo "  Then install Tailscale on your phone/laptop"
+    echo "  and sign in with the same account."
+    echo ""
+    echo "  Access Alabtross via your Tailscale IP:"
+    echo "    http://<tailscale-ip>:8080"
+    echo "---------------------------------------------"
+    echo ""
+
+    if [[ "${HEADLESS:-0}" != "1" ]]; then
+      read -p "Authenticate Tailscale now? (yes/no) [yes]: " TS_AUTH
+      TS_AUTH=$(echo "${TS_AUTH:-yes}" | tr '[:upper:]' '[:lower:]')
+      if [[ "$TS_AUTH" == "yes" || "$TS_AUTH" == "y" ]]; then
+        tailscale up
+        TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || echo "")
+        if [[ -n "$TAILSCALE_IP" ]]; then
+          ok "Tailscale connected — IP: $TAILSCALE_IP"
+        fi
       fi
     fi
-
-    # Write PiVPN unattended setup config
-    PIVPN_CONF=$(mktemp /tmp/pivpn-unattended-XXXXXX.conf) || die "Failed to create temp file"
-    chmod 600 "$PIVPN_CONF"
-    TEMP_FILES+=("$PIVPN_CONF")
-    cat > "$PIVPN_CONF" << PIVPNEOF
-USING_DASHBOARD=0
-IPv4dev=$(ip route get 8.8.8.8 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}')
-install_user=${REAL_USER}
-install_home=${REAL_HOME}
-VPN=wireguard
-pivpnNET=10.6.0.0
-subnetClass=24
-ALLOWED_IPS="0.0.0.0/0,::0/0"
-pivpnMTU=1420
-pivpnPORT=51820
-pivpnDNS1=1.1.1.1
-pivpnDNS2=1.0.0.1
-pivpnHOST=${PIVPN_HOST}
-pivpnPERSISTENTKEEPALIVE=25
-UNATTUPG=1
-PIVPNEOF
-
-    info "Downloading PiVPN installer..."
-    if ! curl -fsSL https://install.pivpn.io -o "$PIVPN_SCRIPT"; then
-      err "Failed to download PiVPN installer."
-      PIVPN_EXIT=1
-    elif [[ ! -s "$PIVPN_SCRIPT" ]]; then
-      err "PiVPN installer is empty."
-      PIVPN_EXIT=1
-    else
-      bash "$PIVPN_SCRIPT" --unattended "$PIVPN_CONF"
-      PIVPN_EXIT=$?
-    fi
-
   else
-    # ── Interactive: show instructions and launch wizard ──
-    echo ""
-    echo "---------------------------------------------"
-    echo "  PiVPN setup wizard is about to launch."
-    echo ""
-    echo "  Choose these options when asked:"
-    echo "  - VPN type :  WireGuard"
-    echo "  - Port     :  51820  (press Enter for default)"
-    echo "  - DNS      :  1.1.1.1  (Cloudflare)"
-    if [[ "$HAS_DUCKDNS" == "yes" && -n "$DUCKDNS_DOMAIN" ]]; then
-    echo "  - Public   :  ${DUCKDNS_DOMAIN}.duckdns.org"
-    else
-    echo "  - Public   :  your current public IP"
-    fi
-    echo ""
-    echo "  NOTE: PiVPN may ask to REBOOT at the end."
-    echo "  If it reboots, run this script again —"
-    echo "  already-completed steps will be skipped."
-    echo "---------------------------------------------"
-    echo ""
-    read -p "Press ENTER to launch PiVPN..."
-
-    info "Downloading PiVPN installer..."
-    if ! curl -fsSL https://install.pivpn.io -o "$PIVPN_SCRIPT"; then
-      err "Failed to download PiVPN installer. Check your internet connection."
-      PIVPN_EXIT=1
-    elif [[ ! -s "$PIVPN_SCRIPT" ]]; then
-      err "PiVPN installer downloaded but is empty. Try again later."
-      PIVPN_EXIT=1
-    else
-      bash "$PIVPN_SCRIPT"
-      PIVPN_EXIT=$?
-    fi
-  fi
-
-  if [[ $PIVPN_EXIT -eq 0 ]]; then
-    ok "WireGuard installed"
-  else
-    err "PiVPN exited with code $PIVPN_EXIT — it may have requested a reboot."
-    err "If rebooted, re-run this script to finish the remaining steps."
+    err "Failed to install Tailscale. Install manually: https://tailscale.com/download"
   fi
 fi
 
@@ -1020,89 +927,10 @@ unset DUCKDNS_TOKEN
 unset DUCKDNS_AUTH_TOKEN
 
 # ---------------------------------------------------------------
-# UPnP auto port forwarding (skips need for router admin page)
+# Get local IP for summary
 # ---------------------------------------------------------------
 LOCAL_IP=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')
 LOCAL_IP=${LOCAL_IP:-$(hostname -I | awk '{print $1}')}
-
-UPNP_OK=false
-if [[ "${ENABLE_UPNP:-no}" == "yes" ]]; then
-  hdr "UPnP Port Forwarding"
-  # Install miniupnpc if not present
-  if ! command -v upnpc &>/dev/null; then
-    info "Installing UPnP client..."
-    apt-get install -y miniupnpc 2>/dev/null || true
-  fi
-
-  if command -v upnpc &>/dev/null; then
-    info "Attempting to forward port 51820 UDP via UPnP..."
-    # Remove old mapping first (ignore errors)
-    upnpc -d 51820 UDP 2>/dev/null || true
-    # Add new mapping: external 51820 → internal 51820 on this IP
-    if upnpc -e "Alabtross WireGuard VPN" -a "$LOCAL_IP" 51820 51820 UDP 0 2>/dev/null; then
-      ok "Port 51820 UDP forwarded via UPnP — no router config needed!"
-      UPNP_OK=true
-    else
-      err "UPnP port forward failed — your router may not support UPnP"
-      info "You'll need to forward port 51820 UDP manually in your router settings"
-    fi
-
-    # Also try to verify it worked
-    if $UPNP_OK; then
-      EXT_IP=$(upnpc -s 2>/dev/null | grep "ExternalIPAddress" | awk '{print $NF}' || echo "")
-      if [[ -n "$EXT_IP" ]]; then
-        ok "Your external IP: $EXT_IP"
-      fi
-    fi
-  else
-    err "Could not install miniupnpc — manual router port forward required"
-  fi
-fi
-
-# ---------------------------------------------------------------
-# Create VPN client profiles
-# ---------------------------------------------------------------
-if command -v pivpn &>/dev/null && [[ ${#VPN_PROFILES[@]} -gt 0 ]]; then
-  hdr "Creating VPN Profiles"
-  CREATED_PROFILES=()
-  for PROFILE in "${VPN_PROFILES[@]}"; do
-    PROFILE=$(echo "$PROFILE" | tr -cd '[:alnum:]-_')
-    [[ -z "$PROFILE" ]] && continue
-
-    # Check if profile already exists
-    if pivpn list 2>/dev/null | grep -q "$PROFILE"; then
-      ok "Profile '$PROFILE' already exists — skipping"
-      CREATED_PROFILES+=("$PROFILE")
-      continue
-    fi
-
-    info "Creating VPN profile: $PROFILE"
-    # pivpn add creates the profile non-interactively with -n flag
-    if pivpn add -n "$PROFILE" 2>/dev/null; then
-      ok "Created profile: $PROFILE"
-      CREATED_PROFILES+=("$PROFILE")
-    else
-      # Fallback: try without -n flag using expect-style input
-      echo "$PROFILE" | pivpn add 2>/dev/null && {
-        ok "Created profile: $PROFILE"
-        CREATED_PROFILES+=("$PROFILE")
-      } || err "Failed to create profile: $PROFILE"
-    fi
-  done
-
-  # Show QR codes for created profiles
-  if [[ ${#CREATED_PROFILES[@]} -gt 0 ]]; then
-    echo ""
-    echo -e "${GREEN}  ---- VPN QR CODES ----${NC}"
-    echo "  Scan these with the WireGuard app on your phone/tablet"
-    echo ""
-    for PROFILE in "${CREATED_PROFILES[@]}"; do
-      echo -e "${BLUE}  ── $PROFILE ──${NC}"
-      pivpn -qr "$PROFILE" 2>/dev/null || info "QR code not available for $PROFILE — use: pivpn -qr $PROFILE"
-      echo ""
-    done
-  fi
-fi
 
 # ---------------------------------------------------------------
 # Health monitoring — auto-restart crashed services
@@ -1179,60 +1007,51 @@ echo "=============================================="
 echo -e "${GREEN}  SETUP COMPLETE!${NC}"
 echo "=============================================="
 echo ""
+TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || echo "not connected")
 echo "  Local IP:        $LOCAL_IP"
+echo "  Tailscale IP:    $TAILSCALE_IP"
 echo "  Stremio Server:  http://$LOCAL_IP:11470"
 echo "  Mobile UI:       http://$LOCAL_IP:8080"
 echo "  Storage:         $STORAGE_LABEL"
-echo "  WireGuard VPN:   port 51820 UDP"
+echo "  VPN:             Tailscale (no port forwarding needed)"
 if [[ "$HAS_DUCKDNS" == "yes" && -n "$DUCKDNS_DOMAIN" ]]; then
   echo "  DuckDNS:         ${DUCKDNS_DOMAIN}.duckdns.org"
-fi
-if $UPNP_OK; then
-  echo -e "  Port Forward:    ${GREEN}Auto-configured via UPnP${NC}"
-else
-  echo -e "  Port Forward:    ${YELLOW}Manual — forward 51820 UDP on your router${NC}"
 fi
 if [[ "${ENABLE_HEALTH:-no}" == "yes" ]]; then
   echo -e "  Health Monitor:  ${GREEN}Active (every 5 min)${NC}"
 fi
 echo ""
 
-# Show next steps — adjusted based on what's already done
+# Show next steps
 NEXT_STEP=1
 echo "  ---- NEXT STEPS ----"
 echo ""
-if ! $UPNP_OK; then
-  echo "  $NEXT_STEP. On your ROUTER: forward port 51820 UDP → $LOCAL_IP"
+if ! tailscale status &>/dev/null; then
+  echo "  $NEXT_STEP. Authenticate Tailscale:"
+  echo "     sudo tailscale up"
   echo ""
   NEXT_STEP=$((NEXT_STEP+1))
 fi
-if [[ ${#CREATED_PROFILES[@]:-0} -eq 0 ]]; then
-  echo "  $NEXT_STEP. Add a VPN device profile:"
-  echo "     pivpn add"
-  echo ""
-  NEXT_STEP=$((NEXT_STEP+1))
-  echo "  $NEXT_STEP. Show QR code for WireGuard app:"
-  echo "     pivpn -qr <profilename>"
-  echo ""
-  NEXT_STEP=$((NEXT_STEP+1))
-fi
-echo "  $NEXT_STEP. On your phone: connect WireGuard VPN, then open:"
-echo "     http://$LOCAL_IP:8080"
+echo "  $NEXT_STEP. Install Tailscale on your phone/laptop:"
+echo "     https://tailscale.com/download"
+echo "     Sign in with the same account"
+echo ""
+NEXT_STEP=$((NEXT_STEP+1))
+echo "  $NEXT_STEP. Access Alabtross from anywhere via Tailscale:"
+echo "     http://$TAILSCALE_IP:8080"
 echo "     Tip: Add to Home Screen for an app-like experience"
 echo ""
 NEXT_STEP=$((NEXT_STEP+1))
-echo "  $NEXT_STEP. In the mobile UI Settings, verify server URL:"
-echo "     http://$LOCAL_IP:11470"
-echo "     Then add Torrentio addon for streams"
+echo "  $NEXT_STEP. On LAN, access directly:"
+echo "     http://$LOCAL_IP:8080"
 echo ""
 echo "  ---- USEFUL COMMANDS ----"
 echo ""
 echo "  docker logs stremio-server     — view Stremio logs"
 echo "  docker restart stremio-server  — restart Stremio"
 echo "  docker stats stremio-server    — CPU/RAM usage"
-echo "  pivpn -c                       — list VPN connections"
-echo "  pivpn add                      — add new VPN client"
-echo "  pivpn -qr <name>              — show QR code"
+echo "  tailscale status               — check Tailscale connection"
+echo "  tailscale ip                   — show Tailscale IP"
 echo "  df -h \"$MOUNT_POINT\"           — check drive space"
 echo "  cat $LOG_FILE                  — view setup log"
 echo ""

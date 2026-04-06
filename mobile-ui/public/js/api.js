@@ -9,9 +9,13 @@
 const CINEMETA_URL = 'https://v3-cinemeta.strem.io';
 
 // Torrentio requires a config prefix to return results from all providers.
-// Without this, the bare URL may return empty or limited results.
+// We try multiple configs since the API format may have changed.
 const TORRENTIO_BASE = 'https://torrentio.strem.io';
-const TORRENTIO_CONFIG = 'sort=qualitysize|qualityfilter=other';
+const TORRENTIO_CONFIGS = [
+  'providers=yts,eztv,rarbg,1337x,thepiratebay,kickasstorrents,torrentgalaxy|sort=qualitysize|qualityfilter=other',
+  'sort=qualitysize|qualityfilter=other',
+  '',
+];
 
 // Common trackers for building magnet URIs (Torrentio returns bare infoHash)
 const MAGNET_TRACKERS = [
@@ -326,12 +330,11 @@ class StremioAPI {
   async _getCustomStreams(type, id, seasonEpisode) {
     const imdbId = id.match(/^tt\d+/) ? id.match(/^(tt\d+)/)[1] : id;
 
-    // Build Torrentio URL (browser fetches directly — no Jetson DNS needed)
+    // Build Torrentio stream ID
     let torrentioId = imdbId;
     if (type === 'series' && seasonEpisode && seasonEpisode.season !== undefined && seasonEpisode.episode !== undefined) {
       torrentioId = `${imdbId}:${seasonEpisode.season}:${seasonEpisode.episode}`;
     }
-    const torrentioUrl = `${TORRENTIO_BASE}/${TORRENTIO_CONFIG}/stream/${type}/${torrentioId}.json`;
 
     // Build backend scraper URL
     let backendUrl;
@@ -349,9 +352,9 @@ class StremioAPI {
     const qs = params.toString();
     if (qs) backendUrl += '?' + qs;
 
-    // Fetch Torrentio + backend in parallel
+    // Fetch Torrentio (browser-side, tries multiple configs) + backend in parallel
     const [torrentioStreams, backendStreams] = await Promise.all([
-      this._fetchTorrentioStreams(torrentioUrl),
+      this._fetchTorrentioWithFallback(type, torrentioId),
       this._fetchBackendStreams(backendUrl),
     ]);
 
@@ -372,6 +375,24 @@ class StremioAPI {
       if (/\.wmv\b/i.test(t)) return false;
       return true;
     });
+  }
+
+  /**
+   * Try Torrentio with multiple config variations until one returns results.
+   */
+  async _fetchTorrentioWithFallback(type, torrentioId) {
+    for (const config of TORRENTIO_CONFIGS) {
+      const url = config
+        ? `${TORRENTIO_BASE}/${config}/stream/${type}/${torrentioId}.json`
+        : `${TORRENTIO_BASE}/stream/${type}/${torrentioId}.json`;
+      const streams = await this._fetchTorrentioStreams(url);
+      if (streams.length > 0) {
+        console.log(`[Torrentio] Browser: config "${config || '(bare)'}" returned ${streams.length} results`);
+        return streams;
+      }
+    }
+    console.warn('[Torrentio] Browser: all configs returned empty');
+    return [];
   }
 
   async _fetchTorrentioStreams(url) {

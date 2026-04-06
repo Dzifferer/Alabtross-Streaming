@@ -6,7 +6,7 @@ const https = require('https');
 const { URL } = require('url');
 const dns = require('dns');
 const { createProxyMiddleware } = require('http-proxy-middleware');
-const { getMovieStreams, getSeriesStreams } = require('./lib/stream-providers');
+const { getMovieStreams, getSeriesStreams, diagnoseProviders } = require('./lib/stream-providers');
 const TorrentEngine = require('./lib/torrent-engine');
 const LibraryManager = require('./lib/library-manager');
 
@@ -218,6 +218,19 @@ app.get('/api/streams/series/:imdbId', rateLimit, async (req, res) => {
   } catch (err) {
     console.error('[API] Series stream error:', err.message);
     res.status(500).json({ error: 'Failed to fetch streams' });
+  }
+});
+
+// GET /api/streams/diagnose — test connectivity to all providers
+app.get('/api/streams/diagnose', rateLimit, async (req, res) => {
+  try {
+    console.log('[API] Running provider diagnostics...');
+    const results = await diagnoseProviders();
+    console.log('[API] Diagnostics complete:', JSON.stringify(results._summary));
+    res.json(results);
+  } catch (err) {
+    console.error('[API] Diagnostics error:', err.message);
+    res.status(500).json({ error: 'Diagnostics failed' });
   }
 });
 

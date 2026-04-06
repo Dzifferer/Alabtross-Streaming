@@ -192,16 +192,24 @@
 # ---------------------------------------------------------------
 # HEADLESS MODE — set these env vars to skip all interactive prompts
 # ---------------------------------------------------------------
-#   HEADLESS=1                    — enable unattended mode
-#   DRIVE_PARTITION=sda1          — external drive partition (or "none")
-#   FORMAT_DRIVE=yes              — auto-format unformatted drives
-#   DUCKDNS_SUBDOMAIN=myserver   — DuckDNS subdomain (or empty to skip)
-#   DUCKDNS_AUTH_TOKEN=xxx       — DuckDNS token
+#   HEADLESS=1                          — enable unattended mode
+#   DRIVE_PARTITION=sda1                — external drive partition (or "none")
+#   FORMAT_DRIVE=yes                    — auto-format unformatted drives
+#   DUCKDNS_SUBDOMAIN=albatrossburt    — DuckDNS subdomain (or empty to skip)
+#   DUCKDNS_AUTH_TOKEN=xxx             — DuckDNS token
+#   VPN_PROFILE_NAMES=myphone,laptop   — comma-separated VPN profiles to create
+#   ENABLE_HEALTH=yes                  — auto-restart crashed services (default: yes)
+#   ENABLE_UPNP=yes                    — auto port forward via UPnP (default: yes)
+#   DISABLE_GUI=yes                    — disable desktop for headless (default: yes)
 #
 # Example (fully headless over SSH):
-#   sudo HEADLESS=1 DRIVE_PARTITION=sda1 bash jetson_setup.sh
+#   sudo HEADLESS=1 DRIVE_PARTITION=sda1 \
+#        VPN_PROFILE_NAMES=myphone,laptop \
+#        DUCKDNS_SUBDOMAIN=albatrossburt \
+#        DUCKDNS_AUTH_TOKEN=your-token \
+#        bash jetson_setup.sh
 #
-# Example (no external drive, no DuckDNS):
+# Example (minimal, no external drive, no DuckDNS):
 #   sudo HEADLESS=1 DRIVE_PARTITION=none bash jetson_setup.sh
 # ---------------------------------------------------------------
 
@@ -317,65 +325,97 @@ if [[ "${HEADLESS:-0}" == "1" ]]; then
     info "DuckDNS not configured — skipping"
   fi
 
+  # VPN profiles (comma-separated: VPN_PROFILES="myphone,laptop")
+  VPN_PROFILES=()
+  if [[ -n "$VPN_PROFILE_NAMES" ]]; then
+    IFS=',' read -ra VPN_PROFILES <<< "$VPN_PROFILE_NAMES"
+  fi
+
+  # Features default to yes in headless mode
+  ENABLE_HEALTH="${ENABLE_HEALTH:-yes}"
+  DISABLE_GUI="${DISABLE_GUI:-yes}"
+  ENABLE_UPNP="${ENABLE_UPNP:-yes}"
+
 else
   # ── Interactive mode — prompt the user ──
   echo "A few quick questions before we start:"
   echo ""
 
-  # External drive
-  read -p "Is your external USB hard drive plugged in? (yes/no): " HAS_DRIVE
-  HAS_DRIVE=$(echo "$HAS_DRIVE" | tr '[:upper:]' '[:lower:]')
-  [[ "$HAS_DRIVE" == "y" ]] && HAS_DRIVE="yes"
-  [[ "$HAS_DRIVE" == "n" ]] && HAS_DRIVE="no"
+  # ── External drive (auto-detect) ──
+  # Find USB block devices that are NOT the boot drive
+  BOOT_DISK=$(lsblk -no PKNAME "$(findmnt -n -o SOURCE /)" 2>/dev/null || echo "")
+  USB_PARTS=()
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    DEV_NAME=$(echo "$line" | awk '{print $1}')
+    DEV_SIZE=$(echo "$line" | awk '{print $2}')
+    DEV_TYPE=$(echo "$line" | awk '{print $4}')
+    DEV_FS=$(echo "$line" | awk '{print $3}')
+    # Skip the boot disk and its partitions
+    PARENT=$(lsblk -no PKNAME "/dev/$DEV_NAME" 2>/dev/null || echo "")
+    [[ "$PARENT" == "$BOOT_DISK" || "$DEV_NAME" == "$BOOT_DISK" ]] && continue
+    # Only list partitions (type=part) or whole disks with filesystems
+    [[ "$DEV_TYPE" == "part" || (-n "$DEV_FS" && "$DEV_TYPE" == "disk") ]] || continue
+    # Skip tiny partitions (<1GB)
+    DEV_BYTES=$(lsblk -bno SIZE "/dev/$DEV_NAME" 2>/dev/null || echo "0")
+    [[ "$DEV_BYTES" -lt 1073741824 ]] 2>/dev/null && continue
+    USB_PARTS+=("$DEV_NAME|$DEV_SIZE|${DEV_FS:-unformatted}")
+  done < <(lsblk -o NAME,SIZE,FSTYPE,TYPE --noheadings 2>/dev/null)
 
-  if [[ "$HAS_DRIVE" == "yes" ]]; then
-    info "Detecting drives..."
+  if [[ ${#USB_PARTS[@]} -gt 0 ]]; then
+    echo -e "${GREEN}  Detected external drive(s):${NC}"
     echo ""
-    lsblk -o NAME,SIZE,FSTYPE,TYPE,MOUNTPOINT
-    echo ""
-    echo -e "${YELLOW}  NOTE: Your OS/SD card is usually mmcblk0 or nvme0n1."
-    echo -e "  Do NOT select those — only select your external USB drive.${NC}"
-    echo ""
-    while true; do
-      read -p "Enter your drive partition (e.g. sda1 or sdb1): " DRIVE_PART
-      if [[ "$DRIVE_PART" =~ [^a-zA-Z0-9] ]]; then
-        err "Invalid input '$DRIVE_PART' — only letters and numbers allowed (e.g. sda1)"
-        continue
-      fi
-      if [[ -b "/dev/$DRIVE_PART" ]]; then
-        IS_WHOLE_DISK=false
-        [[ "$DRIVE_PART" =~ ^[a-z]+$ ]] && IS_WHOLE_DISK=true
-        [[ "$DRIVE_PART" =~ ^nvme[0-9]+n[0-9]+$ ]] && IS_WHOLE_DISK=true
-        if $IS_WHOLE_DISK; then
-          echo -e "${RED}WARNING: '$DRIVE_PART' looks like a whole disk, not a partition.${NC}"
-          echo    "         Formatting a whole disk destroys its partition table."
-          echo    "         Did you mean '${DRIVE_PART}1' or '${DRIVE_PART}p1'?"
-          read -p "         Continue with '$DRIVE_PART' anyway? (yes/no): " CONFIRM_DISK
-          CONFIRM_DISK=$(echo "$CONFIRM_DISK" | tr '[:upper:]' '[:lower:]')
-          [[ "$CONFIRM_DISK" != "yes" && "$CONFIRM_DISK" != "y" ]] && continue
-        fi
-        ok "Drive /dev/$DRIVE_PART found"
-        break
-      else
-        err "/dev/$DRIVE_PART not found. Check the name above and try again."
-      fi
+    for i in "${!USB_PARTS[@]}"; do
+      IFS='|' read -r _name _size _fs <<< "${USB_PARTS[$i]}"
+      echo "    [$((i+1))] /dev/$_name  — $_size  ($_fs)"
     done
-    MOUNT_POINT="/mnt/movies"
+    echo "    [0] Skip — use local storage instead"
+    echo ""
+    read -p "Select a drive [1]: " DRIVE_CHOICE
+    DRIVE_CHOICE=${DRIVE_CHOICE:-1}
+
+    if [[ "$DRIVE_CHOICE" == "0" ]]; then
+      echo "No problem — Stremio will cache locally."
+      MOUNT_POINT="$REAL_HOME/.stremio-data"
+    elif [[ "$DRIVE_CHOICE" =~ ^[0-9]+$ ]] && [[ $DRIVE_CHOICE -ge 1 ]] && [[ $DRIVE_CHOICE -le ${#USB_PARTS[@]} ]]; then
+      IFS='|' read -r DRIVE_PART _size _fs <<< "${USB_PARTS[$((DRIVE_CHOICE-1))]}"
+      ok "Selected /dev/$DRIVE_PART ($_size, $_fs)"
+      MOUNT_POINT="/mnt/movies"
+    else
+      err "Invalid choice — using local storage"
+      MOUNT_POINT="$REAL_HOME/.stremio-data"
+    fi
   else
-    echo "No problem — Stremio will cache locally. Re-run this script later to add a drive."
-    MOUNT_POINT="$REAL_HOME/.stremio-data"
+    echo "No external USB drives detected."
+    read -p "Enter a partition manually, or press Enter to skip: " DRIVE_PART
+    if [[ -n "$DRIVE_PART" && -b "/dev/$DRIVE_PART" ]]; then
+      ok "Drive /dev/$DRIVE_PART found"
+      MOUNT_POINT="/mnt/movies"
+    else
+      [[ -n "$DRIVE_PART" ]] && err "/dev/$DRIVE_PART not found"
+      echo "Stremio will cache locally. Re-run this script later to add a drive."
+      MOUNT_POINT="$REAL_HOME/.stremio-data"
+      DRIVE_PART=""
+    fi
   fi
 
-  # DuckDNS
+  # ── DuckDNS ──
   echo ""
-  read -p "Do you have a DuckDNS account set up? (yes/no): " HAS_DUCKDNS
-  HAS_DUCKDNS=$(echo "$HAS_DUCKDNS" | tr '[:upper:]' '[:lower:]')
+  echo -e "${BLUE}  DuckDNS keeps your server reachable when your home IP changes."
+  echo -e "  It's free — sign up at https://www.duckdns.org"
+  echo -e "  Your token is shown at the top of the page after login.${NC}"
+  echo ""
+  read -p "Do you have a DuckDNS account? (yes/no) [no]: " HAS_DUCKDNS
+  HAS_DUCKDNS=$(echo "${HAS_DUCKDNS:-no}" | tr '[:upper:]' '[:lower:]')
   [[ "$HAS_DUCKDNS" == "y" ]] && HAS_DUCKDNS="yes"
   [[ "$HAS_DUCKDNS" == "n" ]] && HAS_DUCKDNS="no"
 
   if [[ "$HAS_DUCKDNS" == "yes" ]]; then
-    read -p  "Enter your DuckDNS subdomain (e.g. myhomeserver): " DUCKDNS_DOMAIN
-    read -sp "Enter your DuckDNS token (hidden): " DUCKDNS_TOKEN
+    read -p  "Enter your DuckDNS subdomain (e.g. albatrossburt): " DUCKDNS_DOMAIN
+    echo ""
+    echo -e "${YELLOW}  Your token is the long string at the top of duckdns.org"
+    echo -e "  It looks like: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx${NC}"
+    read -sp "Paste your DuckDNS token (hidden): " DUCKDNS_TOKEN
     echo ""
 
     DUCKDNS_DOMAIN="${DUCKDNS_DOMAIN%.duckdns.org}"
@@ -391,6 +431,46 @@ else
       HAS_DUCKDNS="no"
     fi
   fi
+
+  # ── VPN client profiles ──
+  echo ""
+  echo -e "${BLUE}  Create VPN profiles now so you can connect immediately after setup."
+  echo -e "  You can always add more later with: pivpn add${NC}"
+  echo ""
+  VPN_PROFILES=()
+  read -p "How many VPN device profiles to create? (0-10) [1]: " VPN_COUNT
+  VPN_COUNT=${VPN_COUNT:-1}
+  if [[ "$VPN_COUNT" =~ ^[0-9]+$ ]] && [[ $VPN_COUNT -gt 0 ]] && [[ $VPN_COUNT -le 10 ]]; then
+    for i in $(seq 1 "$VPN_COUNT"); do
+      read -p "  Name for device $i (e.g. myphone, laptop, tablet): " PROFILE_NAME
+      PROFILE_NAME=$(echo "$PROFILE_NAME" | tr -cd '[:alnum:]-_')
+      if [[ -n "$PROFILE_NAME" ]]; then
+        VPN_PROFILES+=("$PROFILE_NAME")
+      else
+        err "  Invalid name — skipping"
+      fi
+    done
+  fi
+
+  # ── Health monitoring ──
+  echo ""
+  read -p "Enable auto health monitoring? (restarts crashed services) [yes]: " ENABLE_HEALTH
+  ENABLE_HEALTH=$(echo "${ENABLE_HEALTH:-yes}" | tr '[:upper:]' '[:lower:]')
+  [[ "$ENABLE_HEALTH" == "y" ]] && ENABLE_HEALTH="yes"
+
+  # ── Headless mode ──
+  echo ""
+  read -p "Disable desktop GUI for headless operation? (saves RAM) [yes]: " DISABLE_GUI
+  DISABLE_GUI=$(echo "${DISABLE_GUI:-yes}" | tr '[:upper:]' '[:lower:]')
+  [[ "$DISABLE_GUI" == "y" ]] && DISABLE_GUI="yes"
+
+  # ── UPnP auto port forward ──
+  echo ""
+  echo -e "${BLUE}  The script can try to auto-forward port 51820 on your router"
+  echo -e "  using UPnP. This saves you from logging into your router manually.${NC}"
+  read -p "Try automatic router port forwarding (UPnP)? [yes]: " ENABLE_UPNP
+  ENABLE_UPNP=$(echo "${ENABLE_UPNP:-yes}" | tr '[:upper:]' '[:lower:]')
+  [[ "$ENABLE_UPNP" == "y" ]] && ENABLE_UPNP="yes"
 fi
 
 STEP=0
@@ -921,9 +1001,141 @@ else
 fi
 
 # ---------------------------------------------------------------
-# Headless mode: disable desktop GUI to save resources
+# UPnP auto port forwarding (skips need for router admin page)
 # ---------------------------------------------------------------
-if [[ "${HEADLESS:-0}" == "1" ]]; then
+LOCAL_IP=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')
+LOCAL_IP=${LOCAL_IP:-$(hostname -I | awk '{print $1}')}
+
+UPNP_OK=false
+if [[ "${ENABLE_UPNP:-no}" == "yes" ]]; then
+  hdr "UPnP Port Forwarding"
+  # Install miniupnpc if not present
+  if ! command -v upnpc &>/dev/null; then
+    info "Installing UPnP client..."
+    apt-get install -y miniupnpc 2>/dev/null || true
+  fi
+
+  if command -v upnpc &>/dev/null; then
+    info "Attempting to forward port 51820 UDP via UPnP..."
+    # Remove old mapping first (ignore errors)
+    upnpc -d 51820 UDP 2>/dev/null || true
+    # Add new mapping: external 51820 → internal 51820 on this IP
+    if upnpc -e "Alabtross WireGuard VPN" -a "$LOCAL_IP" 51820 51820 UDP 0 2>/dev/null; then
+      ok "Port 51820 UDP forwarded via UPnP — no router config needed!"
+      UPNP_OK=true
+    else
+      err "UPnP port forward failed — your router may not support UPnP"
+      info "You'll need to forward port 51820 UDP manually in your router settings"
+    fi
+
+    # Also try to verify it worked
+    if $UPNP_OK; then
+      EXT_IP=$(upnpc -s 2>/dev/null | grep "ExternalIPAddress" | awk '{print $NF}' || echo "")
+      if [[ -n "$EXT_IP" ]]; then
+        ok "Your external IP: $EXT_IP"
+      fi
+    fi
+  else
+    err "Could not install miniupnpc — manual router port forward required"
+  fi
+fi
+
+# ---------------------------------------------------------------
+# Create VPN client profiles
+# ---------------------------------------------------------------
+if command -v pivpn &>/dev/null && [[ ${#VPN_PROFILES[@]} -gt 0 ]]; then
+  hdr "Creating VPN Profiles"
+  CREATED_PROFILES=()
+  for PROFILE in "${VPN_PROFILES[@]}"; do
+    PROFILE=$(echo "$PROFILE" | tr -cd '[:alnum:]-_')
+    [[ -z "$PROFILE" ]] && continue
+
+    # Check if profile already exists
+    if pivpn list 2>/dev/null | grep -q "$PROFILE"; then
+      ok "Profile '$PROFILE' already exists — skipping"
+      CREATED_PROFILES+=("$PROFILE")
+      continue
+    fi
+
+    info "Creating VPN profile: $PROFILE"
+    # pivpn add creates the profile non-interactively with -n flag
+    if pivpn add -n "$PROFILE" 2>/dev/null; then
+      ok "Created profile: $PROFILE"
+      CREATED_PROFILES+=("$PROFILE")
+    else
+      # Fallback: try without -n flag using expect-style input
+      echo "$PROFILE" | pivpn add 2>/dev/null && {
+        ok "Created profile: $PROFILE"
+        CREATED_PROFILES+=("$PROFILE")
+      } || err "Failed to create profile: $PROFILE"
+    fi
+  done
+
+  # Show QR codes for created profiles
+  if [[ ${#CREATED_PROFILES[@]} -gt 0 ]]; then
+    echo ""
+    echo -e "${GREEN}  ---- VPN QR CODES ----${NC}"
+    echo "  Scan these with the WireGuard app on your phone/tablet"
+    echo ""
+    for PROFILE in "${CREATED_PROFILES[@]}"; do
+      echo -e "${BLUE}  ── $PROFILE ──${NC}"
+      pivpn -qr "$PROFILE" 2>/dev/null || info "QR code not available for $PROFILE — use: pivpn -qr $PROFILE"
+      echo ""
+    done
+  fi
+fi
+
+# ---------------------------------------------------------------
+# Health monitoring — auto-restart crashed services
+# ---------------------------------------------------------------
+if [[ "${ENABLE_HEALTH:-no}" == "yes" ]]; then
+  hdr "Health Monitoring"
+  HEALTH_SCRIPT="/opt/alabtross/health-check.sh"
+  mkdir -p /opt/alabtross
+
+  cat > "$HEALTH_SCRIPT" << 'HEALTHEOF'
+#!/bin/bash
+# Alabtross health check — restarts containers if they crash
+LOG="/var/log/alabtross-health.log"
+
+check_container() {
+  local name=$1
+  if ! docker ps --filter "name=$name" --filter "status=running" \
+       --format '{{.Names}}' 2>/dev/null | grep -q "$name"; then
+    echo "$(date) [WARN] $name is down — restarting" >> "$LOG"
+    docker restart "$name" 2>/dev/null || docker start "$name" 2>/dev/null
+    if docker ps --filter "name=$name" --filter "status=running" \
+         --format '{{.Names}}' 2>/dev/null | grep -q "$name"; then
+      echo "$(date) [OK] $name restarted successfully" >> "$LOG"
+    else
+      echo "$(date) [ERROR] $name failed to restart" >> "$LOG"
+    fi
+  fi
+}
+
+check_container "stremio-server"
+check_container "alabtross-mobile"
+
+# Trim log if over 1MB
+if [[ -f "$LOG" ]] && [[ $(stat -c%s "$LOG" 2>/dev/null || echo 0) -gt 1048576 ]]; then
+  tail -100 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+fi
+HEALTHEOF
+
+  chmod 755 "$HEALTH_SCRIPT"
+
+  # Add to root crontab — runs every 5 minutes
+  HEALTH_CRON="*/5 * * * * $HEALTH_SCRIPT"
+  ( crontab -l 2>/dev/null | grep -v "health-check.sh"; echo "$HEALTH_CRON" ) | crontab -
+
+  ok "Health monitoring enabled — checks every 5 minutes"
+  info "Log: /var/log/alabtross-health.log"
+fi
+
+# ---------------------------------------------------------------
+# Disable desktop GUI for headless operation
+# ---------------------------------------------------------------
+if [[ "${DISABLE_GUI:-no}" == "yes" ]]; then
   if systemctl get-default 2>/dev/null | grep -q "graphical"; then
     info "Disabling desktop GUI for headless operation..."
     systemctl set-default multi-user.target
@@ -943,10 +1155,6 @@ else
   STORAGE_LABEL="Local fallback → $MOUNT_POINT"
 fi
 
-# Get LAN IP reliably — ip route avoids picking up VPN/loopback addresses
-LOCAL_IP=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')
-LOCAL_IP=${LOCAL_IP:-$(hostname -I | awk '{print $1}')}  # fallback
-
 echo ""
 echo "=============================================="
 echo -e "${GREEN}  SETUP COMPLETE!${NC}"
@@ -960,22 +1168,42 @@ echo "  WireGuard VPN:   port 51820 UDP"
 if [[ "$HAS_DUCKDNS" == "yes" && -n "$DUCKDNS_DOMAIN" ]]; then
   echo "  DuckDNS:         ${DUCKDNS_DOMAIN}.duckdns.org"
 fi
+if $UPNP_OK; then
+  echo -e "  Port Forward:    ${GREEN}Auto-configured via UPnP${NC}"
+else
+  echo -e "  Port Forward:    ${YELLOW}Manual — forward 51820 UDP on your router${NC}"
+fi
+if [[ "${ENABLE_HEALTH:-no}" == "yes" ]]; then
+  echo -e "  Health Monitor:  ${GREEN}Active (every 5 min)${NC}"
+fi
 echo ""
+
+# Show next steps — adjusted based on what's already done
+NEXT_STEP=1
 echo "  ---- NEXT STEPS ----"
 echo ""
-echo "  1. On your ROUTER: forward port 51820 UDP → $LOCAL_IP"
-echo ""
-echo "  2. Add a VPN device profile:"
-echo "     pivpn add"
-echo ""
-echo "  3. Show QR code for WireGuard app:"
-echo "     pivpn -qr <profilename>"
-echo ""
-echo "  4. Open Alabtross Mobile on your phone:"
-echo "     http://$LOCAL_IP:8080  (while on VPN)"
+if ! $UPNP_OK; then
+  echo "  $NEXT_STEP. On your ROUTER: forward port 51820 UDP → $LOCAL_IP"
+  echo ""
+  NEXT_STEP=$((NEXT_STEP+1))
+fi
+if [[ ${#CREATED_PROFILES[@]:-0} -eq 0 ]]; then
+  echo "  $NEXT_STEP. Add a VPN device profile:"
+  echo "     pivpn add"
+  echo ""
+  NEXT_STEP=$((NEXT_STEP+1))
+  echo "  $NEXT_STEP. Show QR code for WireGuard app:"
+  echo "     pivpn -qr <profilename>"
+  echo ""
+  NEXT_STEP=$((NEXT_STEP+1))
+fi
+echo "  $NEXT_STEP. On your phone: connect WireGuard VPN, then open:"
+echo "     http://$LOCAL_IP:8080"
 echo "     Tip: Add to Home Screen for an app-like experience"
 echo ""
-echo "  5. In Settings, verify server URL: http://$LOCAL_IP:11470"
+NEXT_STEP=$((NEXT_STEP+1))
+echo "  $NEXT_STEP. In the mobile UI Settings, verify server URL:"
+echo "     http://$LOCAL_IP:11470"
 echo "     Then add Torrentio addon for streams"
 echo ""
 echo "  ---- USEFUL COMMANDS ----"
@@ -984,6 +1212,8 @@ echo "  docker logs stremio-server     — view Stremio logs"
 echo "  docker restart stremio-server  — restart Stremio"
 echo "  docker stats stremio-server    — CPU/RAM usage"
 echo "  pivpn -c                       — list VPN connections"
+echo "  pivpn add                      — add new VPN client"
+echo "  pivpn -qr <name>              — show QR code"
 echo "  df -h \"$MOUNT_POINT\"           — check drive space"
 echo "  cat $LOG_FILE                  — view setup log"
 echo ""

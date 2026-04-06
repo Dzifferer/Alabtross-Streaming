@@ -29,43 +29,45 @@
 
 /* ===== Custom Mode — Movie Theater Theme ===== */
 .theme-custom {
-  --bg: #0d0808;
-  --bg-card: #1a1010;
-  --bg-elevated: #241616;
-  --bg-input: #1c1010;
+  --bg: #080404;
+  --bg-card: #150909;
+  --bg-elevated: #1e0c0c;
+  --bg-input: #160909;
   --text: #f0e6e6;
-  --text-dim: #a08888;
-  --text-muted: #6b5050;
-  --accent: #c41a1a;
-  --accent-glow: rgba(196, 26, 26, 0.3);
+  --text-dim: #a08080;
+  --text-muted: #6b4545;
+  --accent: #8b0000;
+  --accent-glow: rgba(139, 0, 0, 0.35);
 }
 
-/* Curtain side decorations */
+/* Curtain side decorations — deep velvet drapes */
 .theme-custom #content {
   background:
     linear-gradient(90deg,
-      rgba(139, 15, 15, 0.25) 0%,
-      rgba(139, 15, 15, 0.08) 3%,
-      transparent 6%
+      rgba(100, 5, 5, 0.4) 0%,
+      rgba(80, 5, 5, 0.15) 2.5%,
+      rgba(60, 5, 5, 0.06) 5%,
+      transparent 8%
     ),
     linear-gradient(270deg,
-      rgba(139, 15, 15, 0.25) 0%,
-      rgba(139, 15, 15, 0.08) 3%,
-      transparent 6%
+      rgba(100, 5, 5, 0.4) 0%,
+      rgba(80, 5, 5, 0.15) 2.5%,
+      rgba(60, 5, 5, 0.06) 5%,
+      transparent 8%
     ),
     var(--bg);
 }
 
 /* Curtain valance on top bar */
 .theme-custom #top-bar {
-  background: linear-gradient(180deg, #2a0a0a 0%, var(--bg) 100%);
-  border-bottom: 2px solid rgba(139, 15, 15, 0.4);
-  box-shadow: 0 2px 12px rgba(139, 15, 15, 0.15);
+  background: linear-gradient(180deg, #1a0404 0%, var(--bg) 100%);
+  border-bottom: 2px solid rgba(120, 5, 5, 0.5);
+  box-shadow: 0 2px 16px rgba(100, 0, 0, 0.2);
 }
 
 /* Gold title text for theater feel */
 .theme-custom #page-title {
-  background: linear-gradient(135deg, #d4a847, #f2d68a, #d4a847);
+  background: linear-gradient(135deg, #c4952e, #e8c560, #c4952e);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -73,57 +75,57 @@
 
 /* Curtain drape on bottom nav */
 .theme-custom #bottom-nav {
-  background: linear-gradient(0deg, #0d0808 60%, #1a0a0a 100%);
-  border-top: 2px solid rgba(139, 15, 15, 0.3);
+  background: linear-gradient(0deg, #080404 60%, #120606 100%);
+  border-top: 2px solid rgba(120, 5, 5, 0.4);
 }
 
 .theme-custom .nav-btn.active {
-  color: #d4a847;
+  color: #c4952e;
 }
 
-/* Cards get a subtle theater poster frame */
+/* Cards get a theater poster frame — dark red edge + shadow */
 .theme-custom .card-poster {
-  border: 1px solid rgba(139, 15, 15, 0.3);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(100, 5, 5, 0.4);
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.6);
 }
 
 /* Stream items in custom mode */
 .theme-custom .stream-icon {
-  background: rgba(139, 15, 15, 0.2);
+  background: rgba(100, 5, 5, 0.25);
 }
 
 .theme-custom .stream-icon svg {
-  color: #d4a847;
+  color: #c4952e;
 }
 
 .theme-custom .stream-item:active {
-  border-color: #c41a1a;
+  border-color: #8b0000;
 }
 
 /* Season tabs in theater mode */
 .theme-custom .season-tab.active {
-  background: #c41a1a;
-  border-color: #c41a1a;
+  background: #8b0000;
+  border-color: #8b0000;
 }
 
 /* Detail hero gets a vignette */
 .theme-custom .detail-hero-gradient {
-  background: linear-gradient(transparent 30%, var(--bg));
+  background: linear-gradient(transparent 20%, var(--bg));
 }
 
 .theme-custom .detail-hero::before {
   content: '';
   position: absolute;
   inset: 0;
-  background: radial-gradient(ellipse at center, transparent 50%, rgba(13, 8, 8, 0.6) 100%);
+  background: radial-gradient(ellipse at center, transparent 40%, rgba(8, 4, 4, 0.7) 100%);
   z-index: 1;
   pointer-events: none;
 }
 
 /* Rating stars go gold */
 .theme-custom .detail-tag.rating {
-  background: rgba(212, 168, 71, 0.15);
-  color: #d4a847;
+  background: rgba(196, 149, 46, 0.15);
+  color: #c4952e;
 }
 
 /* Catalog row titles */
@@ -133,39 +135,44 @@
 
 /* Search bar in theater mode */
 .theme-custom .search-input-wrap:focus-within {
-  border-color: #c41a1a;
-  box-shadow: 0 0 0 3px rgba(196, 26, 26, 0.2);
+  border-color: #8b0000;
+  box-shadow: 0 0 0 3px rgba(139, 0, 0, 0.25);
 }
 
-/* Mode toggle slider goes red in custom */
+/* Mode toggle slider goes deep red */
 .theme-custom .mode-slider {
-  background: #c41a1a;
+  background: #8b0000;
 }
 
 /* Source icons go gold */
 .theme-custom .source-icon {
-  color: #d4a847;
-  background: rgba(212, 168, 71, 0.1);
+  color: #c4952e;
+  background: rgba(196, 149, 46, 0.08);
 }
 
 /* Spinner in custom mode */
 .theme-custom .spinner {
-  border-top-color: #c41a1a;
+  border-top-color: #8b0000;
 }
 
 /* Toast in custom mode */
 .theme-custom .toast {
-  background: #241616;
-  border-color: rgba(139, 15, 15, 0.3);
+  background: #1e0c0c;
+  border-color: rgba(100, 5, 5, 0.4);
 }
 
 /* Settings buttons */
 .theme-custom .btn-sm {
-  background: #c41a1a;
+  background: #8b0000;
 }
 
 .theme-custom .setting-row input:focus {
-  border-color: #c41a1a;
+  border-color: #8b0000;
+}
+
+/* VPN banner blends with theater */
+.theme-custom .vpn-banner {
+  background: linear-gradient(135deg, #6b0000, #4a0000) !important;
 }
 
 html, body {

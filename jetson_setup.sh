@@ -670,6 +670,49 @@ if [[ "$STREMIO_ALREADY_OK" != "true" ]]; then
   fi
 fi
 
+# ---------------------------------------------------------------
+# STEP 7b — Alabtross Mobile UI
+# ---------------------------------------------------------------
+step "Setting up Alabtross Mobile UI"
+
+MOBILE_UI_DIR="$(cd "$(dirname "$0")" && pwd)/mobile-ui"
+MOBILE_ALREADY_OK=false
+
+if docker ps --filter "name=alabtross-mobile" --filter "status=running" \
+   --format '{{.Names}}' 2>/dev/null | grep -q "alabtross-mobile"; then
+  if curl -s --max-time 3 "http://${STREMIO_BIND_IP}:8080/" &>/dev/null; then
+    ok "Alabtross Mobile UI already running — skipping"
+    MOBILE_ALREADY_OK=true
+  fi
+fi
+
+if [[ "$MOBILE_ALREADY_OK" != "true" ]]; then
+  if [[ -d "$MOBILE_UI_DIR" ]]; then
+    docker stop alabtross-mobile 2>/dev/null || true
+    docker rm   alabtross-mobile 2>/dev/null || true
+
+    info "Building Alabtross Mobile UI container..."
+    docker build -t alabtross-mobile "$MOBILE_UI_DIR" \
+      || die "Failed to build Mobile UI. Check: ls $MOBILE_UI_DIR"
+
+    info "Starting Alabtross Mobile UI..."
+    docker run -d \
+      --name alabtross-mobile \
+      --restart unless-stopped \
+      -p "${STREMIO_BIND_IP}:8080:8080" \
+      -e STREMIO_SERVER="http://${STREMIO_BIND_IP}:11470" \
+      alabtross-mobile \
+      || die "Failed to start Mobile UI container."
+
+    ok "Alabtross Mobile UI is live on port 8080"
+  else
+    err "Mobile UI directory not found at $MOBILE_UI_DIR — skipping"
+  fi
+fi
+
+# Allow port 8080 through firewall (same LAN-only binding as Stremio)
+ufw allow 8080/tcp comment "Alabtross Mobile UI" 2>/dev/null || true
+
 
 # ---------------------------------------------------------------
 # STEP 8/9 — WireGuard via PiVPN
@@ -792,6 +835,7 @@ echo "=============================================="
 echo ""
 echo "  Local IP:        $LOCAL_IP"
 echo "  Stremio Server:  http://$LOCAL_IP:11470"
+echo "  Mobile UI:       http://$LOCAL_IP:8080"
 echo "  Storage:         $STORAGE_LABEL"
 echo "  WireGuard VPN:   port 51820 UDP"
 if [[ "$HAS_DUCKDNS" == "yes" && -n "$DUCKDNS_DOMAIN" ]]; then
@@ -808,11 +852,12 @@ echo ""
 echo "  3. Show QR code for WireGuard app:"
 echo "     pivpn -qr <profilename>"
 echo ""
-echo "  4. In Stremio (web.stremio.com):"
-echo "     Settings → Advanced → Streaming Server"
-echo "     Set to: http://$LOCAL_IP:11470"
+echo "  4. Open Alabtross Mobile on your phone:"
+echo "     http://$LOCAL_IP:8080  (while on VPN)"
+echo "     Tip: Add to Home Screen for an app-like experience"
 echo ""
-echo "  5. Install the Torrentio addon in Stremio"
+echo "  5. In Settings, verify server URL: http://$LOCAL_IP:11470"
+echo "     Then add Torrentio addon for streams"
 echo ""
 echo "  ---- USEFUL COMMANDS ----"
 echo ""

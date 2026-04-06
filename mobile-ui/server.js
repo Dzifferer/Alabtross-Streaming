@@ -70,7 +70,7 @@ app.use((req, res, next) => {
     "script-src 'self' 'sha256-ZswfTY7H35rbv8WC7NXBoiC7WNu86vSzCDChNWwZZDM='",
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' https: data:",
-    "connect-src 'self' https://v3-cinemeta.strem.io https://torrentio.strem.io https://*.strem.io https://*.stremio.com https://api.themoviedb.org https://*.baby-beamup.club https://*.fly.dev https://*.onrender.com https://*.vercel.app",
+    "connect-src 'self'",
     "media-src 'self' blob: http: https:",
     "frame-ancestors 'none'",
   ].join('; '));
@@ -529,6 +529,39 @@ app.get('/api/library/:id/stream/remux', rateLimit, async (req, res) => {
     source.destroy();
     ffmpeg.kill('SIGTERM');
   });
+});
+
+// ─── Stremio Addon Proxy ──────────────────────────────────────────────
+// Proxy JSON requests to Stremio addons to avoid CORS issues.
+const ADDON_JSON_PATH_RE = /^\/(manifest\.json|catalog\/|meta\/|stream\/)/;
+app.get('/api/addon-proxy', rateLimit, async (req, res) => {
+  const targetUrl = req.query.url;
+  if (!targetUrl) return res.status(400).json({ error: 'Missing url parameter' });
+
+  let parsed;
+  try {
+    parsed = new URL(targetUrl);
+  } catch {
+    return res.status(400).json({ error: 'Invalid URL' });
+  }
+
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    return res.status(400).json({ error: 'Invalid URL protocol' });
+  }
+
+  if (!ADDON_JSON_PATH_RE.test(parsed.pathname)) {
+    return res.status(400).json({ error: 'Disallowed path' });
+  }
+
+  try {
+    await validateUrlNotSSRF(targetUrl);
+    const body = await fetchUrl(targetUrl);
+    const data = JSON.parse(body);
+    res.json(data);
+  } catch (err) {
+    console.error(`[AddonProxy] Error fetching ${targetUrl}: ${err.message}`);
+    res.status(502).json({ error: 'Failed to fetch addon data' });
+  }
 });
 
 // ─── IPTV / Live TV Endpoints ─────────────────────────────────────────

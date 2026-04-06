@@ -675,8 +675,8 @@ if command -v docker &>/dev/null; then
   ok "Docker already installed — skipping"
 else
   info "Downloading Docker install script..."
-  DOCKER_SCRIPT=$(mktemp /tmp/docker-install-XXXXXX.sh)
-  TEMP_FILES+=("$DOCKER_SCRIPT")  # trap will clean this up on any exit
+  DOCKER_SCRIPT=$(mktemp /tmp/docker-install-XXXXXX.sh) || die "Failed to create temp file"
+  TEMP_FILES+=("$DOCKER_SCRIPT")
   if ! curl -fsSL https://get.docker.com -o "$DOCKER_SCRIPT"; then
     die "Failed to download Docker install script. Check your internet connection."
   fi
@@ -745,6 +745,11 @@ step "Starting Stremio Server"
 # Detect LAN IP early so the health check uses the right address
 STREMIO_BIND_IP=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')
 STREMIO_BIND_IP=${STREMIO_BIND_IP:-0.0.0.0}
+# Validate IP format to prevent injection
+if ! [[ "$STREMIO_BIND_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+  err "Invalid bind IP '$STREMIO_BIND_IP' — falling back to 0.0.0.0"
+  STREMIO_BIND_IP="0.0.0.0"
+fi
 STREMIO_ALREADY_OK=false
 if docker ps --filter "name=stremio-server" --filter "status=running" \
    --format '{{.Names}}' 2>/dev/null | grep -q "stremio-server"; then
@@ -855,7 +860,7 @@ step "Installing WireGuard VPN"
 if command -v pivpn &>/dev/null; then
   ok "PiVPN already installed — skipping wizard"
 else
-  PIVPN_SCRIPT=$(mktemp /tmp/pivpn-install-XXXXXX.sh)
+  PIVPN_SCRIPT=$(mktemp /tmp/pivpn-install-XXXXXX.sh) || die "Failed to create temp file"
   TEMP_FILES+=("$PIVPN_SCRIPT")
 
   if [[ "${HEADLESS:-0}" == "1" ]]; then
@@ -876,7 +881,8 @@ else
     fi
 
     # Write PiVPN unattended setup config
-    PIVPN_CONF="/tmp/pivpn-unattended.conf"
+    PIVPN_CONF=$(mktemp /tmp/pivpn-unattended-XXXXXX.conf) || die "Failed to create temp file"
+    chmod 600 "$PIVPN_CONF"
     TEMP_FILES+=("$PIVPN_CONF")
     cat > "$PIVPN_CONF" << PIVPNEOF
 USING_DASHBOARD=0
@@ -966,13 +972,16 @@ if [[ "$HAS_DUCKDNS" == "yes" && -n "$DUCKDNS_DOMAIN" ]]; then
   chmod 600 "$DUCKDNS_LOG"
   chown "$REAL_USER:$REAL_USER" "$DUCKDNS_LOG"
 
-  # Write the update script — variables expanded at write time (intentional)
-  # Use a subshell with redirected stdout to prevent the token from
-  # leaking into the tee'd log output (exec on line 229 captures everything)
+  # Write the update script — uses a temp config file for curl so the token
+  # never appears in process arguments (ps/top can't see it)
   (
     cat > "$DUCKDNS_DIR/duck.sh" << DUCKEOF
 #!/bin/bash
-echo url="https://www.duckdns.org/update?domains=${DUCKDNS_DOMAIN}&token=${DUCKDNS_TOKEN}&ip=" | curl -s -o "${DUCKDNS_LOG}" -K -
+CONF=\$(mktemp /tmp/duckdns-XXXXXX.conf)
+chmod 600 "\$CONF"
+printf 'url=https://www.duckdns.org/update?domains=${DUCKDNS_DOMAIN}&token=${DUCKDNS_TOKEN}&ip=\n' > "\$CONF"
+curl -s -o "${DUCKDNS_LOG}" -K "\$CONF"
+rm -f "\$CONF"
 DUCKEOF
   ) >/dev/null 2>&1
 
@@ -999,6 +1008,10 @@ DUCKEOF
 else
   info "Skipping DuckDNS"
 fi
+
+# Clear sensitive token from shell memory
+unset DUCKDNS_TOKEN
+unset DUCKDNS_AUTH_TOKEN
 
 # ---------------------------------------------------------------
 # UPnP auto port forwarding (skips need for router admin page)

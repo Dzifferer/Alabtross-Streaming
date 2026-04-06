@@ -8,6 +8,9 @@ RUN npm ci --production 2>/dev/null || npm install --production && \
 
 COPY . .
 
+# Create library directory for downloaded content
+RUN mkdir -p /app/library
+
 # Run as non-root user
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001 && \

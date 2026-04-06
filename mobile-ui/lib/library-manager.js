@@ -16,7 +16,7 @@ const path = require('path');
 const fs = require('fs');
 const { TRACKERS, isFileNameSafe, getMimeType } = require('./file-safety');
 
-const MAX_CONCURRENT_DOWNLOADS = 2;
+const MAX_CONCURRENT_DOWNLOADS = 5;
 const MAX_FILE_SIZE = 20 * 1024 * 1024 * 1024; // 20 GB
 const METADATA_SAVE_INTERVAL = 30 * 1000; // Save metadata every 30s during active downloads
 

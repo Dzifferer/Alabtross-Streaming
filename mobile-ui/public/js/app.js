@@ -1721,7 +1721,34 @@
     }
   }
 
+  let currentTunnelMode = 'full'; // 'full' or 'split'
+  let currentProfileName = null;
+
+  function initTunnelModeToggle() {
+    const fullBtn = $('#tunnel-full');
+    const splitBtn = $('#tunnel-split');
+    const hint = $('#tunnel-mode-hint');
+
+    const hints = {
+      full: 'All traffic goes through VPN \u2014 most secure, but local casting won\'t work',
+      split: 'Only streaming traffic uses VPN \u2014 your WiFi stays active for AirPlay / Chromecast discovery',
+    };
+
+    function setMode(mode) {
+      currentTunnelMode = mode;
+      fullBtn.classList.toggle('active', mode === 'full');
+      splitBtn.classList.toggle('active', mode === 'split');
+      hint.textContent = hints[mode];
+      // Re-fetch current profile with the new mode
+      if (currentProfileName) selectVPNProfile(currentProfileName);
+    }
+
+    fullBtn.addEventListener('click', () => setMode('full'));
+    splitBtn.addEventListener('click', () => setMode('split'));
+  }
+
   async function selectVPNProfile(name) {
+    currentProfileName = name;
     const container = $('#qr-code-container');
     const profileName = $('#vpn-profile-name');
     const urlBox = $('#share-url-display');
@@ -1733,13 +1760,18 @@
     container.innerHTML = '<div class="spinner"></div><p>Loading config...</p>';
 
     try {
-      const resp = await fetch(`/api/vpn/profile/${encodeURIComponent(name)}`);
+      // Fetch split-tunnel or full-tunnel config based on toggle
+      const endpoint = currentTunnelMode === 'split'
+        ? `/api/vpn/profile/${encodeURIComponent(name)}/split-tunnel`
+        : `/api/vpn/profile/${encodeURIComponent(name)}`;
+
+      const resp = await fetch(endpoint);
       if (!resp.ok) throw new Error('Profile not found');
       const data = await resp.json();
       currentVPNConfig = data.config;
 
       generateConfigQR(data.config);
-      profileName.textContent = name;
+      profileName.textContent = name + (currentTunnelMode === 'split' ? ' (split tunnel)' : '');
       profileName.classList.remove('hidden');
       urlBox.classList.remove('hidden');
       urlText.textContent = `${name}.conf`;
@@ -1766,6 +1798,8 @@
   }
 
   function initShare() {
+    initTunnelModeToggle();
+
     $('#share-copy-btn').addEventListener('click', () => {
       if (currentVPNConfig) copyToClipboard(currentVPNConfig);
     });
@@ -2129,24 +2163,26 @@
 
   // ─── Casting ─────────────────────────────────────
   //
-  // Two modes:
-  //   1. Browser Remote Playback API — works when phone is on same LAN as cast device
-  //   2. Server-side casting — Jetson discovers LAN devices and casts to them,
-  //      controlled by the phone over VPN. This is the VPN-friendly path.
+  // Strategy for VPN + local casting:
+  //   1. Phone discovers devices on its OWN WiFi via browser Remote Playback API
+  //      (AirPlay / Chromecast). This needs split-tunnel VPN so local network
+  //      traffic stays on WiFi while only Jetson traffic goes through the tunnel.
+  //   2. For AirPlay: the phone streams from VPN and relays to the AirPlay device
+  //      on the local network — this works natively.
+  //   3. For Chromecast: the browser handles proxying the media data.
+  //   4. Server-side casting (Jetson → LAN devices) available as fallback.
 
   const castState = { available: false, active: false, serverCast: null };
 
   function initCasting() {
     const video = dom.videoPlayer;
 
-    // Always show cast button — we have server-side fallback even without Remote Playback
-    dom.castBtn.classList.remove('hidden');
-
-    // Remote Playback API — supported in Chrome, Edge, Safari (Chromecast + AirPlay)
+    // Remote Playback API — discovers devices on the PHONE's local WiFi
+    // Works with AirPlay (Safari) and Chromecast (Chrome/Edge)
     if (video.remote) {
       video.disableRemotePlayback = false;
+      dom.castBtn.classList.remove('hidden');
 
-      // Track connection state changes
       video.remote.addEventListener('connecting', () => {
         dom.castBtn.classList.add('casting');
         dom.castDeviceName.textContent = 'Connecting to device...';
@@ -2167,14 +2203,16 @@
         dom.castOverlay.classList.add('hidden');
         showToast('Casting stopped');
       });
+    } else {
+      // No Remote Playback API — still show button for server-side fallback
+      dom.castBtn.classList.remove('hidden');
     }
 
-    // Cast button: show device picker (server-side discovery + browser fallback)
+    // Cast button: show picker with phone-discovered + server-discovered devices
     dom.castBtn.addEventListener('click', () => showCastPicker());
 
     // Stop casting button
     dom.castStopBtn.addEventListener('click', async () => {
-      // Stop server-side cast session if active
       if (castState.serverCast) {
         try {
           await fetch('/api/cast/stop', {
@@ -2195,11 +2233,11 @@
         return;
       }
 
-      // Browser Remote Playback fallback
+      // Browser Remote Playback
       try {
-        video.pause();
-        if (video.remote && video.remote.state === 'connected') {
-          video.remote.prompt();
+        dom.videoPlayer.pause();
+        if (dom.videoPlayer.remote && dom.videoPlayer.remote.state === 'connected') {
+          dom.videoPlayer.remote.prompt();
         }
       } catch {
         castState.active = false;
@@ -2210,108 +2248,107 @@
   }
 
   /**
-   * Show the cast device picker — discovers devices via the server
+   * Show cast device picker.
+   * Primary: browser's native device picker (phone's WiFi network).
+   * Fallback: server-side discovery (Jetson's LAN — for when phone and Jetson
+   * share the same network, or as a backup).
    */
   async function showCastPicker() {
     const picker = dom.castDevicePicker;
     const list = dom.castDeviceList;
     if (!picker || !list) return;
 
-    // Show picker with loading state
     picker.classList.remove('hidden');
-    list.innerHTML = '<div class="cast-loading"><div class="spinner"></div><p>Scanning for devices...</p></div>';
 
+    // Build the picker content
+    let html = '';
+
+    // ── Section 1: Phone's local devices (via browser) ──
+    if (dom.videoPlayer.remote) {
+      html += `
+        <div class="cast-section-label">Your devices (phone WiFi)</div>
+        <button class="cast-device-item" id="cast-browser-prompt-btn">
+          <div class="cast-device-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M2 16.1A5 5 0 015.9 20M2 12.05A9 9 0 019.95 20M2 8V6a2 2 0 012-2h16a2 2 0 012 2v12a2 2 0 01-2 2h-6"/>
+              <circle cx="2" cy="20" r="1" fill="currentColor"/>
+            </svg>
+          </div>
+          <div class="cast-device-info">
+            <div class="cast-device-name">Choose AirPlay or Chromecast</div>
+            <div class="cast-device-type">Discovers devices on your phone's WiFi network</div>
+          </div>
+          <svg class="cast-device-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+        </button>
+        <div class="cast-split-hint" id="cast-split-hint">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+          <span>Not seeing devices? Enable <strong>split tunneling</strong> on your VPN so local WiFi stays active.
+          In WireGuard, set <code>AllowedIPs</code> to only the server's VPN IP instead of <code>0.0.0.0/0</code>.</span>
+        </div>
+      `;
+    }
+
+    // ── Section 2: Server-side devices (Jetson's network) ──
+    html += `
+      <div class="cast-section-label" style="margin-top:12px">Server's network devices</div>
+      <div id="cast-server-devices">
+        <div class="cast-loading"><div class="spinner" style="width:20px;height:20px;border-width:2px"></div><span>Scanning Jetson's LAN...</span></div>
+      </div>
+    `;
+
+    list.innerHTML = html;
+
+    // Wire up browser prompt button
+    document.getElementById('cast-browser-prompt-btn')?.addEventListener('click', async () => {
+      picker.classList.add('hidden');
+      try {
+        await dom.videoPlayer.remote.prompt();
+      } catch (e) {
+        if (e.name === 'NotFoundError') {
+          showToast('No cast devices found — check your WiFi and VPN split-tunnel settings');
+        } else if (e.name !== 'NotAllowedError') {
+          showToast('Cast not available');
+        }
+      }
+    });
+
+    // Fetch server-side devices in background
+    const serverList = document.getElementById('cast-server-devices');
     try {
       const res = await fetch('/api/cast/devices?refresh=1');
       const data = await res.json();
 
       if (!data.devices || data.devices.length === 0) {
-        list.innerHTML = `
-          <div class="cast-empty">
-            <p>No cast devices found on the server's network</p>
-            <p class="cast-hint">Make sure your TV or Chromecast is on the same network as the Jetson</p>
-          </div>
+        serverList.innerHTML = `
+          <div class="cast-empty-inline">No devices found on the server's network</div>
         `;
-        // Also offer browser-native casting as fallback
-        if (dom.videoPlayer.remote) {
-          list.innerHTML += `
-            <button class="cast-device-item cast-browser-fallback" id="cast-browser-btn">
-              <div class="cast-device-icon">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M2 16.1A5 5 0 015.9 20M2 12.05A9 9 0 019.95 20M2 8V6a2 2 0 012-2h16a2 2 0 012 2v12a2 2 0 01-2 2h-6"/>
-                  <circle cx="2" cy="20" r="1" fill="currentColor"/>
-                </svg>
-              </div>
-              <div class="cast-device-info">
-                <div class="cast-device-name">Use browser casting</div>
-                <div class="cast-device-type">Requires same network as cast device</div>
-              </div>
-            </button>
-          `;
-          document.getElementById('cast-browser-btn')?.addEventListener('click', async () => {
-            picker.classList.add('hidden');
-            try { await dom.videoPlayer.remote.prompt(); } catch {}
-          });
-        }
-        return;
-      }
-
-      // Render device list
-      list.innerHTML = data.devices.map(device => `
-        <button class="cast-device-item" data-device='${JSON.stringify(device).replace(/'/g, '&#39;')}'>
-          <div class="cast-device-icon">
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              ${device.type === 'chromecast'
-                ? '<path d="M2 16.1A5 5 0 015.9 20M2 12.05A9 9 0 019.95 20M2 8V6a2 2 0 012-2h16a2 2 0 012 2v12a2 2 0 01-2 2h-6"/><circle cx="2" cy="20" r="1" fill="currentColor"/>'
-                : '<rect x="2" y="7" width="20" height="15" rx="2" ry="2"/><polyline points="17 2 12 7 7 2"/>'}
-            </svg>
-          </div>
-          <div class="cast-device-info">
-            <div class="cast-device-name">${escapeHTML(device.friendlyName)}</div>
-            <div class="cast-device-type">${device.type === 'chromecast' ? 'Google Cast' : 'DLNA'} · ${escapeHTML(device.host)}</div>
-          </div>
-        </button>
-      `).join('');
-
-      // Add browser fallback option
-      if (dom.videoPlayer.remote) {
-        list.innerHTML += `
-          <button class="cast-device-item cast-browser-fallback" id="cast-browser-btn">
+      } else {
+        serverList.innerHTML = data.devices.map(device => `
+          <button class="cast-device-item" data-device='${JSON.stringify(device).replace(/'/g, '&#39;')}'>
             <div class="cast-device-icon">
               <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M2 16.1A5 5 0 015.9 20M2 12.05A9 9 0 019.95 20M2 8V6a2 2 0 012-2h16a2 2 0 012 2v12a2 2 0 01-2 2h-6"/>
-                <circle cx="2" cy="20" r="1" fill="currentColor"/>
+                ${device.type === 'chromecast'
+                  ? '<path d="M2 16.1A5 5 0 015.9 20M2 12.05A9 9 0 019.95 20M2 8V6a2 2 0 012-2h16a2 2 0 012 2v12a2 2 0 01-2 2h-6"/><circle cx="2" cy="20" r="1" fill="currentColor"/>'
+                  : '<rect x="2" y="7" width="20" height="15" rx="2" ry="2"/><polyline points="17 2 12 7 7 2"/>'}
               </svg>
             </div>
             <div class="cast-device-info">
-              <div class="cast-device-name">Use browser casting</div>
-              <div class="cast-device-type">Direct — requires same network</div>
+              <div class="cast-device-name">${escapeHTML(device.friendlyName)}</div>
+              <div class="cast-device-type">${device.type === 'chromecast' ? 'Google Cast' : 'DLNA'} · ${escapeHTML(device.host)}</div>
             </div>
           </button>
-        `;
-      }
+        `).join('');
 
-      // Device click handlers
-      list.querySelectorAll('.cast-device-item[data-device]').forEach(btn => {
-        btn.addEventListener('click', () => {
-          const device = JSON.parse(btn.dataset.device);
-          picker.classList.add('hidden');
-          castToServerDevice(device);
+        serverList.querySelectorAll('.cast-device-item[data-device]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const device = JSON.parse(btn.dataset.device);
+            picker.classList.add('hidden');
+            castToServerDevice(device);
+          });
         });
-      });
-
-      document.getElementById('cast-browser-btn')?.addEventListener('click', async () => {
-        picker.classList.add('hidden');
-        try { await dom.videoPlayer.remote.prompt(); } catch {}
-      });
-
-    } catch (err) {
-      list.innerHTML = `
-        <div class="cast-empty">
-          <p>Could not scan for devices</p>
-          <p class="cast-hint">${escapeHTML(err.message)}</p>
-        </div>
-      `;
+      }
+    } catch {
+      serverList.innerHTML = `<div class="cast-empty-inline">Could not reach server for device scan</div>`;
     }
 
     // Close picker on background click
@@ -2325,13 +2362,11 @@
   }
 
   /**
-   * Cast current stream to a server-discovered device
+   * Cast current stream to a server-discovered device (Jetson → LAN device)
    */
   async function castToServerDevice(device) {
-    // Get current stream path from video src
     const videoSrc = dom.videoPlayer.src;
     let streamPath = '';
-
     if (videoSrc) {
       try {
         const url = new URL(videoSrc);
@@ -2347,44 +2382,30 @@
     }
 
     const title = state.currentMeta?.name || 'Alabtross';
-
     showToast(`Casting to ${device.friendlyName}...`);
 
     try {
       const res = await fetch('/api/cast/play', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          device,
-          streamPath,
-          title,
-          mimeType: 'video/mp4',
-        }),
+        body: JSON.stringify({ device, streamPath, title, mimeType: 'video/mp4' }),
       });
-
       const data = await res.json();
-      if (!res.ok) {
-        showToast(data.error || 'Cast failed');
-        return;
-      }
+      if (!res.ok) { showToast(data.error || 'Cast failed'); return; }
 
-      // Success — show cast overlay
       castState.active = true;
       castState.serverCast = { deviceId: device.id, deviceName: device.friendlyName };
       dom.castBtn.classList.add('casting');
       dom.castDeviceName.textContent = `Casting to ${device.friendlyName}`;
       dom.castOverlay.classList.remove('hidden');
+      dom.videoPlayer.pause();
       showToast(`Now casting to ${device.friendlyName}`);
 
-      // Pause local playback — the cast device is playing now
-      dom.videoPlayer.pause();
-
-      // Poll cast status
+      // Poll status
       castState._pollInterval = setInterval(async () => {
         try {
           const sRes = await fetch(`/api/cast/status/${encodeURIComponent(device.id)}`);
           if (!sRes.ok) {
-            // Session ended
             clearInterval(castState._pollInterval);
             castState._pollInterval = null;
             castState.serverCast = null;
@@ -2408,7 +2429,6 @@
           }
         } catch {}
       }, 5000);
-
     } catch (err) {
       showToast(`Cast error: ${err.message}`);
     }

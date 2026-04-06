@@ -250,6 +250,15 @@
           </div>
 
           <div class="setting-group">
+            <label>Tunnel Mode</label>
+            <div class="tunnel-mode-toggle">
+              <button class="tunnel-mode-btn active" id="tunnel-full" data-mode="full">Full Tunnel</button>
+              <button class="tunnel-mode-btn" id="tunnel-split" data-mode="split">Split Tunnel</button>
+            </div>
+            <span id="tunnel-mode-hint" class="setting-hint">All traffic goes through VPN — most secure, but local casting won't work</span>
+          </div>
+
+          <div class="setting-group">
             <label>VPN Profile</label>
             <div id="vpn-profile-list" class="vpn-profile-list">
               <div class="loading-state" style="padding: 24px;">

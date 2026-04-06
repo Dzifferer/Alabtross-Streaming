@@ -780,6 +780,52 @@ app.get('/api/vpn/profile/:name', (req, res) => {
   }
 });
 
+// GET /api/vpn/profile/:name/split-tunnel — return a modified config for split tunneling
+// Rewrites AllowedIPs from 0.0.0.0/0 to just the server's VPN IP, so the phone's
+// local WiFi stays active for device discovery and casting.
+app.get('/api/vpn/profile/:name/split-tunnel', (req, res) => {
+  const name = req.params.name.replace(/[^a-zA-Z0-9_-]/g, '');
+  const confPath = path.join(WG_CONFIGS_DIR, `${name}.conf`);
+  try {
+    if (!fs.existsSync(confPath)) {
+      return res.status(404).json({ error: 'Profile not found' });
+    }
+    let config = fs.readFileSync(confPath, 'utf-8');
+
+    // Extract the server's VPN Address from the [Interface] section
+    // (the Address in the [Interface] is the CLIENT's VPN IP, not the server's)
+    // The server's VPN IP is the Endpoint's resolved IP or the Peer's AllowedIPs
+    // For split tunneling, we want to route only the VPN subnet through the tunnel
+
+    // Find the [Interface] Address (e.g., Address = 10.6.0.2/32)
+    const addrMatch = config.match(/^\s*Address\s*=\s*([^\n]+)/mi);
+    if (addrMatch) {
+      // Extract the subnet (e.g., 10.6.0.0/24 from 10.6.0.2/32)
+      const clientAddr = addrMatch[1].trim().split(',')[0].trim();
+      const ipParts = clientAddr.split('/');
+      const ip = ipParts[0];
+      // Build the VPN subnet: replace last octet with 0 and use /24
+      const octets = ip.split('.');
+      if (octets.length === 4) {
+        const vpnSubnet = `${octets[0]}.${octets[1]}.${octets[2]}.0/24`;
+
+        // Replace AllowedIPs = 0.0.0.0/0 (full tunnel) with just the VPN subnet
+        config = config.replace(
+          /^(\s*AllowedIPs\s*=\s*)0\.0\.0\.0\/0.*$/mi,
+          `$1${vpnSubnet}`
+        );
+
+        // Also remove ::/0 if present (IPv6 full tunnel)
+        config = config.replace(/,\s*::\/0/g, '');
+      }
+    }
+
+    res.json({ name, config, splitTunnel: true });
+  } catch (e) {
+    res.status(500).json({ error: 'Cannot read profile' });
+  }
+});
+
 // ─── Concurrent Streams Settings API ──────────────────────────────────
 app.get('/api/settings/max-streams', (req, res) => {
   res.json({ maxConcurrentStreams: MAX_CONCURRENT_STREAMS });

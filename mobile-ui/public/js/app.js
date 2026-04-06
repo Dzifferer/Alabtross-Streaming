@@ -795,6 +795,7 @@
         const mode = btn.dataset.mode;
         api.setMode(mode);
         updateModeUI(mode);
+        applyTheme(mode);
         showToast(mode === 'custom' ? 'Custom mode — direct sources' : 'Stremio mode');
       });
     });
@@ -919,6 +920,13 @@
     setTimeout(() => toast.classList.remove('show'), 3000);
   }
 
+  // ─── Theme ───────────────────────────────────────
+
+  function applyTheme(mode) {
+    const app = document.getElementById('app');
+    app.classList.toggle('theme-custom', mode === 'custom');
+  }
+
   // ─── Utility ─────────────────────────────────────
 
   function escapeHTML(str) {
@@ -955,6 +963,9 @@
 
     // Settings
     initSettings();
+
+    // Apply theme based on current mode
+    applyTheme(api.getMode());
 
     // Initial load
     loadHome();

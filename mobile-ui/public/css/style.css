@@ -1284,6 +1284,197 @@ html, body {
   animation: fadeIn 0.3s ease;
 }
 
+/* ===== Library View ===== */
+.library-grid {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.library-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  background: var(--bg-card);
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(255,255,255,0.04);
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.library-item:active {
+  background: var(--bg-elevated);
+}
+
+.library-item-poster {
+  width: 60px;
+  height: 90px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bg-elevated);
+  flex-shrink: 0;
+}
+
+.library-item-poster img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.library-item-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.library-item-title {
+  font-size: 15px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-item-meta {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.library-quality {
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.library-progress {
+  height: 4px;
+  background: rgba(255,255,255,0.08);
+  border-radius: 2px;
+  margin-top: 8px;
+  overflow: hidden;
+}
+
+.library-progress-bar {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.5s ease;
+}
+
+.library-status {
+  font-size: 11px;
+  margin-top: 4px;
+}
+
+.library-status.downloading {
+  color: var(--accent);
+}
+
+.library-status.complete {
+  color: var(--success);
+}
+
+.library-status.failed {
+  color: var(--danger);
+}
+
+.library-item-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.library-play-btn, .library-remove-btn {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.library-play-btn {
+  background: var(--accent);
+  color: white;
+}
+
+.library-play-btn:active {
+  opacity: 0.8;
+  transform: scale(0.92);
+}
+
+.library-remove-btn {
+  background: none;
+  color: var(--text-muted);
+}
+
+.library-remove-btn:active {
+  color: var(--danger);
+  background: rgba(255, 107, 107, 0.1);
+}
+
+/* Add to Library button on detail page */
+.library-add-section {
+  padding-bottom: 24px;
+}
+
+.btn-library-add {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 14px;
+  background: var(--bg-card);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-library-add:active:not(:disabled) {
+  background: var(--bg-elevated);
+  border-color: var(--accent);
+}
+
+.btn-library-add:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-library-add svg {
+  color: var(--accent);
+}
+
+/* Custom theme overrides for library */
+.theme-custom .library-play-btn {
+  background: #004225;
+}
+
+.theme-custom .library-progress-bar {
+  background: #004225;
+}
+
+.theme-custom .library-status.downloading {
+  color: #4caf6a;
+}
+
+.theme-custom .btn-library-add:active:not(:disabled) {
+  border-color: #004225;
+}
+
+.theme-custom .btn-library-add svg {
+  color: #4caf6a;
+}
+
 /* ===== Share / QR Code Page ===== */
 .share-panel {
   padding: 32px 16px 120px;

@@ -833,12 +833,18 @@ if [[ "$MOBILE_ALREADY_OK" != "true" ]]; then
     docker build -t alabtross-mobile "$MOBILE_UI_DIR" \
       || die "Failed to build Mobile UI. Check: ls $MOBILE_UI_DIR"
 
+    # Create library directory on host for persistent movie storage
+    LIBRARY_HOST_DIR="${MOUNT_POINT:-$HOME/.stremio-data}/alabtross-library"
+    mkdir -p "$LIBRARY_HOST_DIR"
+
     info "Starting Alabtross Mobile UI..."
     docker run -d \
       --name alabtross-mobile \
       --restart unless-stopped \
       -p "${STREMIO_BIND_IP}:8080:8080" \
       -e STREMIO_SERVER="http://${STREMIO_BIND_IP}:11470" \
+      -e LIBRARY_PATH="/app/library" \
+      -v "${LIBRARY_HOST_DIR}:/app/library" \
       alabtross-mobile \
       || die "Failed to start Mobile UI container."
 

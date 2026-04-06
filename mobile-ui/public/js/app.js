@@ -50,6 +50,9 @@
     castStopBtn: $('#cast-stop-btn'),
     bottomNav: $('#bottom-nav'),
     navBtns: $$('.nav-btn'),
+    // Library
+    libraryContent: $('#library-content'),
+    libraryEmpty: $('#library-empty'),
     // Settings
     modeToggle: $('#mode-toggle'),
     modeHint: $('#mode-hint'),
@@ -177,6 +180,7 @@
       'search': 'view-search',
       'detail': 'view-detail',
       'settings': 'view-settings',
+      'library': 'view-library',
       'share': 'view-share',
       'player': 'view-player',
     };
@@ -201,7 +205,8 @@
       const viewMap = {
         'home': 'view-home', 'movies': 'view-home', 'series': 'view-home',
         'search': 'view-search', 'detail': 'view-detail',
-        'settings': 'view-settings', 'share': 'view-share', 'player': 'view-player',
+        'settings': 'view-settings', 'library': 'view-library',
+        'share': 'view-share', 'player': 'view-player',
       };
       const target = $('#' + (viewMap[prev] || 'view-home'));
       if (target) target.classList.add('active');
@@ -219,7 +224,7 @@
   function updateNavUI(view) {
     dom.navBtns.forEach(btn => {
       btn.classList.toggle('active', btn.dataset.view === view ||
-        (btn.dataset.view === 'home' && !['movies', 'series', 'search', 'detail', 'settings', 'share', 'player'].includes(view)));
+        (btn.dataset.view === 'home' && !['movies', 'series', 'search', 'detail', 'settings', 'library', 'share', 'player'].includes(view)));
     });
 
     // Show/hide bottom nav
@@ -238,6 +243,7 @@
       'search': 'Search',
       'detail': opts.title || 'Details',
       'settings': 'Settings',
+      'library': 'Library',
       'share': 'Share',
       'player': 'Now Playing',
     };
@@ -646,6 +652,20 @@
       `;
     }
 
+    // Add to Library button (only for custom mode where we have torrent data)
+    if (api.getMode() === 'custom') {
+      html += `
+        <div id="library-add-section" class="library-add-section" style="margin-top:20px">
+          <h3 class="detail-section-title">Download</h3>
+          <p class="setting-hint" style="margin-bottom:12px">Select a stream above first, then save it to your server library</p>
+          <button id="add-to-library-btn" class="btn-library-add" disabled>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Add to Library
+          </button>
+        </div>
+      `;
+    }
+
     html += '</div>';
     dom.detailContent.innerHTML = html;
 
@@ -832,6 +852,13 @@
     if (listEl) {
       listEl.innerHTML = ranked.map((r, i) => renderStreamItem(r.stream, i, 'done', r.responseTime)).join('');
       attachStreamHandlers();
+    }
+
+    // Enable the "Add to Library" button now that streams are available
+    const addBtn = document.getElementById('add-to-library-btn');
+    if (addBtn && ranked.length > 0) {
+      addBtn.disabled = false;
+      addBtn.addEventListener('click', () => showLibraryStreamPicker(ranked));
     }
   }
 
@@ -1050,6 +1077,323 @@
     } else {
       showToast('No playable streams found');
     }
+  }
+
+  // ─── Library ─────────────────────────────────────
+
+  function showLibraryStreamPicker(ranked) {
+    if (!state.currentMeta || ranked.length === 0) {
+      showToast('No streams available to download');
+      return;
+    }
+
+    // Use the best stream by default
+    const best = ranked[0].stream;
+    addToLibrary(best);
+  }
+
+  async function addToLibrary(stream) {
+    const meta = state.currentMeta;
+    if (!meta || !stream) return;
+
+    const infoHash = stream.infoHash;
+    const magnetUri = stream.magnetUri || stream.url;
+    if (!infoHash || !magnetUri) {
+      showToast('This stream cannot be downloaded');
+      return;
+    }
+
+    const btn = document.getElementById('add-to-library-btn');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Adding...';
+    }
+
+    try {
+      const body = {
+        imdbId: meta.imdb_id || meta.id,
+        type: state.currentType || 'movie',
+        name: meta.name || 'Unknown',
+        poster: meta.poster || '',
+        year: meta.releaseInfo || meta.year || '',
+        magnetUri,
+        infoHash,
+        quality: stream.quality || '',
+        size: stream.size || '',
+      };
+
+      const resp = await fetch('/api/library/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      const data = await resp.json();
+      if (!resp.ok) {
+        throw new Error(data.error || 'Failed to add to library');
+      }
+
+      if (data.status === 'already_exists') {
+        showToast('Already in your library');
+      } else if (data.status === 'already_downloading') {
+        showToast('Already downloading');
+      } else {
+        showToast('Added to library — downloading...');
+      }
+
+      if (btn) {
+        btn.innerHTML = `
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+          In Library
+        `;
+      }
+    } catch (err) {
+      showToast(err.message);
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = `
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Add to Library
+        `;
+      }
+    }
+  }
+
+  async function loadLibrary() {
+    dom.libraryContent.innerHTML = '';
+    dom.libraryEmpty.classList.add('hidden');
+
+    dom.libraryContent.innerHTML = `
+      <div class="loading-state" style="grid-column:1/-1">
+        <div class="spinner"></div>
+        <p>Loading library...</p>
+      </div>
+    `;
+
+    try {
+      const resp = await fetch('/api/library');
+      const data = await resp.json();
+      const items = data.items || [];
+
+      if (items.length === 0) {
+        dom.libraryContent.innerHTML = '';
+        dom.libraryEmpty.classList.remove('hidden');
+        return;
+      }
+
+      dom.libraryContent.innerHTML = items.map(item => renderLibraryItem(item)).join('');
+      attachLibraryHandlers();
+
+      // Start progress polling for downloading items
+      const downloading = items.filter(i => i.status === 'downloading');
+      if (downloading.length > 0) {
+        startLibraryProgressPoll();
+      }
+    } catch (err) {
+      dom.libraryContent.innerHTML = `
+        <div class="empty-state" style="grid-column:1/-1">
+          <p>Failed to load library</p>
+          <p style="font-size:12px;color:var(--text-muted)">${escapeHTML(err.message)}</p>
+        </div>
+      `;
+    }
+  }
+
+  function renderLibraryItem(item) {
+    const poster = item.poster || '';
+    const title = escapeHTML(item.name || 'Unknown');
+    const year = item.year || '';
+    const quality = item.quality ? `<span class="library-quality">${escapeHTML(item.quality)}</span>` : '';
+
+    let statusBadge = '';
+    if (item.status === 'downloading') {
+      const speed = item.downloadSpeed > 0 ? formatSpeed(item.downloadSpeed) : '';
+      statusBadge = `
+        <div class="library-progress">
+          <div class="library-progress-bar" style="width:${item.progress}%"></div>
+        </div>
+        <div class="library-status downloading">
+          ${item.progress}%${speed ? ' &middot; ' + speed : ''}${item.numPeers ? ' &middot; ' + item.numPeers + ' peers' : ''}
+        </div>
+      `;
+    } else if (item.status === 'complete') {
+      const size = item.fileSize ? formatSize(item.fileSize) : item.size || '';
+      statusBadge = `<div class="library-status complete">${size ? size + ' &middot; ' : ''}Ready to play</div>`;
+    } else if (item.status === 'failed') {
+      statusBadge = `<div class="library-status failed">${escapeHTML(item.error || 'Download failed')}</div>`;
+    }
+
+    return `
+      <div class="library-item" data-id="${escapeHTML(item.id)}" data-status="${item.status}">
+        <div class="library-item-poster">
+          ${poster ? `<img src="${poster}" alt="${title}">` : `<div class="poster-placeholder">${title}</div>`}
+        </div>
+        <div class="library-item-info">
+          <div class="library-item-title">${title}</div>
+          <div class="library-item-meta">${year}${quality ? ' &middot; ' : ''}${quality}</div>
+          ${statusBadge}
+        </div>
+        <div class="library-item-actions">
+          ${item.status === 'complete' ? `
+            <button class="library-play-btn" data-id="${escapeHTML(item.id)}" title="Play">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            </button>
+          ` : ''}
+          <button class="library-remove-btn" data-id="${escapeHTML(item.id)}" title="Remove">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  function attachLibraryHandlers() {
+    // Play buttons
+    dom.libraryContent.querySelectorAll('.library-play-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        playLibraryItem(btn.dataset.id);
+      });
+    });
+
+    // Remove buttons
+    dom.libraryContent.querySelectorAll('.library-remove-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        removeLibraryItem(btn.dataset.id);
+      });
+    });
+
+    // Click on item to play if complete
+    dom.libraryContent.querySelectorAll('.library-item[data-status="complete"]').forEach(item => {
+      item.addEventListener('click', () => {
+        playLibraryItem(item.dataset.id);
+      });
+    });
+  }
+
+  async function playLibraryItem(id) {
+    navigateTo('player');
+    dom.playerOverlay.classList.remove('hidden');
+    dom.playerOverlay.innerHTML = `
+      <div class="spinner"></div>
+      <p>Loading from library...</p>
+    `;
+
+    try {
+      const url = `/api/library/${encodeURIComponent(id)}/stream`;
+      dom.videoPlayer.src = url;
+      dom.videoPlayer.load();
+
+      await new Promise((resolve, reject) => {
+        const onCanPlay = () => { cleanup(); resolve(); };
+        const onError = () => {
+          cleanup();
+          const err = dom.videoPlayer.error;
+          reject(new Error(err ? `Media error (code ${err.code})` : 'Failed to load video'));
+        };
+        const cleanup = () => {
+          dom.videoPlayer.removeEventListener('canplay', onCanPlay);
+          dom.videoPlayer.removeEventListener('error', onError);
+          clearTimeout(timer);
+        };
+        const timer = setTimeout(() => { cleanup(); reject(new Error('Loading timed out')); }, 30000);
+        dom.videoPlayer.addEventListener('canplay', onCanPlay, { once: true });
+        dom.videoPlayer.addEventListener('error', onError, { once: true });
+      });
+
+      await dom.videoPlayer.play();
+      dom.playerOverlay.classList.add('hidden');
+    } catch (e) {
+      let hint = escapeHTML(e.message);
+      if (e.message.includes('Media error')) {
+        hint += '<br><span style="font-size:12px">The file may be MKV format — browsers only support MP4/WebM</span>';
+      }
+      dom.playerOverlay.innerHTML = `
+        <p style="color:var(--danger)">Playback failed</p>
+        <p style="font-size:13px;color:var(--text-muted)">${hint}</p>
+        <button id="player-go-back" style="
+          margin-top:16px; padding:10px 24px; background:var(--accent);
+          border:none; border-radius:8px; color:white; font-size:14px; cursor:pointer;
+        ">Go Back</button>
+      `;
+      document.getElementById('player-go-back').addEventListener('click', () => goBack());
+    }
+  }
+
+  async function removeLibraryItem(id) {
+    try {
+      const resp = await fetch(`/api/library/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      if (!resp.ok) {
+        const data = await resp.json();
+        throw new Error(data.error || 'Failed to remove');
+      }
+      showToast('Removed from library');
+      loadLibrary();
+    } catch (err) {
+      showToast(err.message);
+    }
+  }
+
+  let _libraryPollTimer = null;
+  function startLibraryProgressPoll() {
+    stopLibraryProgressPoll();
+    _libraryPollTimer = setInterval(async () => {
+      if (state.currentView !== 'library') {
+        stopLibraryProgressPoll();
+        return;
+      }
+      try {
+        const resp = await fetch('/api/library');
+        const data = await resp.json();
+        const items = data.items || [];
+        const downloading = items.filter(i => i.status === 'downloading');
+
+        // Update progress for downloading items in-place
+        for (const item of items) {
+          const el = dom.libraryContent.querySelector(`.library-item[data-id="${CSS.escape(item.id)}"]`);
+          if (!el) continue;
+
+          if (item.status === 'downloading') {
+            const bar = el.querySelector('.library-progress-bar');
+            const status = el.querySelector('.library-status');
+            if (bar) bar.style.width = item.progress + '%';
+            if (status) {
+              const speed = item.downloadSpeed > 0 ? formatSpeed(item.downloadSpeed) : '';
+              status.innerHTML = `${item.progress}%${speed ? ' &middot; ' + speed : ''}${item.numPeers ? ' &middot; ' + item.numPeers + ' peers' : ''}`;
+            }
+          } else if (el.dataset.status !== item.status) {
+            // Status changed — reload full list
+            loadLibrary();
+            return;
+          }
+        }
+
+        if (downloading.length === 0) {
+          stopLibraryProgressPoll();
+        }
+      } catch { /* ignore polling errors */ }
+    }, 3000);
+  }
+
+  function stopLibraryProgressPoll() {
+    if (_libraryPollTimer) {
+      clearInterval(_libraryPollTimer);
+      _libraryPollTimer = null;
+    }
+  }
+
+  function formatSpeed(bytesPerSec) {
+    if (bytesPerSec >= 1e6) return (bytesPerSec / 1e6).toFixed(1) + ' MB/s';
+    if (bytesPerSec >= 1e3) return (bytesPerSec / 1e3).toFixed(0) + ' KB/s';
+    return bytesPerSec + ' B/s';
+  }
+
+  function formatSize(bytes) {
+    if (bytes >= 1e9) return (bytes / 1e9).toFixed(2) + ' GB';
+    if (bytes >= 1e6) return (bytes / 1e6).toFixed(1) + ' MB';
+    if (bytes >= 1e3) return (bytes / 1e3).toFixed(0) + ' KB';
+    return bytes + ' B';
   }
 
   // ─── Share / QR Code ─────────────────────────────
@@ -1390,6 +1734,9 @@
         } else if (view === 'series') {
           navigateTo('series');
           loadHome('series');
+        } else if (view === 'library') {
+          navigateTo('library');
+          loadLibrary();
         } else if (view === 'share') {
           navigateTo('share');
           generateShareQR();

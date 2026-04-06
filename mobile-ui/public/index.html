@@ -176,6 +176,16 @@
         </div>
       </div>
 
+      <!-- Library View -->
+      <div id="view-library" class="view">
+        <div id="library-content" class="library-grid"></div>
+        <div id="library-empty" class="empty-state">
+          <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
+          <p>Your library is empty</p>
+          <p style="font-size:13px;color:var(--text-muted)">Browse movies and tap "Add to Library" to download them to the server</p>
+        </div>
+      </div>
+
       <!-- Share / QR Code View -->
       <div id="view-share" class="view">
         <div class="share-panel">
@@ -260,6 +270,10 @@
       <button class="nav-btn" data-view="series">
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="15" rx="2" ry="2"/><polyline points="17 2 12 7 7 2"/></svg>
         <span>Series</span>
+      </button>
+      <button class="nav-btn" data-view="library">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
+        <span>Library</span>
       </button>
       <button class="nav-btn" data-view="share">
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3M20 14v7h-7"/></svg>

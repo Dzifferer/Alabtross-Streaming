@@ -1,15 +1,21 @@
 const express = require('express');
 const path = require('path');
+const fs = require('fs');
 const http = require('http');
 const https = require('https');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 const { getMovieStreams, getSeriesStreams } = require('./lib/stream-providers');
 const TorrentEngine = require('./lib/torrent-engine');
+const LibraryManager = require('./lib/library-manager');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
 const STREMIO_SERVER = process.env.STREMIO_SERVER || 'http://localhost:11470';
 const TORRENT_CACHE_PATH = process.env.TORRENT_CACHE || path.join(__dirname, '.torrent-cache');
+const LIBRARY_PATH = process.env.LIBRARY_PATH || path.join(__dirname, 'library');
+
+// JSON body parsing for library POST/DELETE requests
+app.use(express.json());
 
 // ─── Rate Limiting (simple in-memory, per-IP) ────────────────────────
 const rateLimitMap = new Map();
@@ -48,6 +54,9 @@ function getEngine() {
   }
   return engine;
 }
+
+// ─── Library Manager (initialized on startup) ─────────────────────────
+const library = new LibraryManager({ libraryPath: LIBRARY_PATH });
 
 // Security headers
 app.use((req, res, next) => {
@@ -155,6 +164,103 @@ app.get('/api/torrent-status/:infoHash', (req, res) => {
     return res.status(404).json({ error: 'Torrent not active' });
   }
   res.json(status);
+});
+
+// ─── Library API Routes ───────────────────────────────────────────────
+
+// GET /api/library — list all library items
+app.get('/api/library', rateLimit, (req, res) => {
+  res.json({ items: library.getAll() });
+});
+
+// GET /api/library/:id — get single library item
+app.get('/api/library/:id', rateLimit, (req, res) => {
+  const item = library.getItem(req.params.id);
+  if (!item) return res.status(404).json({ error: 'Item not found' });
+  res.json(item);
+});
+
+// POST /api/library/add — add item to library and start download
+app.post('/api/library/add', rateLimit, (req, res) => {
+  const { imdbId, type, name, poster, year, magnetUri, infoHash, quality, size, season, episode } = req.body;
+
+  if (!infoHash || !/^[0-9a-f]{40}$/i.test(infoHash)) {
+    return res.status(400).json({ error: 'Invalid infoHash' });
+  }
+  if (!magnetUri || !magnetUri.startsWith('magnet:?')) {
+    return res.status(400).json({ error: 'Invalid magnet URI' });
+  }
+  if (!magnetUri.toLowerCase().includes(infoHash.toLowerCase())) {
+    return res.status(400).json({ error: 'Magnet URI does not match infoHash' });
+  }
+
+  try {
+    const result = library.addItem({ imdbId, type, name, poster, year, magnetUri, infoHash, quality, size, season, episode });
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// DELETE /api/library/:id — remove item from library
+app.delete('/api/library/:id', rateLimit, (req, res) => {
+  const removed = library.removeItem(req.params.id);
+  if (!removed) return res.status(404).json({ error: 'Item not found' });
+  res.json({ success: true });
+});
+
+// GET /api/library/:id/stream — stream a completed library item
+app.get('/api/library/:id/stream', rateLimit, (req, res) => {
+  const item = library.getItem(req.params.id);
+  if (!item) return res.status(404).json({ error: 'Item not found' });
+  if (item.status !== 'complete') {
+    return res.status(400).json({ error: 'Download not complete' });
+  }
+
+  const filePath = library.getFilePath(req.params.id);
+  if (!filePath) return res.status(404).json({ error: 'File not found' });
+
+  const stat = fs.statSync(filePath);
+  const fileSize = stat.size;
+  const mimeType = library.getMimeType(filePath);
+  const safeFilename = path.basename(filePath).replace(/[^\w\s.\-()[\]]/g, '_').substring(0, 200);
+
+  const headers = {
+    'Content-Type': mimeType,
+    'X-Content-Type-Options': 'nosniff',
+    'Content-Disposition': `inline; filename="${safeFilename}"`,
+    'Cache-Control': 'no-store',
+    'Accept-Ranges': 'bytes',
+  };
+
+  const range = req.headers.range;
+  if (range) {
+    const parts = range.replace(/bytes=/, '').split('-');
+    const start = parseInt(parts[0], 10);
+    const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+
+    if (start >= fileSize || end >= fileSize || start > end) {
+      res.status(416).set('Content-Range', `bytes */${fileSize}`).end();
+      return;
+    }
+
+    res.status(206).set({
+      ...headers,
+      'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+      'Content-Length': end - start + 1,
+    });
+
+    const stream = fs.createReadStream(filePath, { start, end });
+    stream.pipe(res);
+    stream.on('error', () => res.end());
+    res.on('close', () => stream.destroy());
+  } else {
+    res.status(200).set({ ...headers, 'Content-Length': fileSize });
+    const stream = fs.createReadStream(filePath);
+    stream.pipe(res);
+    stream.on('error', () => res.end());
+    res.on('close', () => stream.destroy());
+  }
 });
 
 // ─── IPTV / Live TV Endpoints ─────────────────────────────────────────
@@ -317,5 +423,6 @@ app.listen(PORT, '0.0.0.0', () => {
 // Graceful shutdown
 process.on('SIGTERM', () => {
   if (engine) engine.destroy();
+  library.destroy();
   process.exit(0);
 });

@@ -18,6 +18,7 @@ const { TRACKERS, isFileNameSafe, getMimeType } = require('./file-safety');
 
 const MAX_CONCURRENT_DOWNLOADS = 2;
 const MAX_FILE_SIZE = 20 * 1024 * 1024 * 1024; // 20 GB
+const METADATA_SAVE_INTERVAL = 30 * 1000; // Save metadata every 30s during active downloads
 
 class LibraryManager {
   constructor(opts = {}) {
@@ -26,12 +27,14 @@ class LibraryManager {
     this._items = new Map();       // id -> library item
     this._engines = new Map();     // id -> torrent engine (active downloads only)
     this._progressTimers = new Map(); // id -> interval timer
+    this._metadataSaveTimer = null;
 
     // Ensure library directory exists
     if (!fs.existsSync(this._libraryPath)) {
       fs.mkdirSync(this._libraryPath, { recursive: true });
     }
 
+    this._cleanupStaleTmpFiles();
     this._loadMetadata();
     console.log(`[Library] Initialized at ${this._libraryPath}, ${this._items.size} items loaded`);
 
@@ -183,6 +186,10 @@ class LibraryManager {
 
   destroy() {
     console.log('[Library] Shutting down — saving download state for resumption...');
+    if (this._metadataSaveTimer) {
+      clearInterval(this._metadataSaveTimer);
+      this._metadataSaveTimer = null;
+    }
     for (const [id] of this._engines) {
       this._stopDownload(id);
     }
@@ -210,6 +217,7 @@ class LibraryManager {
     });
 
     this._engines.set(id, engine);
+    this._startPeriodicSave();
 
     const timeout = setTimeout(() => {
       if (item.status === 'downloading' && !item.filePath) {
@@ -310,6 +318,11 @@ class LibraryManager {
       try { engine.destroy(); } catch { /* ignore */ }
       this._engines.delete(id);
     }
+
+    // Stop periodic save when no downloads are active
+    if (this._engines.size === 0) {
+      this._stopPeriodicSave();
+    }
   }
 
   _selectVideoFile(files) {
@@ -326,26 +339,70 @@ class LibraryManager {
     return candidates.reduce((a, b) => (a.length > b.length ? a : b));
   }
 
+  _startPeriodicSave() {
+    if (this._metadataSaveTimer) return;
+    this._metadataSaveTimer = setInterval(() => {
+      this._saveMetadata();
+    }, METADATA_SAVE_INTERVAL);
+  }
+
+  _stopPeriodicSave() {
+    if (this._metadataSaveTimer) {
+      clearInterval(this._metadataSaveTimer);
+      this._metadataSaveTimer = null;
+    }
+  }
+
   // ─── Metadata Persistence ──────────────────────
 
-  _loadMetadata() {
+  _cleanupStaleTmpFiles() {
     try {
-      if (fs.existsSync(this._metadataFile)) {
-        const data = JSON.parse(fs.readFileSync(this._metadataFile, 'utf8'));
-        if (Array.isArray(data)) {
-          for (const item of data) {
-            // Mark interrupted downloads for auto-resume instead of failing them
-            if (item.status === 'downloading') {
-              item._needsResume = true;
-              item.downloadSpeed = 0;
-              item.numPeers = 0;
-            }
-            this._items.set(item.id, item);
-          }
+      const files = fs.readdirSync(this._libraryPath);
+      for (const f of files) {
+        if (f.startsWith('_metadata.json.tmp.')) {
+          const tmpPath = path.join(this._libraryPath, f);
+          fs.unlinkSync(tmpPath);
+          console.log(`[Library] Cleaned up stale temp file: ${f}`);
         }
       }
-    } catch (err) {
-      console.error(`[Library] Failed to load metadata: ${err.message}`);
+    } catch {
+      // Non-critical — ignore
+    }
+  }
+
+  _loadMetadata() {
+    const backupFile = this._metadataFile + '.bak';
+    const filesToTry = [this._metadataFile, backupFile];
+
+    for (const file of filesToTry) {
+      try {
+        if (!fs.existsSync(file)) continue;
+        const raw = fs.readFileSync(file, 'utf8');
+        if (!raw.trim()) continue;
+        const data = JSON.parse(raw);
+        if (!Array.isArray(data)) continue;
+
+        for (const item of data) {
+          // Mark interrupted downloads for auto-resume instead of failing them
+          if (item.status === 'downloading') {
+            item._needsResume = true;
+            item.downloadSpeed = 0;
+            item.numPeers = 0;
+          }
+          this._items.set(item.id, item);
+        }
+
+        if (file === backupFile) {
+          console.warn(`[Library] Primary metadata was corrupted — recovered from backup (${data.length} items)`);
+        }
+        return;
+      } catch (err) {
+        if (file === this._metadataFile) {
+          console.error(`[Library] Primary metadata corrupted: ${err.message} — trying backup...`);
+        } else {
+          console.error(`[Library] Backup metadata also failed: ${err.message}`);
+        }
+      }
     }
   }
 
@@ -402,8 +459,19 @@ class LibraryManager {
         return clean;
       });
       const json = JSON.stringify(data, null, 2);
-      // Atomic write: write to temp file then rename to prevent corruption
       const tmpFile = this._metadataFile + '.tmp.' + process.pid;
+      const backupFile = this._metadataFile + '.bak';
+
+      // Rotate current -> backup before writing new version
+      try {
+        if (fs.existsSync(this._metadataFile)) {
+          fs.copyFileSync(this._metadataFile, backupFile);
+        }
+      } catch {
+        // Non-critical — proceed without backup
+      }
+
+      // Atomic write: write to temp file then rename to prevent corruption
       fs.writeFileSync(tmpFile, json, 'utf8');
       fs.renameSync(tmpFile, this._metadataFile);
     } catch (err) {

@@ -633,6 +633,11 @@ class StremioAPI {
       name: 'Live TV',
       description: 'International live TV channels',
     },
+    {
+      url: 'https://stremio-iptv-org.vercel.app',
+      name: 'IPTV-org',
+      description: 'Community IPTV — 8000+ channels worldwide',
+    },
   ];
 
   // Default source added on first launch

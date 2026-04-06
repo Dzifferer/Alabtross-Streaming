@@ -70,7 +70,7 @@ app.use((req, res, next) => {
     "script-src 'self' 'sha256-ZswfTY7H35rbv8WC7NXBoiC7WNu86vSzCDChNWwZZDM='",
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' https: data:",
-    "connect-src 'self' https://v3-cinemeta.strem.io https://torrentio.strem.io https://*.strem.io https://*.stremio.com https://api.themoviedb.org https://*.baby-beamup.club https://*.fly.dev https://*.onrender.com",
+    "connect-src 'self' https://v3-cinemeta.strem.io https://torrentio.strem.io https://*.strem.io https://*.stremio.com https://api.themoviedb.org https://*.baby-beamup.club https://*.fly.dev https://*.onrender.com https://*.vercel.app",
     "media-src 'self' blob: http: https:",
     "frame-ancestors 'none'",
   ].join('; '));

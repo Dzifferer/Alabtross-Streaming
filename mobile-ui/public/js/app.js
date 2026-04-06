@@ -1798,6 +1798,44 @@
       });
     });
 
+    // ─── Max Concurrent Streams ─────────────────────
+    const maxStreamsInput = $('#setting-max-streams');
+    const maxStreamsSave = $('#setting-max-streams-save');
+    const maxStreamsStatus = $('#max-streams-status');
+
+    // Load current value from server
+    fetch('/api/settings/max-streams').then(r => r.json()).then(data => {
+      maxStreamsInput.value = data.maxConcurrentStreams;
+    }).catch(() => {});
+
+    maxStreamsSave.addEventListener('click', async () => {
+      const value = parseInt(maxStreamsInput.value, 10);
+      if (!value || value < 1 || value > 20) {
+        maxStreamsStatus.textContent = 'Must be between 1 and 20';
+        maxStreamsStatus.style.color = 'var(--danger, #ff6b6b)';
+        return;
+      }
+      try {
+        const resp = await fetch('/api/settings/max-streams', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ maxConcurrentStreams: value }),
+        });
+        if (resp.ok) {
+          maxStreamsStatus.textContent = `Saved — max ${value} concurrent streams`;
+          maxStreamsStatus.style.color = 'var(--success, #51cf66)';
+          showToast(`Max concurrent streams set to ${value}`);
+        } else {
+          const err = await resp.json();
+          maxStreamsStatus.textContent = err.error || 'Failed to save';
+          maxStreamsStatus.style.color = 'var(--danger, #ff6b6b)';
+        }
+      } catch {
+        maxStreamsStatus.textContent = 'Network error';
+        maxStreamsStatus.style.color = 'var(--danger, #ff6b6b)';
+      }
+    });
+
     // ─── Stremio Mode Settings ──────────────────────
 
     // Load saved server URL

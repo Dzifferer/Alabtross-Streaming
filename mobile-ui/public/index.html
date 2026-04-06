@@ -101,6 +101,16 @@
             <span id="mode-hint" class="setting-hint">Uses YTS, EZTV, 1337x directly — no Stremio needed</span>
           </div>
 
+          <!-- Concurrent Streams -->
+          <div class="setting-group">
+            <label>Max Concurrent Streams</label>
+            <div class="setting-row">
+              <input type="number" id="setting-max-streams" min="1" max="20" value="5" style="width:80px">
+              <button id="setting-max-streams-save" class="btn-sm">Save</button>
+            </div>
+            <span id="max-streams-status" class="setting-hint">Max simultaneous torrent streams and downloads (1–20)</span>
+          </div>
+
           <!-- Stremio Mode Settings -->
           <div id="stremio-settings" class="hidden">
             <div class="setting-group">

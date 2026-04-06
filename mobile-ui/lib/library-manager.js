@@ -16,7 +16,7 @@ const path = require('path');
 const fs = require('fs');
 const { TRACKERS, isFileNameSafe, getMimeType } = require('./file-safety');
 
-const MAX_CONCURRENT_DOWNLOADS = 5;
+const DEFAULT_MAX_CONCURRENT_DOWNLOADS = 5;
 const MAX_FILE_SIZE = 20 * 1024 * 1024 * 1024; // 20 GB
 const METADATA_SAVE_INTERVAL = 30 * 1000; // Save metadata every 30s during active downloads
 
@@ -24,6 +24,7 @@ class LibraryManager {
   constructor(opts = {}) {
     this._libraryPath = opts.libraryPath || path.join(process.cwd(), 'library');
     this._metadataFile = path.join(this._libraryPath, '_metadata.json');
+    this._maxConcurrentDownloads = opts.maxConcurrentDownloads || DEFAULT_MAX_CONCURRENT_DOWNLOADS;
     this._items = new Map();       // id -> library item
     this._engines = new Map();     // id -> torrent engine (active downloads only)
     this._progressTimers = new Map(); // id -> interval timer
@@ -75,8 +76,8 @@ class LibraryManager {
 
     // Check concurrent download limit
     const activeDownloads = [...this._items.values()].filter(i => i.status === 'downloading').length;
-    if (activeDownloads >= MAX_CONCURRENT_DOWNLOADS) {
-      throw new Error(`Max ${MAX_CONCURRENT_DOWNLOADS} concurrent downloads allowed`);
+    if (activeDownloads >= this._maxConcurrentDownloads) {
+      throw new Error(`Max ${this._maxConcurrentDownloads} concurrent downloads allowed`);
     }
 
     const item = {
@@ -435,7 +436,7 @@ class LibraryManager {
       delete item._needsResume;
 
       // Respect concurrent download limit
-      if (started >= MAX_CONCURRENT_DOWNLOADS) {
+      if (started >= this._maxConcurrentDownloads) {
         console.log(`[Library] Queued "${item.name}" — concurrent limit reached, marked for retry`);
         item.status = 'failed';
         item.error = 'Queued — re-add to resume (concurrent limit reached during restart)';

@@ -24,7 +24,7 @@ const { TRACKERS, isFileNameSafe, getMimeType, sanitizeFilename } = require('./f
 
 const IDLE_TIMEOUT = 30 * 60 * 1000; // 30 minutes
 const ACTIVE_DL_RECHECK = 10 * 60 * 1000; // re-check in 10 min if still downloading
-const MAX_CONCURRENT = 5;
+const DEFAULT_MAX_CONCURRENT = 5;
 const MAX_FILE_SIZE = 20 * 1024 * 1024 * 1024; // 20 GB
 const MAGIC_READ_SIZE = 16;
 
@@ -44,6 +44,7 @@ class TorrentEngine {
     this._active = new Map(); // infoHash -> { engine, files, lastAccess, timer }
     this._downloadPath = opts.downloadPath || path.join(process.cwd(), '.torrent-cache');
     this._maxFileSize = opts.maxFileSize || MAX_FILE_SIZE;
+    this._maxConcurrent = opts.maxConcurrent || DEFAULT_MAX_CONCURRENT;
   }
 
   /**
@@ -65,7 +66,7 @@ class TorrentEngine {
     }
 
     // Enforce concurrency limit
-    if (this._active.size >= MAX_CONCURRENT) {
+    if (this._active.size >= this._maxConcurrent) {
       this._evictOldest();
     }
 

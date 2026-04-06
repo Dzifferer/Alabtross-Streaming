@@ -1,5 +1,7 @@
 const express = require('express');
 const path = require('path');
+const http = require('http');
+const https = require('https');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 const { getMovieStreams, getSeriesStreams } = require('./lib/stream-providers');
 const TorrentEngine = require('./lib/torrent-engine');
@@ -153,6 +155,149 @@ app.get('/api/torrent-status/:infoHash', (req, res) => {
     return res.status(404).json({ error: 'Torrent not active' });
   }
   res.json(status);
+});
+
+// ─── IPTV / Live TV Endpoints ─────────────────────────────────────────
+
+// In-memory playlist cache: { url, channels, fetchedAt }
+let playlistCache = null;
+const PLAYLIST_CACHE_TTL = 60 * 60 * 1000; // 1 hour
+
+function fetchUrl(url) {
+  return new Promise((resolve, reject) => {
+    const mod = url.startsWith('https') ? https : http;
+    const req = mod.get(url, { headers: { 'User-Agent': 'Alabtross/1.0' }, timeout: 15000 }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        return fetchUrl(res.headers.location).then(resolve, reject);
+      }
+      if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', chunk => body += chunk);
+      res.on('end', () => resolve(body));
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
+  });
+}
+
+function parseM3U(text) {
+  const lines = text.split('\n').map(l => l.trim());
+  const channels = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].startsWith('#EXTINF:')) continue;
+    const info = lines[i];
+    const urlLine = lines[i + 1];
+    if (!urlLine || urlLine.startsWith('#')) continue;
+
+    // Parse attributes from #EXTINF line
+    const nameMatch = info.match(/,(.+)$/);
+    const logoMatch = info.match(/tvg-logo="([^"]*)"/);
+    const groupMatch = info.match(/group-title="([^"]*)"/);
+    const idMatch = info.match(/tvg-id="([^"]*)"/);
+
+    channels.push({
+      id: idMatch ? idMatch[1] : String(channels.length),
+      name: nameMatch ? nameMatch[1].trim() : 'Unknown',
+      logo: logoMatch ? logoMatch[1] : '',
+      group: groupMatch ? groupMatch[1] : '',
+      url: urlLine,
+    });
+  }
+  return channels;
+}
+
+// GET /api/iptv/channels?url=<m3u-playlist-url>
+app.get('/api/iptv/channels', rateLimit, async (req, res) => {
+  const playlistUrl = req.query.url;
+  if (!playlistUrl) return res.status(400).json({ error: 'Missing url parameter' });
+
+  try {
+    const u = new URL(playlistUrl);
+    if (!['http:', 'https:'].includes(u.protocol)) {
+      return res.status(400).json({ error: 'Invalid URL protocol' });
+    }
+  } catch {
+    return res.status(400).json({ error: 'Invalid URL' });
+  }
+
+  // Return cached if same URL and fresh
+  if (playlistCache && playlistCache.url === playlistUrl &&
+      Date.now() - playlistCache.fetchedAt < PLAYLIST_CACHE_TTL) {
+    return res.json({ channels: playlistCache.channels });
+  }
+
+  try {
+    const body = await fetchUrl(playlistUrl);
+    const channels = parseM3U(body);
+    playlistCache = { url: playlistUrl, channels, fetchedAt: Date.now() };
+    res.json({ channels });
+  } catch (err) {
+    console.error('[IPTV] Playlist fetch error:', err.message);
+    res.status(502).json({ error: 'Failed to fetch playlist' });
+  }
+});
+
+// GET /api/iptv/stream?url=<stream-url> — proxy HLS/stream to avoid CORS
+app.get('/api/iptv/stream', rateLimit, (req, res) => {
+  const streamUrl = req.query.url;
+  if (!streamUrl) return res.status(400).json({ error: 'Missing url parameter' });
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(streamUrl);
+    if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+      return res.status(400).json({ error: 'Invalid URL protocol' });
+    }
+  } catch {
+    return res.status(400).json({ error: 'Invalid URL' });
+  }
+
+  const mod = parsedUrl.protocol === 'https:' ? https : http;
+  const proxyReq = mod.get(streamUrl, {
+    headers: { 'User-Agent': 'Alabtross/1.0' },
+    timeout: 15000,
+  }, (upstream) => {
+    if (upstream.statusCode >= 300 && upstream.statusCode < 400 && upstream.headers.location) {
+      // Follow redirect
+      res.redirect(302, '/api/iptv/stream?url=' + encodeURIComponent(upstream.headers.location));
+      upstream.resume();
+      return;
+    }
+
+    const ct = upstream.headers['content-type'] || '';
+    res.setHeader('Content-Type', ct || 'application/octet-stream');
+    if (upstream.headers['content-length']) {
+      res.setHeader('Content-Length', upstream.headers['content-length']);
+    }
+
+    // If m3u8 playlist, rewrite URLs to go through proxy
+    if (streamUrl.endsWith('.m3u8') || ct.includes('mpegurl')) {
+      let body = '';
+      upstream.setEncoding('utf8');
+      upstream.on('data', chunk => body += chunk);
+      upstream.on('end', () => {
+        // Resolve relative URLs against the original stream URL
+        const base = streamUrl.substring(0, streamUrl.lastIndexOf('/') + 1);
+        const rewritten = body.replace(/^(?!#)(\S+)$/gm, (match) => {
+          const absolute = match.startsWith('http') ? match : base + match;
+          return '/api/iptv/stream?url=' + encodeURIComponent(absolute);
+        });
+        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+        res.send(rewritten);
+      });
+    } else {
+      upstream.pipe(res);
+    }
+  });
+  proxyReq.on('error', (err) => {
+    console.error('[IPTV] Stream proxy error:', err.message);
+    if (!res.headersSent) res.status(502).json({ error: 'Stream unavailable' });
+  });
+  proxyReq.on('timeout', () => {
+    proxyReq.destroy();
+    if (!res.headersSent) res.status(504).json({ error: 'Stream timeout' });
+  });
 });
 
 // Serve static files

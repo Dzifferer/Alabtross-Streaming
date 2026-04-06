@@ -64,6 +64,10 @@
     addonAddCinemeta: $('#addon-add-cinemeta'),
     addonAddTorrentio: $('#addon-add-torrentio'),
     customAddCinemeta: $('#custom-add-cinemeta'),
+    // IPTV
+    iptvUrlInput: $('#setting-iptv-url'),
+    iptvSaveBtn: $('#setting-iptv-save'),
+    iptvStatus: $('#iptv-status'),
   };
 
   // ─── Recently Played ─────────────────────────────
@@ -343,6 +347,21 @@
       }
     }
 
+    // Row 4: Live TV — from M3U playlist
+    const channels = await api.getChannels();
+    if (channels.length > 0) {
+      const tvRow = document.createElement('div');
+      tvRow.className = 'catalog-row fade-in';
+      tvRow.innerHTML = `
+        <div class="catalog-row-header">
+          <h3 class="catalog-row-title">Live TV</h3>
+        </div>
+        <div class="catalog-scroll">${channels.slice(0, 30).map(ch => channelCardHTML(ch)).join('')}</div>
+      `;
+      dom.homeCatalogs.appendChild(tvRow);
+      attachChannelListeners(tvRow);
+    }
+
     // If nothing at all loaded, show empty state
     if (dom.homeCatalogs.children.length === 0) {
       dom.homeCatalogs.innerHTML = `
@@ -415,6 +434,97 @@
       img.addEventListener('load', () => img.classList.remove('loading'));
       img.addEventListener('error', () => { img.style.display = 'none'; });
     });
+  }
+
+  // ─── Channel Card (Live TV) ─────────────────────
+
+  function channelCardHTML(channel) {
+    const name = escapeHTML(channel.name || 'Channel');
+    const logo = channel.logo || '';
+    const group = escapeHTML(channel.group || '');
+    const url = channel.url || '';
+
+    return `
+      <div class="channel-card" data-url="${escapeHTML(url)}" data-name="${name}">
+        <div class="channel-poster">
+          ${logo
+            ? `<img src="${logo}" alt="${name}" class="loading">`
+            : ''}
+          <div class="channel-placeholder">${!logo ? name.substring(0, 3).toUpperCase() : ''}</div>
+          <span class="channel-live-badge">LIVE</span>
+        </div>
+        <div class="channel-info">
+          <div class="channel-name">${name}</div>
+          ${group ? `<div class="channel-group">${group}</div>` : ''}
+        </div>
+      </div>
+    `;
+  }
+
+  function attachChannelListeners(container) {
+    container.addEventListener('click', (e) => {
+      const card = e.target.closest('.channel-card');
+      if (card) {
+        const url = card.dataset.url;
+        const name = card.dataset.name;
+        if (url) playChannel(url, name);
+      }
+    });
+
+    container.querySelectorAll('.channel-poster img.loading').forEach(img => {
+      img.addEventListener('load', () => img.classList.remove('loading'));
+      img.addEventListener('error', () => { img.style.display = 'none'; });
+    });
+  }
+
+  async function playChannel(streamUrl, name) {
+    const proxyUrl = api.getChannelStreamUrl({ url: streamUrl });
+    if (!proxyUrl) {
+      showToast('Cannot play this channel');
+      return;
+    }
+
+    navigateTo('player');
+    dom.playerOverlay.classList.remove('hidden');
+    dom.playerOverlay.innerHTML = `
+      <div class="spinner"></div>
+      <p>Tuning to ${escapeHTML(name)}...</p>
+    `;
+
+    try {
+      dom.videoPlayer.src = proxyUrl;
+      dom.videoPlayer.load();
+
+      await new Promise((resolve, reject) => {
+        const onCanPlay = () => { cleanup(); resolve(); };
+        const onError = () => {
+          cleanup();
+          const err = dom.videoPlayer.error;
+          reject(new Error(err ? `Media error (code ${err.code})` : 'Failed to load stream'));
+        };
+        const cleanup = () => {
+          dom.videoPlayer.removeEventListener('canplay', onCanPlay);
+          dom.videoPlayer.removeEventListener('error', onError);
+          clearTimeout(timer);
+        };
+        const timer = setTimeout(() => { cleanup(); reject(new Error('Stream timed out')); }, 30000);
+        dom.videoPlayer.addEventListener('canplay', onCanPlay, { once: true });
+        dom.videoPlayer.addEventListener('error', onError, { once: true });
+      });
+
+      await dom.videoPlayer.play();
+      dom.playerOverlay.classList.add('hidden');
+    } catch (e) {
+      dom.playerOverlay.innerHTML = `
+        <p style="color:var(--danger)">Channel unavailable</p>
+        <p style="font-size:13px;color:var(--text-muted)">${escapeHTML(e.message)}</p>
+        <button id="player-go-back" style="
+          margin-top:16px; padding:10px 24px; background:var(--accent);
+          border:none; border-radius:8px; color:white; font-size:14px; cursor:pointer;
+        ">Go Back</button>
+      `;
+      document.getElementById('player-go-back').addEventListener('click', () => goBack());
+    }
   }
 
   // ─── Search ──────────────────────────────────────
@@ -1092,6 +1202,29 @@
     });
 
     // ─── Custom Mode Settings ───────────────────────
+
+    // IPTV playlist URL
+    dom.iptvUrlInput.value = api.getPlaylistUrl();
+
+    dom.iptvSaveBtn.addEventListener('click', async () => {
+      const url = dom.iptvUrlInput.value.trim();
+      api.setPlaylistUrl(url);
+      if (!url) {
+        dom.iptvStatus.textContent = 'Playlist URL cleared';
+        dom.iptvStatus.className = 'setting-hint';
+        return;
+      }
+      dom.iptvStatus.textContent = 'Testing playlist...';
+      dom.iptvStatus.className = 'setting-hint';
+      const channels = await api.getChannels();
+      if (channels.length > 0) {
+        dom.iptvStatus.textContent = `Found ${channels.length} channels`;
+        dom.iptvStatus.className = 'setting-hint success';
+      } else {
+        dom.iptvStatus.textContent = 'No channels found — check the URL';
+        dom.iptvStatus.className = 'setting-hint error';
+      }
+    });
 
     dom.customAddCinemeta.addEventListener('click', async () => {
       const result = await api.addAddon('https://v3-cinemeta.strem.io');

@@ -173,6 +173,7 @@
       'search': 'view-search',
       'detail': 'view-detail',
       'settings': 'view-settings',
+      'share': 'view-share',
       'player': 'view-player',
     };
 
@@ -196,7 +197,7 @@
       const viewMap = {
         'home': 'view-home', 'movies': 'view-home', 'series': 'view-home',
         'search': 'view-search', 'detail': 'view-detail',
-        'settings': 'view-settings', 'player': 'view-player',
+        'settings': 'view-settings', 'share': 'view-share', 'player': 'view-player',
       };
       const target = $('#' + (viewMap[prev] || 'view-home'));
       if (target) target.classList.add('active');
@@ -214,7 +215,7 @@
   function updateNavUI(view) {
     dom.navBtns.forEach(btn => {
       btn.classList.toggle('active', btn.dataset.view === view ||
-        (btn.dataset.view === 'home' && !['movies', 'series', 'search', 'detail', 'settings', 'player'].includes(view)));
+        (btn.dataset.view === 'home' && !['movies', 'series', 'search', 'detail', 'settings', 'share', 'player'].includes(view)));
     });
 
     // Show/hide bottom nav
@@ -223,7 +224,7 @@
   }
 
   function updateTopBar(view, opts = {}) {
-    const showBack = ['detail', 'settings', 'player'].includes(view);
+    const showBack = ['detail', 'settings', 'share', 'player'].includes(view);
     dom.backBtn.classList.toggle('hidden', !showBack);
 
     const titles = {
@@ -233,6 +234,7 @@
       'search': 'Search',
       'detail': opts.title || 'Details',
       'settings': 'Settings',
+      'share': 'Share',
       'player': 'Now Playing',
     };
     dom.pageTitle.textContent = titles[view] || 'Alabtross';
@@ -914,6 +916,60 @@
     }
   }
 
+  // ─── Share / QR Code ─────────────────────────────
+
+  function getShareURL() {
+    const custom = $('#share-custom-url');
+    if (custom && custom.value.trim()) return custom.value.trim();
+    // Auto-detect: use current page URL
+    return window.location.origin;
+  }
+
+  function generateShareQR() {
+    const container = $('#qr-code-container');
+    const urlText = $('#share-url-text');
+    const url = getShareURL();
+
+    try {
+      const svg = QRCode.toSVG(url, {
+        moduleSize: 8,
+        margin: 3,
+        dark: '#000000',
+        light: '#ffffff',
+      });
+      container.innerHTML = svg;
+      urlText.textContent = url;
+    } catch (e) {
+      container.innerHTML = '<p style="color:#ff6b6b;">URL too long for QR code</p>';
+      urlText.textContent = url;
+    }
+  }
+
+  function initShare() {
+    const copyBtn = $('#share-copy-btn');
+    const regenBtn = $('#share-regenerate-btn');
+
+    copyBtn.addEventListener('click', () => {
+      const url = getShareURL();
+      navigator.clipboard.writeText(url).then(() => {
+        showToast('URL copied to clipboard');
+      }).catch(() => {
+        // Fallback for older browsers
+        const ta = document.createElement('textarea');
+        ta.value = url;
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        showToast('URL copied to clipboard');
+      });
+    });
+
+    regenBtn.addEventListener('click', generateShareQR);
+  }
+
   // ─── Settings ────────────────────────────────────
 
   function initSettings() {
@@ -1175,6 +1231,9 @@
         } else if (view === 'series') {
           navigateTo('series');
           loadHome('series');
+        } else if (view === 'share') {
+          navigateTo('share');
+          generateShareQR();
         } else {
           navigateTo('home');
           loadHome();
@@ -1190,6 +1249,9 @@
 
     // Settings
     initSettings();
+
+    // Share / QR Code
+    initShare();
 
     // Casting (Chromecast / AirPlay)
     initCasting();

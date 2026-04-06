@@ -167,6 +167,51 @@
         </div>
       </div>
 
+      <!-- Share / QR Code View -->
+      <div id="view-share" class="view">
+        <div class="share-panel">
+          <div class="share-header">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>
+              <rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="3" height="3"/>
+              <path d="M20 14v3h-3M20 20h-3v-3"/>
+            </svg>
+            <h2>Share via QR Code</h2>
+            <p class="share-subtitle">Scan this code on any device connected to the VPN</p>
+          </div>
+
+          <div id="qr-code-container" class="qr-container">
+            <div class="spinner"></div>
+            <p>Generating QR code...</p>
+          </div>
+
+          <div id="share-url-display" class="share-url-box">
+            <span id="share-url-text"></span>
+            <button id="share-copy-btn" class="btn-sm" aria-label="Copy URL">Copy</button>
+          </div>
+
+          <div class="share-info">
+            <div class="share-info-item">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+              <span>Only accessible within your VPN network</span>
+            </div>
+            <div class="share-info-item">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.55a11 11 0 0114.08 0M1.42 9a16 16 0 0121.16 0M8.53 16.11a6 6 0 016.95 0M12 20h.01"/></svg>
+              <span>Both devices must be on the same WireGuard VPN</span>
+            </div>
+          </div>
+
+          <div class="setting-group" style="margin-top: 24px;">
+            <label>Custom URL</label>
+            <div class="setting-row">
+              <input type="text" id="share-custom-url" placeholder="e.g. http://10.0.0.5:8080">
+              <button id="share-regenerate-btn" class="btn-sm">Generate</button>
+            </div>
+            <span class="setting-hint">Override the auto-detected address if needed</span>
+          </div>
+        </div>
+      </div>
+
       <!-- Player View -->
       <div id="view-player" class="view">
         <div id="player-container">
@@ -207,9 +252,14 @@
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="15" rx="2" ry="2"/><polyline points="17 2 12 7 7 2"/></svg>
         <span>Series</span>
       </button>
+      <button class="nav-btn" data-view="share">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3M20 14v7h-7"/></svg>
+        <span>Share</span>
+      </button>
     </nav>
   </div>
 
+  <script defer src="/js/qrcode.js"></script>
   <script defer src="/js/api.js"></script>
   <script defer src="/js/app.js"></script>
 </body>

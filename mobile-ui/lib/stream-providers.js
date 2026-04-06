@@ -348,7 +348,7 @@ function filterAndRank(streams) {
   // Tag each stream with format info
   for (const s of filtered) {
     s.format = detectFormat(s.title);
-    s.browserPlayable = s.format === 'MP4' || s.format === 'WebM';
+    s.browserPlayable = s.format === 'MP4' || s.format === 'WebM' || s.format === 'MKV';
     // Add format to the display title
     if (s.format !== 'Unknown') {
       s.title = s.title.replace(/\n/, ` [${s.format}]\n`);

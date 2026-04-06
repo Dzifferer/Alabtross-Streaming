@@ -248,6 +248,30 @@ app.get('/api/play/:infoHash', rateLimit, (req, res) => {
   getEngine().serveStream(req, res, magnet, fileIdx);
 });
 
+// GET /api/play/:infoHash/remux — stream video remuxed from MKV to MP4
+// Uses FFmpeg to copy video + transcode audio to AAC in fragmented MP4 container
+app.get('/api/play/:infoHash/remux', rateLimit, (req, res) => {
+  const { infoHash } = req.params;
+  if (!/^[0-9a-f]{40}$/i.test(infoHash)) {
+    return res.status(400).json({ error: 'Invalid infoHash' });
+  }
+  const fileIdx = req.query.fileIdx !== undefined
+    ? parseInt(req.query.fileIdx, 10)
+    : undefined;
+
+  let magnet = infoHash;
+  if (req.query.magnet) {
+    const magnetStr = req.query.magnet;
+    if (!magnetStr.startsWith('magnet:?') ||
+        !magnetStr.toLowerCase().includes(infoHash.toLowerCase())) {
+      return res.status(400).json({ error: 'Magnet URI does not match infoHash' });
+    }
+    magnet = magnetStr;
+  }
+
+  getEngine().serveRemuxedStream(req, res, magnet, fileIdx);
+});
+
 // GET /api/torrent-status/:infoHash — check download progress
 app.get('/api/torrent-status/:infoHash', (req, res) => {
   const { infoHash } = req.params;
@@ -363,6 +387,73 @@ app.get('/api/library/:id/stream', rateLimit, async (req, res) => {
     stream.on('error', () => res.end());
     res.on('close', () => stream.destroy());
   }
+});
+
+// GET /api/library/:id/stream/remux — stream a library MKV remuxed to MP4
+app.get('/api/library/:id/stream/remux', rateLimit, async (req, res) => {
+  const item = library.getItem(req.params.id);
+  if (!item) return res.status(404).json({ error: 'Item not found' });
+  if (item.status !== 'complete') {
+    return res.status(400).json({ error: 'Download not complete' });
+  }
+
+  const filePath = library.getFilePath(req.params.id);
+  if (!filePath) return res.status(404).json({ error: 'File not found' });
+
+  let stat;
+  try {
+    stat = await fs.promises.stat(filePath);
+  } catch {
+    return res.status(404).json({ error: 'File not found on disk' });
+  }
+
+  const safeFilename = path.basename(filePath).replace(/[^\w\s.\-()[\]]/g, '_').replace(/\.mkv$/i, '.mp4').substring(0, 200);
+  const { spawn } = require('child_process');
+
+  res.status(200);
+  res.set({
+    'Content-Type': 'video/mp4',
+    'X-Content-Type-Options': 'nosniff',
+    'Content-Disposition': `inline; filename="${safeFilename}"`,
+    'Cache-Control': 'no-store',
+    'Transfer-Encoding': 'chunked',
+  });
+
+  const ffmpeg = spawn('ffmpeg', [
+    '-i', filePath,
+    '-c:v', 'copy',
+    '-c:a', 'aac',
+    '-b:a', '192k',
+    '-movflags', 'frag_keyframe+empty_moov+faststart',
+    '-f', 'mp4',
+    '-loglevel', 'warning',
+    'pipe:1',
+  ]);
+
+  ffmpeg.stdout.pipe(res);
+
+  ffmpeg.stderr.on('data', (data) => {
+    const msg = data.toString().trim();
+    if (msg) console.log(`[FFmpeg/Library] ${msg}`);
+  });
+
+  ffmpeg.on('error', (err) => {
+    console.error(`[Library] FFmpeg spawn error: ${err.message}`);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Remux failed — FFmpeg not available' });
+    }
+  });
+
+  ffmpeg.on('close', (code) => {
+    if (code && code !== 0 && code !== 255) {
+      console.warn(`[Library] FFmpeg exited with code ${code}`);
+    }
+    res.end();
+  });
+
+  res.on('close', () => {
+    ffmpeg.kill('SIGTERM');
+  });
 });
 
 // ─── IPTV / Live TV Endpoints ─────────────────────────────────────────

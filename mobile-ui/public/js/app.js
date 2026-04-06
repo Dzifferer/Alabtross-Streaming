@@ -1135,7 +1135,7 @@
       if (statusInterval) clearInterval(statusInterval);
       let hint = escapeHTML(e.message);
       if (e.message.includes('Media error') || e.message.includes('no supported source')) {
-        hint += '<br><span style="font-size:12px">The file may be MKV format — browsers only support MP4/WebM</span>';
+        hint += '<br><span style="font-size:12px">The file format may not be supported by your browser</span>';
       }
       dom.playerOverlay.innerHTML = `
         <p style="color:var(--danger)">Playback failed</p>
@@ -1366,7 +1366,19 @@
     `;
 
     try {
-      const url = `/api/library/${encodeURIComponent(id)}/stream`;
+      // Fetch item info to check if MKV remuxing is needed
+      let isMkv = false;
+      try {
+        const infoResp = await fetch(`/api/library/${encodeURIComponent(id)}`);
+        if (infoResp.ok) {
+          const info = await infoResp.json();
+          isMkv = info.fileName && /\.mkv$/i.test(info.fileName);
+        }
+      } catch (_) { /* fall through to direct stream */ }
+
+      const url = isMkv
+        ? `/api/library/${encodeURIComponent(id)}/stream/remux`
+        : `/api/library/${encodeURIComponent(id)}/stream`;
       dom.videoPlayer.src = url;
       dom.videoPlayer.load();
 
@@ -1392,7 +1404,7 @@
     } catch (e) {
       let hint = escapeHTML(e.message);
       if (e.message.includes('Media error')) {
-        hint += '<br><span style="font-size:12px">The file may be MKV format — browsers only support MP4/WebM</span>';
+        hint += '<br><span style="font-size:12px">The file format may not be supported by your browser</span>';
       }
       dom.playerOverlay.innerHTML = `
         <p style="color:var(--danger)">Playback failed</p>

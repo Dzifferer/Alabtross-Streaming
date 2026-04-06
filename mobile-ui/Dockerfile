@@ -1,5 +1,8 @@
 FROM node:20-alpine
 
+# Install FFmpeg for MKV→MP4 remuxing (container-level copy, no re-encoding)
+RUN apk add --no-cache ffmpeg
+
 WORKDIR /app
 
 COPY package.json package-lock.json* ./

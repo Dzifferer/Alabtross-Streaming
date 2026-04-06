@@ -44,6 +44,10 @@
     detailContent: $('#detail-content'),
     videoPlayer: $('#video-player'),
     playerOverlay: $('#player-overlay'),
+    castBtn: $('#cast-btn'),
+    castOverlay: $('#cast-overlay'),
+    castDeviceName: $('#cast-device-name'),
+    castStopBtn: $('#cast-stop-btn'),
     bottomNav: $('#bottom-nav'),
     navBtns: $$('.nav-btn'),
     // Settings
@@ -1136,6 +1140,83 @@
     return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
+  // ─── Casting ─────────────────────────────────────
+
+  const castState = { available: false, active: false };
+
+  function initCasting() {
+    const video = dom.videoPlayer;
+
+    // Remote Playback API — supported in Chrome, Edge, Safari (Chromecast + AirPlay)
+    if (!video.remote) {
+      // Fallback: if the browser doesn't support Remote Playback API, keep button hidden
+      return;
+    }
+
+    // Disable the default browser remote playback prompt that some browsers show
+    // so we control the UX through our own button
+    video.disableRemotePlayback = false;
+
+    // Watch for device availability
+    video.remote.watchAvailability((available) => {
+      castState.available = available;
+      dom.castBtn.classList.toggle('hidden', !available);
+    }).catch(() => {
+      // watchAvailability not supported — show button and let prompt() fail gracefully
+      castState.available = true;
+      dom.castBtn.classList.remove('hidden');
+    });
+
+    // Cast button: prompt device picker
+    dom.castBtn.addEventListener('click', async () => {
+      try {
+        await video.remote.prompt();
+      } catch (e) {
+        if (e.name !== 'NotAllowedError') {
+          showToast('No cast devices found');
+        }
+      }
+    });
+
+    // Track connection state changes
+    video.remote.addEventListener('connecting', () => {
+      dom.castBtn.classList.add('casting');
+      dom.castDeviceName.textContent = 'Connecting to device...';
+      dom.castOverlay.classList.remove('hidden');
+    });
+
+    video.remote.addEventListener('connect', () => {
+      castState.active = true;
+      dom.castBtn.classList.add('casting');
+      dom.castDeviceName.textContent = 'Casting to device';
+      dom.castOverlay.classList.remove('hidden');
+      showToast('Connected — casting to device');
+    });
+
+    video.remote.addEventListener('disconnect', () => {
+      castState.active = false;
+      dom.castBtn.classList.remove('casting');
+      dom.castOverlay.classList.add('hidden');
+      showToast('Casting stopped');
+    });
+
+    // Stop casting button
+    dom.castStopBtn.addEventListener('click', () => {
+      try {
+        // Pause the remote playback — the connection will trigger disconnect
+        video.pause();
+        if (video.remote.state === 'connected') {
+          video.remote.prompt(); // re-opening prompt allows disconnecting
+        }
+      } catch {
+        // Fallback — just hide overlay
+        castState.active = false;
+        dom.castBtn.classList.remove('casting');
+        dom.castOverlay.classList.add('hidden');
+      }
+    });
+  }
+
   // ─── Init ────────────────────────────────────────
 
   function init() {
@@ -1171,6 +1252,9 @@
 
     // Share / QR Code
     initShare();
+
+    // Casting (Chromecast / AirPlay)
+    initCasting();
 
     // Apply theme based on current mode
     applyTheme(api.getMode());

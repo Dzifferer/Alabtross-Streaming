@@ -70,7 +70,7 @@ app.use((req, res, next) => {
     "script-src 'self'",
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' https: data:",
-    "connect-src 'self' https://v3-cinemeta.strem.io https://torrentio.strem.io https://*.strem.io",
+    "connect-src 'self' https://v3-cinemeta.strem.io https://torrentio.strem.io https://*.strem.io https://*.stremio.com",
     "media-src 'self' blob: http: https:",
     "frame-ancestors 'none'",
   ].join('; '));

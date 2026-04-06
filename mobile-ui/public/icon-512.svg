@@ -1,5 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
   <rect width="512" height="512" rx="100" fill="#0a0a0f"/>
-  <circle cx="256" cy="256" r="160" fill="none" stroke="#6c5ce7" stroke-width="12"/>
-  <polygon points="218,180 338,256 218,332" fill="#6c5ce7"/>
+  <!-- Z shape -->
+  <path d="M148 132 L364 132 L148 380 L364 380" fill="none" stroke="#6c5ce7" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Vertical line through Z (money sign style) -->
+  <line x1="256" y1="85" x2="256" y2="427" stroke="#6c5ce7" stroke-width="18" stroke-linecap="round"/>
 </svg>

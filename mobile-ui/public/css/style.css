@@ -840,6 +840,56 @@ html, body {
   border-color: var(--accent);
 }
 
+.stream-item.selected {
+  background: var(--bg-elevated);
+  border-color: var(--accent);
+  border-width: 2px;
+}
+
+.stream-action-bar {
+  position: fixed;
+  bottom: 72px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 12px;
+  padding: 12px 20px;
+  background: var(--bg-card);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 16px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  z-index: 100;
+  animation: slideUp 0.2s ease-out;
+}
+
+@keyframes slideUp {
+  from { transform: translateX(-50%) translateY(20px); opacity: 0; }
+  to { transform: translateX(-50%) translateY(0); opacity: 1; }
+}
+
+.stream-action-bar button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 24px;
+  border: none;
+  border-radius: 12px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.stream-action-bar .btn-play {
+  background: var(--accent);
+  color: white;
+}
+
+.stream-action-bar .btn-library {
+  background: rgba(255,255,255,0.1);
+  color: var(--text-primary);
+}
+
 .stream-icon {
   width: 40px;
   height: 40px;

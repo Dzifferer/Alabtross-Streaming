@@ -27,88 +27,86 @@
   --safe-bottom: env(safe-area-inset-bottom, 0px);
 }
 
-/* ===== Custom Mode — Movie Theater Theme ===== */
+/* ===== Custom Mode — British Racing Green Theme ===== */
 .theme-custom {
-  --bg: #080404;
-  --bg-card: #150909;
-  --bg-elevated: #1e0c0c;
-  --bg-input: #160909;
-  --text: #f0e6e6;
-  --text-dim: #a08080;
-  --text-muted: #6b4545;
-  --accent: #8b0000;
-  --accent-glow: rgba(139, 0, 0, 0.35);
+  --bg: #040a06;
+  --bg-card: #091509;
+  --bg-elevated: #0c1e0e;
+  --bg-input: #091609;
+  --text: #e6f0e8;
+  --text-dim: #80a085;
+  --text-muted: #456b48;
+  --accent: #004225;
+  --accent-glow: rgba(0, 66, 37, 0.35);
 }
 
-/* Curtain side decorations — deep velvet drapes */
+/* Subtle side accents */
 .theme-custom #content {
   background:
     linear-gradient(90deg,
-      rgba(100, 5, 5, 0.4) 0%,
-      rgba(80, 5, 5, 0.15) 2.5%,
-      rgba(60, 5, 5, 0.06) 5%,
-      transparent 8%
+      rgba(0, 66, 37, 0.25) 0%,
+      rgba(0, 50, 28, 0.1) 2.5%,
+      transparent 5%
     ),
     linear-gradient(270deg,
-      rgba(100, 5, 5, 0.4) 0%,
-      rgba(80, 5, 5, 0.15) 2.5%,
-      rgba(60, 5, 5, 0.06) 5%,
-      transparent 8%
+      rgba(0, 66, 37, 0.25) 0%,
+      rgba(0, 50, 28, 0.1) 2.5%,
+      transparent 5%
     ),
     var(--bg);
 }
 
-/* Curtain valance on top bar */
+/* Top bar */
 .theme-custom #top-bar {
-  background: linear-gradient(180deg, #1a0404 0%, var(--bg) 100%);
-  border-bottom: 2px solid rgba(120, 5, 5, 0.5);
-  box-shadow: 0 2px 16px rgba(100, 0, 0, 0.2);
+  background: linear-gradient(180deg, #041a0a 0%, var(--bg) 100%);
+  border-bottom: 1px solid rgba(0, 80, 40, 0.4);
+  box-shadow: 0 2px 12px rgba(0, 40, 20, 0.2);
 }
 
-/* Gold title text for theater feel */
+/* Silver title text */
 .theme-custom #page-title {
-  background: linear-gradient(135deg, #c4952e, #e8c560, #c4952e);
+  background: linear-gradient(135deg, #b0c4b8, #dce8e0, #b0c4b8);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
 }
 
-/* Curtain drape on bottom nav */
+/* Bottom nav */
 .theme-custom #bottom-nav {
-  background: linear-gradient(0deg, #080404 60%, #120606 100%);
-  border-top: 2px solid rgba(120, 5, 5, 0.4);
+  background: linear-gradient(0deg, #040a06 60%, #061206 100%);
+  border-top: 1px solid rgba(0, 80, 40, 0.3);
 }
 
 .theme-custom .nav-btn.active {
-  color: #c4952e;
+  color: #4caf6a;
 }
 
-/* Cards get a theater poster frame — dark red edge + shadow */
+/* Cards */
 .theme-custom .card-poster {
-  border: 1px solid rgba(100, 5, 5, 0.4);
-  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.6);
+  border: 1px solid rgba(0, 66, 37, 0.3);
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.5);
 }
 
 /* Stream items in custom mode */
 .theme-custom .stream-icon {
-  background: rgba(100, 5, 5, 0.25);
+  background: rgba(0, 66, 37, 0.25);
 }
 
 .theme-custom .stream-icon svg {
-  color: #c4952e;
+  color: #4caf6a;
 }
 
 .theme-custom .stream-item:active {
-  border-color: #8b0000;
+  border-color: #004225;
 }
 
-/* Season tabs in theater mode */
+/* Season tabs */
 .theme-custom .season-tab.active {
-  background: #8b0000;
-  border-color: #8b0000;
+  background: #004225;
+  border-color: #004225;
 }
 
-/* Detail hero gets a vignette */
+/* Detail hero vignette */
 .theme-custom .detail-hero-gradient {
   background: linear-gradient(transparent 20%, var(--bg));
 }
@@ -117,62 +115,62 @@
   content: '';
   position: absolute;
   inset: 0;
-  background: radial-gradient(ellipse at center, transparent 40%, rgba(8, 4, 4, 0.7) 100%);
+  background: radial-gradient(ellipse at center, transparent 40%, rgba(4, 10, 6, 0.7) 100%);
   z-index: 1;
   pointer-events: none;
 }
 
-/* Rating stars go gold */
+/* Rating stars */
 .theme-custom .detail-tag.rating {
-  background: rgba(196, 149, 46, 0.15);
-  color: #c4952e;
+  background: rgba(76, 175, 106, 0.15);
+  color: #4caf6a;
 }
 
 /* Catalog row titles */
 .theme-custom .catalog-row-title {
-  color: #f0e6e6;
+  color: #e6f0e8;
 }
 
-/* Search bar in theater mode */
+/* Search bar */
 .theme-custom .search-input-wrap:focus-within {
-  border-color: #8b0000;
-  box-shadow: 0 0 0 3px rgba(139, 0, 0, 0.25);
+  border-color: #004225;
+  box-shadow: 0 0 0 3px rgba(0, 66, 37, 0.25);
 }
 
-/* Mode toggle slider goes deep red */
+/* Mode toggle slider */
 .theme-custom .mode-slider {
-  background: #8b0000;
+  background: #004225;
 }
 
-/* Source icons go gold */
+/* Source icons */
 .theme-custom .source-icon {
-  color: #c4952e;
-  background: rgba(196, 149, 46, 0.08);
+  color: #4caf6a;
+  background: rgba(0, 66, 37, 0.15);
 }
 
 /* Spinner in custom mode */
 .theme-custom .spinner {
-  border-top-color: #8b0000;
+  border-top-color: #004225;
 }
 
 /* Toast in custom mode */
 .theme-custom .toast {
-  background: #1e0c0c;
-  border-color: rgba(100, 5, 5, 0.4);
+  background: #0c1e0e;
+  border-color: rgba(0, 66, 37, 0.4);
 }
 
 /* Settings buttons */
 .theme-custom .btn-sm {
-  background: #8b0000;
+  background: #004225;
 }
 
 .theme-custom .setting-row input:focus {
-  border-color: #8b0000;
+  border-color: #004225;
 }
 
-/* VPN banner blends with theater */
+/* VPN banner */
 .theme-custom .vpn-banner {
-  background: linear-gradient(135deg, #6b0000, #4a0000) !important;
+  background: linear-gradient(135deg, #003318, #002210) !important;
 }
 
 html, body {

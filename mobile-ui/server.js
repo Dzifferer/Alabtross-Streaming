@@ -312,6 +312,7 @@ async function lookupCollectionForImdbId(imdbId) {
     return entry;
   } catch (e) {
     console.warn(`[Collections] TMDB lookup failed for ${imdbId}:`, e.message);
+    collectionCache[imdbId] = null;
     return null;
   }
 }
@@ -361,9 +362,7 @@ app.get('/api/collections/enrich', rateLimit, async (req, res) => {
     }
 
     // Store per-movie metadata (genres, year) for genre grouping
-    if (entry) {
-      movieMeta[id] = { genres: entry.genres || [], year: entry.year || '' };
-    }
+    movieMeta[id] = { genres: entry?.genres || [], year: entry?.year || '' };
 
     if (!entry || !entry.collectionId) continue;
     const key = String(entry.collectionId);

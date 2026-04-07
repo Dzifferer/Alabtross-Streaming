@@ -138,7 +138,9 @@ class StremioAPI {
       return cached;
     }
 
-    const resp = await fetch('/api/addon-proxy?url=' + encodeURIComponent(addonUrl + '/manifest.json'));
+    const resp = await fetch('/api/addon-proxy?url=' + encodeURIComponent(addonUrl + '/manifest.json'), {
+      signal: AbortSignal.timeout(8000),
+    });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const data = await resp.json();
     this._manifestCache.set(addonUrl, data);
@@ -179,7 +181,9 @@ class StremioAPI {
     addonPath += '.json';
 
     try {
-      const resp = await fetch('/api/addon-proxy?url=' + encodeURIComponent(addonPath));
+      const resp = await fetch('/api/addon-proxy?url=' + encodeURIComponent(addonPath), {
+        signal: AbortSignal.timeout(8000),
+      });
       if (!resp.ok) return [];
       const data = await resp.json();
       return (data.metas || []).slice(0, 50);
@@ -771,7 +775,9 @@ class StremioAPI {
       const allChannels = [];
       for (const catalog of tvCatalogs.slice(0, 5)) {
         try {
-          const resp = await fetch('/api/addon-proxy?url=' + encodeURIComponent(`${addonUrl}/catalog/tv/${catalog.id}.json`));
+          const resp = await fetch('/api/addon-proxy?url=' + encodeURIComponent(`${addonUrl}/catalog/tv/${catalog.id}.json`), {
+            signal: AbortSignal.timeout(8000),
+          });
           if (!resp.ok) continue;
           const data = await resp.json();
           const metas = data.metas || [];

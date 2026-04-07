@@ -437,6 +437,44 @@ html, body {
   to { transform: rotate(360deg); }
 }
 
+.spinner-sm {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255,255,255,0.1);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  vertical-align: middle;
+}
+
+.row-loading {
+  padding: 24px 16px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.livetv-error-state {
+  padding: 20px 16px;
+  color: var(--text-dim);
+  font-size: 14px;
+  text-align: center;
+}
+
+.livetv-error-state p {
+  margin-bottom: 12px;
+}
+
+.livetv-error-state .btn-sm {
+  background: var(--accent);
+  color: var(--text);
+  border: none;
+  padding: 8px 20px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 13px;
+}
+
 /* ===== Catalog Rows (Home) ===== */
 .catalog-row {
   margin-bottom: 28px;

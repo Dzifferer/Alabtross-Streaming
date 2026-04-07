@@ -628,7 +628,7 @@ function fetchUrl(url, redirectCount = 0) {
   }
   return new Promise((resolve, reject) => {
     const mod = url.startsWith('https') ? https : http;
-    const req = mod.get(url, { headers: { 'User-Agent': 'Alabtross/1.0' }, timeout: 15000 }, (res) => {
+    const req = mod.get(url, { headers: { 'User-Agent': 'Alabtross/1.0' }, timeout: 8000 }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         return fetchUrl(res.headers.location, redirectCount + 1).then(resolve, reject);
       }

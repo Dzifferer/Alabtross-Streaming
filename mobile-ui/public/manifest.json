@@ -1,7 +1,7 @@
 {
-  "name": "Alabtross Mobile",
-  "short_name": "Alabtross",
-  "description": "Mobile streaming interface for your Alabtross server",
+  "name": "Albatross Mobile",
+  "short_name": "Albatross",
+  "description": "Mobile streaming interface for your Albatross server",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0a0a0f",

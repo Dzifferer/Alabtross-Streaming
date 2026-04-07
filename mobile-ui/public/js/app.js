@@ -1,5 +1,5 @@
 /**
- * Alabtross Mobile — Main Application
+ * Albatross Mobile — Main Application
  *
  * Mobile-first streaming interface with:
  * - Auto stream speed testing (picks fastest source)
@@ -276,7 +276,7 @@
     dom.backBtn.classList.toggle('hidden', !showBack);
 
     const titles = {
-      'home': 'Alabtross',
+      'home': 'Albatross',
       'movies': 'Movies',
       'series': 'Series',
       'search': 'Search',
@@ -286,7 +286,7 @@
       'share': 'Share',
       'player': 'Now Playing',
     };
-    dom.pageTitle.textContent = titles[view] || 'Alabtross';
+    dom.pageTitle.textContent = titles[view] || 'Albatross';
 
     // Show/hide top bar in player
     const hideTop = view === 'player';
@@ -353,7 +353,7 @@
       if (tvGroups.length > 0) {
         for (const group of tvGroups) {
           const tvRow = document.createElement('div');
-          tvRow.className = 'catalog-row fade-in';
+          tvRow.className = 'catalog-row';
           tvRow.innerHTML = `
             <div class="catalog-row-header">
               <h3 class="catalog-row-title">${escapeHTML(group.sourceName)}</h3>
@@ -371,7 +371,7 @@
       } else {
         const sources = api.getLiveTVSources();
         const tvRow = document.createElement('div');
-        tvRow.className = 'catalog-row fade-in';
+        tvRow.className = 'catalog-row';
         if (sources.length > 0) {
           tvRow.innerHTML = `
             <div class="catalog-row-header">
@@ -413,7 +413,7 @@
 
     if (recent.length > 0) {
       const recentRow = document.createElement('div');
-      recentRow.className = 'catalog-row fade-in';
+      recentRow.className = 'catalog-row';
       recentRow.innerHTML = `
         <div class="catalog-row-header">
           <h3 class="catalog-row-title">Recently Played</h3>
@@ -428,7 +428,7 @@
     // Render a placeholder immediately, then fill it when data arrives.
     const tvContainer = document.createElement('div');
     tvContainer.id = 'home-livetv-section';
-    tvContainer.className = 'catalog-row fade-in';
+    tvContainer.className = 'catalog-row';
     tvContainer.innerHTML = `
       <div class="catalog-row-header">
         <h3 class="catalog-row-title">Live TV</h3>
@@ -440,7 +440,7 @@
 
     // Movie and Series placeholders below Live TV
     const moviePlaceholder = document.createElement('div');
-    moviePlaceholder.className = 'catalog-row fade-in';
+    moviePlaceholder.className = 'catalog-row';
     moviePlaceholder.innerHTML = `
       <div class="catalog-row-header"><h3 class="catalog-row-title">Movies</h3></div>
       <div class="catalog-scroll"><div class="row-loading"><div class="spinner-sm"></div> Loading...</div></div>
@@ -448,7 +448,7 @@
     dom.homeCatalogs.appendChild(moviePlaceholder);
 
     const seriesPlaceholder = document.createElement('div');
-    seriesPlaceholder.className = 'catalog-row fade-in';
+    seriesPlaceholder.className = 'catalog-row';
     seriesPlaceholder.innerHTML = `
       <div class="catalog-row-header"><h3 class="catalog-row-title">Shows</h3></div>
       <div class="catalog-scroll"><div class="row-loading"><div class="spinner-sm"></div> Loading...</div></div>
@@ -523,7 +523,7 @@
         // Append additional groups as separate rows after tvContainer
         for (let i = 1; i < tvGroups.length; i++) {
           const extraRow = document.createElement('div');
-          extraRow.className = 'catalog-row fade-in';
+          extraRow.className = 'catalog-row';
           extraRow.innerHTML = `
             <div class="catalog-row-header">
               <h3 class="catalog-row-title">${escapeHTML(tvGroups[i].sourceName)}</h3>
@@ -608,7 +608,7 @@
     if (items.length === 0) return;
 
     const row = document.createElement('div');
-    row.className = 'catalog-row fade-in';
+    row.className = 'catalog-row';
 
     const displayName = catalog.name.charAt(0).toUpperCase() + catalog.name.slice(1);
     const typeLabel = catalog.type === 'movie' ? 'Movies' : 'Series';
@@ -1602,19 +1602,25 @@
     const alreadyWarmed = preload.isWarmed(stream);
     preload.cancel(); // stop background fetch — playback takes over now
 
-    // Build loading screen with poster
+    // Build stage curtain loading screen with poster
     const poster = state.currentMeta?.poster || '';
     const title = state.currentMeta?.name || '';
     const statusLabel = alreadyWarmed
       ? 'Starting playback...'
       : (stream.infoHash ? 'Connecting to torrent peers...' : 'Loading stream...');
     dom.playerOverlay.innerHTML = `
-      ${poster ? `<img class="loading-poster" src="${poster}" alt="">` : ''}
-      <div class="loading-info">
-        ${title ? `<div class="loading-title">${escapeHTML(title)}</div>` : ''}
-        <div class="loading-bar-container"><div class="loading-bar"></div></div>
-        <div class="loading-status">${statusLabel}</div>
-        ${stream.infoHash && !alreadyWarmed ? '<div class="loading-sub">This may take 30-60 seconds</div>' : ''}
+      <div class="curtain-stage dropping">
+        <div class="curtain-valance"></div>
+        <div class="curtain-lights"></div>
+        <div class="curtain-poster-wrap">
+          ${poster ? `<img src="${poster}" alt="">` : ''}
+          ${title ? `<div class="curtain-poster-title">${escapeHTML(title)}</div>` : ''}
+          <div class="curtain-loading-bar"><div class="loading-bar"></div></div>
+          <div class="curtain-poster-status loading-status">${statusLabel}</div>
+          ${stream.infoHash && !alreadyWarmed ? '<div class="curtain-poster-status" style="opacity:0.5">This may take 30-60 seconds</div>' : ''}
+        </div>
+        <div class="curtain-panel curtain-panel-left"></div>
+        <div class="curtain-panel curtain-panel-right"></div>
       </div>
     `;
 
@@ -1667,7 +1673,18 @@
 
       if (statusInterval) clearInterval(statusInterval);
       await dom.videoPlayer.play();
-      dom.playerOverlay.classList.add('hidden');
+
+      // Open the curtains to reveal the video
+      const curtainStage = dom.playerOverlay.querySelector('.curtain-stage');
+      if (curtainStage) {
+        curtainStage.classList.add('opening');
+        // Remove overlay after curtain animation completes
+        setTimeout(() => {
+          dom.playerOverlay.classList.add('hidden');
+        }, 1400);
+      } else {
+        dom.playerOverlay.classList.add('hidden');
+      }
 
       // Mid-playback stall detection — re-show overlay during rebuffering
       const onStalled = () => {
@@ -2661,7 +2678,7 @@
       return;
     }
 
-    const title = state.currentMeta?.name || 'Alabtross';
+    const title = state.currentMeta?.name || 'Albatross';
     showToast(`Casting to ${device.friendlyName}...`);
 
     try {
@@ -2858,6 +2875,57 @@
     checkVPNStatus()
       .then(result => { if (!result.connected) showVPNWarning(); })
       .catch(() => showVPNWarning());
+
+    // Staggered card reveal — IntersectionObserver for catalog rows
+    const rowObserver = new IntersectionObserver((entries) => {
+      entries.forEach(e => {
+        if (e.isIntersecting) {
+          e.target.classList.add('visible');
+          rowObserver.unobserve(e.target);
+        }
+      });
+    }, { threshold: 0.1 });
+
+    // Observe catalog rows as they get added to the DOM
+    const catalogObserver = new MutationObserver((mutations) => {
+      mutations.forEach(m => {
+        m.addedNodes.forEach(node => {
+          if (node.nodeType === 1 && node.classList.contains('catalog-row')) {
+            rowObserver.observe(node);
+          }
+        });
+      });
+    });
+    catalogObserver.observe(dom.homeCatalogs, { childList: true });
+
+    // Button ripple effect
+    document.getElementById('app').addEventListener('click', (e) => {
+      const target = e.target.closest('.btn-sm, .nav-btn, .filter-chip, .btn-block');
+      if (!target) return;
+      target.style.position = target.style.position || 'relative';
+      target.style.overflow = 'hidden';
+      const rect = target.getBoundingClientRect();
+      const size = Math.max(rect.width, rect.height) * 2;
+      const ripple = document.createElement('span');
+      ripple.className = 'ripple';
+      ripple.style.width = ripple.style.height = size + 'px';
+      ripple.style.left = (e.clientX - rect.left - size / 2) + 'px';
+      ripple.style.top = (e.clientY - rect.top - size / 2) + 'px';
+      target.appendChild(ripple);
+      ripple.addEventListener('animationend', () => ripple.remove());
+    });
+
+    // Parallax hero on detail view scroll
+    const contentEl = document.getElementById('content');
+    contentEl.addEventListener('scroll', () => {
+      if (state.currentView !== 'detail') return;
+      const heroImg = document.querySelector('.detail-hero img');
+      if (!heroImg) return;
+      requestAnimationFrame(() => {
+        const scrollTop = contentEl.scrollTop;
+        heroImg.style.transform = `scale(${1 + scrollTop * 0.0003}) translateY(${scrollTop * 0.3}px)`;
+      });
+    });
 
     // Expose for inline handlers
     window.app = { goBack };

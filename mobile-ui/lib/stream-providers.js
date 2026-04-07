@@ -1,5 +1,5 @@
 /**
- * Alabtross — Custom Stream Providers
+ * Albatross — Custom Stream Providers
  *
  * Providers (in priority order):
  *   - Torrentio       — Primary, pre-indexed torrent database (no Cloudflare)

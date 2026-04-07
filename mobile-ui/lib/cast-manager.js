@@ -72,7 +72,7 @@ function soapAction(controlUrl, action, bodyXml) {
  * @param {string} title - Display title for the media
  * @param {string} mimeType - MIME type (e.g. 'video/mp4')
  */
-async function castToDLNA(device, mediaUrl, title = 'Alabtross', mimeType = 'video/mp4') {
+async function castToDLNA(device, mediaUrl, title = 'Albatross', mimeType = 'video/mp4') {
   const controlUrl = await getAVTransportControlURL(device.location);
   console.log(`[Cast] DLNA control URL: ${controlUrl}`);
 
@@ -234,7 +234,7 @@ try {
 /**
  * Cast a media URL to a Chromecast device
  */
-async function castToChromecast(device, mediaUrl, title = 'Alabtross', mimeType = 'video/mp4') {
+async function castToChromecast(device, mediaUrl, title = 'Albatross', mimeType = 'video/mp4') {
   if (!castv2Available) {
     throw new Error('castv2-client not installed — run: npm install castv2-client');
   }

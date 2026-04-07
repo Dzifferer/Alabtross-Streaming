@@ -1,5 +1,5 @@
 /**
- * Alabtross Mobile — Streaming API Layer
+ * Albatross Mobile — Streaming API Layer
  *
  * Unified mode: fetches streams from both direct torrent scrapers (YTS/EZTV/1337x)
  * and configured Stremio addons, merged into a single list.

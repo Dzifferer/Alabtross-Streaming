@@ -1,5 +1,5 @@
 [Unit]
-Description=Alabtross Mobile UI (Docker)
+Description=Albatross Mobile UI (Docker)
 After=docker.service network-online.target
 Requires=docker.service
 Wants=network-online.target

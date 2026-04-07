@@ -1144,12 +1144,17 @@
     return html;
   }
 
-  function renderEpisodes(videos, season) {
+  const EPISODES_PER_PAGE = 50;
+
+  function renderEpisodes(videos, season, offset = 0) {
     const eps = videos
       .filter(v => v.season === season)
       .sort((a, b) => (a.episode || 0) - (b.episode || 0));
 
-    return eps.map(ep => `
+    const slice = eps.slice(offset, offset + EPISODES_PER_PAGE);
+    const remaining = eps.length - offset - EPISODES_PER_PAGE;
+
+    let html = slice.map(ep => `
       <div class="episode-item" data-id="${ep.id}" data-season="${ep.season}" data-episode="${ep.episode}">
         <div class="episode-num">${ep.episode || '?'}</div>
         <div class="episode-info">
@@ -1161,6 +1166,14 @@
         </svg>
       </div>
     `).join('');
+
+    if (remaining > 0) {
+      html += `<button class="load-more-episodes" data-season="${season}" data-offset="${offset + EPISODES_PER_PAGE}">
+        Load More (${remaining} remaining)
+      </button>`;
+    }
+
+    return html;
   }
 
   function attachSeriesHandlers(meta) {
@@ -1181,6 +1194,21 @@
       });
     });
 
+    // Event delegation for "Load More" episodes button
+    const episodeList = document.getElementById('episode-list');
+    if (episodeList) {
+      episodeList.addEventListener('click', (e) => {
+        const btn = e.target.closest('.load-more-episodes');
+        if (!btn) return;
+        const season = parseInt(btn.dataset.season, 10);
+        const offset = parseInt(btn.dataset.offset, 10);
+        const moreHtml = renderEpisodes(meta.videos, season, offset);
+        btn.insertAdjacentHTML('beforebegin', moreHtml);
+        btn.remove();
+        attachEpisodeHandlers();
+      });
+    }
+
     attachEpisodeHandlers();
   }
 
@@ -1200,7 +1228,21 @@
         const showId = state.currentMeta
           ? (state.currentMeta.imdb_id || state.currentMeta.id)
           : id;
-        loadStreams('series', showId, { season, episode });
+
+        // Compute absolute episode number for anime (fansubs use absolute numbering)
+        let absoluteEpisode;
+        if (state.currentMeta && state.currentMeta.videos) {
+          const allEps = state.currentMeta.videos
+            .filter(v => v.season != null && v.episode != null)
+            .sort((a, b) => a.season - b.season || a.episode - b.episode);
+          const absIndex = allEps.findIndex(v => v.season === season && v.episode === episode);
+          if (absIndex >= 0) absoluteEpisode = absIndex + 1;
+        }
+
+        const genres = state.currentMeta && state.currentMeta.genres
+          ? state.currentMeta.genres : undefined;
+
+        loadStreams('series', showId, { season, episode, absoluteEpisode, genres });
       });
     });
   }

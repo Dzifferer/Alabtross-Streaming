@@ -499,59 +499,99 @@ async function search1337x(query) {
 
 // ─── Nyaa.si Provider (Anime) ──────────────────────
 
-async function searchNyaa(query, season, episode) {
+async function searchNyaa(query, season, episode, absoluteEpisode) {
   const streams = [];
+
+  // Use absolute episode number when available (more accurate for anime)
+  const ep = absoluteEpisode || episode;
 
   // Build search query — for anime, try title + episode number
   let searchQuery = query;
-  if (season !== undefined && episode !== undefined) {
-    // Anime uses multiple numbering conventions
-    const epPadded = String(episode).padStart(2, '0');
-    const epPadded3 = String(episode).padStart(3, '0');
-    // Try absolute episode number (most common for anime)
-    searchQuery = `${query} ${epPadded}`;
+  if (ep !== undefined) {
+    // Use 3-digit padding for episodes >= 100, 2-digit otherwise
+    const epStr = ep >= 100 ? String(ep).padStart(3, '0') : String(ep).padStart(2, '0');
+    searchQuery = `${query} ${epStr}`;
   }
 
-  // Nyaa.si RSS feed returns XML with torrent data
-  // Category 1_2 = Anime - English-translated
-  const url = `https://nyaa.si/?f=0&c=1_2&q=${encodeURIComponent(searchQuery)}&s=seeders&o=desc&page=rss`;
-  const xml = await fetchHTML(url, 12000);
-  if (!xml) {
+  // For high episode numbers, also search with alternate format in parallel
+  const searchUrls = [];
+  const baseUrl = `https://nyaa.si/?f=0&c=1_2&s=seeders&o=desc&page=rss&q=`;
+  searchUrls.push(baseUrl + encodeURIComponent(searchQuery));
+
+  if (ep !== undefined && ep >= 100) {
+    // Alternate format: "Title - 847" (common fansub convention)
+    const altQuery = `${query} - ${String(ep).padStart(3, '0')}`;
+    searchUrls.push(baseUrl + encodeURIComponent(altQuery));
+  }
+
+  // Fetch all search variants in parallel
+  const xmlResults = await Promise.all(
+    searchUrls.map(url => fetchHTML(url, 12000).catch(() => null))
+  );
+
+  if (xmlResults.every(x => !x)) {
     console.log(`[Nyaa] No response for "${searchQuery}"`);
     return streams;
   }
 
-  // Parse RSS XML manually (no cheerio needed for simple RSS)
-  const items = xml.split('<item>').slice(1);
-  for (const item of items.slice(0, 20)) {
-    const titleMatch = item.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>|<title>(.*?)<\/title>/);
-    const linkMatch = item.match(/<nyaa:infoHash>(.*?)<\/nyaa:infoHash>/);
-    const seedMatch = item.match(/<nyaa:seeders>(.*?)<\/nyaa:seeders>/);
-    const sizeMatch = item.match(/<nyaa:size>(.*?)<\/nyaa:size>/);
+  // Parse RSS XML from all results, dedup by infoHash
+  const seenHashes = new Set();
+  for (const xml of xmlResults) {
+    if (!xml) continue;
+    const items = xml.split('<item>').slice(1);
+    for (const item of items.slice(0, 40)) {
+      const titleMatch = item.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>|<title>(.*?)<\/title>/);
+      const linkMatch = item.match(/<nyaa:infoHash>(.*?)<\/nyaa:infoHash>/);
+      const seedMatch = item.match(/<nyaa:seeders>(.*?)<\/nyaa:seeders>/);
+      const sizeMatch = item.match(/<nyaa:size>(.*?)<\/nyaa:size>/);
 
-    if (!linkMatch) continue;
-    const hash = linkMatch[1].toLowerCase();
-    const title = (titleMatch ? (titleMatch[1] || titleMatch[2]) : 'Unknown').trim();
-    const seeds = seedMatch ? parseInt(seedMatch[1], 10) : 0;
-    const sizeStr = sizeMatch ? sizeMatch[1] : '';
+      if (!linkMatch) continue;
+      const hash = linkMatch[1].toLowerCase();
+      if (seenHashes.has(hash)) continue;
+      seenHashes.add(hash);
 
-    const quality = title.match(/\b(2160p|1080p|720p|480p)\b/i);
+      const title = (titleMatch ? (titleMatch[1] || titleMatch[2]) : 'Unknown').trim();
+      const seeds = seedMatch ? parseInt(seedMatch[1], 10) : 0;
+      const sizeStr = sizeMatch ? sizeMatch[1] : '';
 
-    // Detect if this is a batch/pack release
-    const isBatch = /\bbatch\b/i.test(title) || /\bcomplete\b/i.test(title) ||
-      /\d+\s*[-~]\s*\d+/.test(title) || /\bseason\s*\d/i.test(title) ||
-      /\bS\d+\b/i.test(title) && !/\bS\d+E\d+\b/i.test(title);
+      const quality = title.match(/\b(2160p|1080p|720p|480p)\b/i);
 
-    streams.push({
-      infoHash: hash,
-      title: `${title}\n${quality ? quality[1] + ' ' : ''}${sizeStr} | Seeds: ${seeds}${isBatch ? ' | BATCH' : ''}`,
-      magnetUri: buildMagnet(hash, title),
-      quality: quality ? quality[1] : '',
-      size: sizeStr,
-      seeds,
-      source: 'Nyaa',
-      isBatch,
+      // Detect if this is a batch/pack release
+      const isBatch = /\bbatch\b/i.test(title) || /\bcomplete\b/i.test(title) ||
+        /\d+\s*[-~]\s*\d+/.test(title) || /\bseason\s*\d/i.test(title) ||
+        /\bS\d+\b/i.test(title) && !/\bS\d+E\d+\b/i.test(title);
+
+      streams.push({
+        infoHash: hash,
+        title: `${title}\n${quality ? quality[1] + ' ' : ''}${sizeStr} | Seeds: ${seeds}${isBatch ? ' | BATCH' : ''}`,
+        magnetUri: buildMagnet(hash, title),
+        quality: quality ? quality[1] : '',
+        size: sizeStr,
+        seeds,
+        source: 'Nyaa',
+        isBatch,
+      });
+    }
+  }
+
+  // Post-fetch episode filtering: verify results actually match the requested episode
+  if (ep !== undefined && streams.length > 0) {
+    const epPatterns = [
+      new RegExp(`\\b0*${ep}\\b`),
+      new RegExp(`E0*${ep}\\b`, 'i'),
+      new RegExp(`-\\s*0*${ep}\\b`),
+      new RegExp(`Episode\\s*0*${ep}\\b`, 'i'),
+    ];
+    const filtered = streams.filter(s => {
+      if (s.isBatch) return true; // keep batch results
+      const t = (s.title || '').split('\n')[0];
+      return epPatterns.some(p => p.test(t));
     });
+    if (filtered.length > 0) {
+      console.log(`[Nyaa] Episode filter: ${filtered.length}/${streams.length} match ep ${ep}`);
+      streams.length = 0;
+      streams.push(...filtered);
+    }
   }
 
   // If we didn't find individual episodes, try batch/pack search
@@ -569,7 +609,8 @@ async function searchNyaa(query, season, episode) {
 
         if (!linkMatch) continue;
         const hash = linkMatch[1].toLowerCase();
-        if (streams.some(s => s.infoHash === hash)) continue; // dedup
+        if (seenHashes.has(hash)) continue;
+        seenHashes.add(hash);
 
         const title = (titleMatch ? (titleMatch[1] || titleMatch[2]) : 'Unknown').trim();
         const seeds = seedMatch ? parseInt(seedMatch[1], 10) : 0;
@@ -688,6 +729,34 @@ function filterAndRank(streams) {
   return filtered;
 }
 
+// ─── Stream Cache ──────────────────────────────────────
+// In-memory cache for stream results to avoid redundant provider queries.
+// Particularly important for anime with deep episode history where users
+// navigate back and forth between episodes.
+
+const _streamCache = new Map();
+const STREAM_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const STREAM_CACHE_MAX = 200;
+
+function getCachedStreams(key) {
+  const entry = _streamCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.ts > STREAM_CACHE_TTL) {
+    _streamCache.delete(key);
+    return null;
+  }
+  return entry.streams;
+}
+
+function setCachedStreams(key, streams) {
+  if (_streamCache.size >= STREAM_CACHE_MAX) {
+    // Evict oldest entry
+    const oldest = _streamCache.keys().next().value;
+    _streamCache.delete(oldest);
+  }
+  _streamCache.set(key, { streams, ts: Date.now() });
+}
+
 // ─── Public API ─────────────────────────────────────
 
 /**
@@ -698,6 +767,13 @@ function filterAndRank(streams) {
 async function getMovieStreams(imdbId, title) {
   const id = sanitizeImdbId(imdbId);
   if (!id) return [];
+
+  const cacheKey = `movie:${id}`;
+  const cached = getCachedStreams(cacheKey);
+  if (cached) {
+    console.log(`[Streams] Cache hit for ${cacheKey} (${cached.length} streams)`);
+    return cached;
+  }
 
   console.log(`[Streams] Searching movie streams for ${id} (title: "${title || 'unknown'}")`);
 
@@ -732,18 +808,31 @@ async function getMovieStreams(imdbId, title) {
 
   const ranked = filterAndRank(combined);
   console.log(`[Streams] Total: ${ranked.length} streams (${ranked.filter(s => s.browserPlayable).length} browser-playable, ${ranked.filter(s => s.remuxPlayable).length} remuxable) for ${id}`);
+  if (ranked.length > 0) setCachedStreams(cacheKey, ranked);
   return ranked;
 }
 
 /**
- * Detect if a title is likely anime based on common patterns.
+ * Detect if a title is likely anime based on title patterns and genre metadata.
  */
-function isLikelyAnime(title) {
+function isLikelyAnime(title, genres) {
   if (!title) return false;
   const t = title.toLowerCase();
-  // Common anime keywords/patterns
-  return /\b(anime|sub|dub|dual[\s-]?audio|multi[\s-]?sub)\b/i.test(t) ||
-    /\b(shippuden|boruto|piece|naruto|bleach|dragon\s*ball|attack\s*on\s*titan|jujutsu|demon\s*slayer|one\s*punch|hunter\s*x|fullmetal|my\s*hero|sword\s*art)\b/i.test(t);
+
+  // Signal 1: Explicit anime keywords
+  if (/\b(anime|sub|dub|dual[\s-]?audio|multi[\s-]?sub)\b/i.test(t)) return true;
+
+  // Signal 2: Known anime titles
+  if (/\b(shippuden|boruto|piece|naruto|bleach|dragon\s*ball|attack\s*on\s*titan|jujutsu|demon\s*slayer|one\s*punch|hunter\s*x|fullmetal|my\s*hero|sword\s*art|death\s*note|cowboy\s*bebop|neon\s*genesis|mob\s*psycho|chainsaw\s*man|spy\s*x|vinland|tokyo\s*ghoul|fairy\s*tail|black\s*clover|haikyuu|jojo|overlord|konosuba|re:?\s*zero|mushoku|frieren|eminence|solo\s*leveling|kaiju|dandadan|sakamoto|mashle|undead\s*unluck)\b/i.test(t)) return true;
+
+  // Signal 3: Genre metadata from Cinemeta
+  if (genres && Array.isArray(genres) && genres.length > 0) {
+    const g = genres.map(x => x.toLowerCase());
+    if (g.includes('anime')) return true;
+    if (g.includes('animation') && g.some(x => x === 'action' || x === 'fantasy' || x === 'sci-fi' || x === 'adventure')) return true;
+  }
+
+  return false;
 }
 
 /**
@@ -751,9 +840,16 @@ function isLikelyAnime(title) {
  * Queries Torrentio, fallback scrapers, and Nyaa (for anime) in parallel.
  * Supports absolute episode numbering and batch/pack torrents.
  */
-async function getSeriesStreams(imdbId, season, episode, title) {
+async function getSeriesStreams(imdbId, season, episode, title, opts = {}) {
   const id = sanitizeImdbId(imdbId);
   if (!id) return [];
+
+  const cacheKey = `series:${id}:${season}:${episode}`;
+  const cached = getCachedStreams(cacheKey);
+  if (cached) {
+    console.log(`[Streams] Cache hit for ${cacheKey} (${cached.length} streams)`);
+    return cached;
+  }
 
   const se = season !== undefined && episode !== undefined;
   const seTag = se
@@ -763,7 +859,8 @@ async function getSeriesStreams(imdbId, season, episode, title) {
   console.log(`[Streams] Searching series streams for ${id} ${seTag} (title: "${title || 'unknown'}")`);
 
   // Determine if this might be anime (for Nyaa search)
-  const anime = isLikelyAnime(title);
+  const { absEp, genres = [] } = opts;
+  const anime = isLikelyAnime(title, genres);
   const tpbQuery = se ? `${title || id} ${seTag}` : (title || id);
 
   // Run ALL providers in parallel — don't wait for Torrentio first.
@@ -775,10 +872,10 @@ async function getSeriesStreams(imdbId, season, episode, title) {
     se ? search1337x(`${title || id} ${seTag}`).catch(e => { console.log(`[1337x] Error: ${e.message}`); return []; }) : Promise.resolve([]),
   ];
 
-  // Always search Nyaa for anime
+  // Always search Nyaa for anime, passing absolute episode number
   if (anime) {
     providerPromises.push(
-      searchNyaa(title || id, season, episode).catch(e => { console.log(`[Nyaa] Error: ${e.message}`); return []; })
+      searchNyaa(title || id, season, episode, absEp).catch(e => { console.log(`[Nyaa] Error: ${e.message}`); return []; })
     );
   }
 
@@ -822,7 +919,7 @@ async function getSeriesStreams(imdbId, season, episode, title) {
   let lateNyaaStreams = [];
   if (!anime && torrentioStreams.length === 0 && tpbStreams.length === 0 && x1337Streams.length === 0 && filteredEztv.length === 0) {
     console.log(`[Streams] All providers empty, trying Nyaa as last resort...`);
-    lateNyaaStreams = await searchNyaa(title || id, season, episode).catch(e => {
+    lateNyaaStreams = await searchNyaa(title || id, season, episode, absEp).catch(e => {
       console.log(`[Nyaa] Error: ${e.message}`);
       return [];
     });
@@ -850,6 +947,7 @@ async function getSeriesStreams(imdbId, season, episode, title) {
   const ranked = filterAndRank(combined);
   const batchCount = ranked.filter(s => s.isBatch).length;
   console.log(`[Streams] Total: ${ranked.length} streams (${ranked.filter(s => s.browserPlayable).length} browser-playable, ${ranked.filter(s => s.remuxPlayable).length} remuxable, ${batchCount} batch) for ${id} ${seTag}`);
+  if (ranked.length > 0) setCachedStreams(cacheKey, ranked);
   return ranked;
 }
 

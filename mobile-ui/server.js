@@ -216,8 +216,10 @@ app.get('/api/streams/series/:imdbId', rateLimit, async (req, res) => {
   const season = req.query.season ? parseInt(req.query.season, 10) : undefined;
   const episode = req.query.episode ? parseInt(req.query.episode, 10) : undefined;
   const title = req.query.title || '';
+  const absEp = req.query.absEp ? parseInt(req.query.absEp, 10) : undefined;
+  const genres = req.query.genres ? req.query.genres.split(',').filter(Boolean) : [];
   try {
-    const streams = await getSeriesStreams(imdbId, season, episode, title);
+    const streams = await getSeriesStreams(imdbId, season, episode, title, { absEp, genres });
     res.json({ streams });
   } catch (err) {
     console.error('[API] Series stream error:', err.message);

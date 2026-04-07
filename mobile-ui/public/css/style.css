@@ -992,6 +992,21 @@ html, body {
   white-space: nowrap;
 }
 
+.load-more-episodes {
+  width: 100%;
+  padding: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--bg-elevated);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.load-more-episodes:active {
+  background: var(--bg-elevated);
+}
+
 /* ===== Stream List ===== */
 .stream-list {
   display: flex;

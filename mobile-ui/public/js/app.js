@@ -2703,11 +2703,10 @@
     });
 
     // Quick-add buttons
-    dom.addonAddCinemeta.addEventListener('click', async () => {
-      const result = await api.addAddon('https://v3-cinemeta.strem.io');
-      if (result.error) showToast(result.error);
-      else { renderAddonList(); showToast('Added Cinemeta'); }
-    });
+    if (dom.addonAddCinemeta) {
+      // Cinemeta removed — metadata now served by TMDB. Button kept for backwards compat.
+      dom.addonAddCinemeta.style.display = 'none';
+    }
 
     dom.addonAddTorrentio.addEventListener('click', async () => {
       const result = await api.addAddon('https://torrentio.strem.io');

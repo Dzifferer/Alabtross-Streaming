@@ -287,6 +287,77 @@ app.get('/api/tmdb-meta/:type/:tmdbId', rateLimit, async (req, res) => {
   }
 });
 
+// ─── TMDB Metadata by IMDB ID (replaces Cinemeta) ────────────────────
+
+app.get('/api/tmdb-meta-imdb/:type/:imdbId', rateLimit, async (req, res) => {
+  const { type, imdbId } = req.params;
+  if (!/^tt\d+$/.test(imdbId) || !['movie', 'series'].includes(type)) {
+    return res.status(400).json({ error: 'Invalid parameters' });
+  }
+
+  if (!TMDB_API_KEY) {
+    return res.status(503).json({ error: 'TMDB API key not configured' });
+  }
+
+  try {
+    // Step 1: IMDB ID → TMDB ID
+    const tmdbType = type === 'series' ? 'tv' : 'movie';
+    const findResult = await tmdbFetch(`/find/${imdbId}`, { external_source: 'imdb_id' });
+    const results = tmdbType === 'tv'
+      ? (findResult.tv_results || [])
+      : (findResult.movie_results || []);
+
+    if (results.length === 0) {
+      return res.status(404).json({ error: 'Not found on TMDB' });
+    }
+
+    const tmdbId = results[0].id;
+
+    // Step 2: Full metadata
+    const data = await tmdbFetch(`/${tmdbType}/${tmdbId}`);
+
+    const meta = {
+      id: imdbId,
+      imdb_id: imdbId,
+      type,
+      name: tmdbType === 'movie' ? data.title : data.name,
+      year: (data.release_date || data.first_air_date || '').slice(0, 4),
+      poster: data.poster_path ? `https://image.tmdb.org/t/p/w342${data.poster_path}` : null,
+      background: data.backdrop_path ? `https://image.tmdb.org/t/p/w1280${data.backdrop_path}` : null,
+      description: data.overview || '',
+      genres: (data.genres || []).map(g => g.name),
+      runtime: data.runtime ? `${data.runtime} min` : undefined,
+      imdbRating: data.vote_average ? String(data.vote_average) : undefined,
+    };
+
+    // For series, include season/episode data
+    if (type === 'series' && data.seasons) {
+      meta.videos = [];
+      for (const season of data.seasons) {
+        if (season.season_number === 0) continue; // skip specials
+        try {
+          const seasonData = await tmdbFetch(`/tv/${tmdbId}/season/${season.season_number}`);
+          for (const ep of (seasonData.episodes || [])) {
+            meta.videos.push({
+              id: `${imdbId}:${season.season_number}:${ep.episode_number}`,
+              season: season.season_number,
+              episode: ep.episode_number,
+              title: ep.name || `Episode ${ep.episode_number}`,
+              overview: ep.overview || '',
+              released: ep.air_date || undefined,
+            });
+          }
+        } catch { /* skip season on error */ }
+      }
+    }
+
+    res.json({ meta });
+  } catch (err) {
+    console.error('[TMDB] IMDB meta fetch error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch metadata' });
+  }
+});
+
 // ─── Collection / Franchise Grouping ─────────────────────────────────
 
 const COLLECTION_CACHE_PATH = path.join(TORRENT_CACHE_PATH, 'collection-cache.json');

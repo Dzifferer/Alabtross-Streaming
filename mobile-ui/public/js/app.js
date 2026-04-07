@@ -188,7 +188,7 @@
     // Hide all views, show target
     $$('.view').forEach(v => v.classList.remove('active'));
 
-    const target = $(('#' + (VIEW_MAP[view] || 'view-home')));
+    const target = $('#' + (VIEW_MAP[view] || 'view-home'));
     if (target) target.classList.add('active');
 
     // Update UI

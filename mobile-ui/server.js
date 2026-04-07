@@ -198,7 +198,15 @@ let collectionCache = {}; // imdbId -> { collectionId, collectionName, collectio
 try {
   if (fs.existsSync(COLLECTION_CACHE_PATH)) {
     collectionCache = JSON.parse(fs.readFileSync(COLLECTION_CACHE_PATH, 'utf8'));
-    console.log(`[Collections] Loaded cache with ${Object.keys(collectionCache).length} entries`);
+    // Purge stale null entries and entries missing genres so they get re-fetched
+    const beforeCount = Object.keys(collectionCache).length;
+    for (const key of Object.keys(collectionCache)) {
+      if (!collectionCache[key] || !collectionCache[key].genres) {
+        delete collectionCache[key];
+      }
+    }
+    const purged = beforeCount - Object.keys(collectionCache).length;
+    console.log(`[Collections] Loaded cache with ${Object.keys(collectionCache).length} entries${purged > 0 ? ` (purged ${purged} stale entries)` : ''}`);
   }
 } catch (e) {
   console.warn('[Collections] Failed to load cache:', e.message);
@@ -273,10 +281,11 @@ const COLLECTION_DETAIL_TTL = 60 * 60 * 1000;
 
 async function lookupCollectionForImdbId(imdbId) {
   // Already cached — but re-fetch if missing genres (old cache format)
+  // null entries are from errors/old format and should be retried
   if (imdbId in collectionCache) {
     const cached = collectionCache[imdbId];
-    if (cached === null || cached?.genres) return cached;
-    // Old cache entry without genres — re-fetch
+    if (cached?.genres) return cached;
+    // null or old cache entry without genres — re-fetch
   }
 
   try {
@@ -284,8 +293,8 @@ async function lookupCollectionForImdbId(imdbId) {
     const findResult = await tmdbFetch(`/find/${imdbId}`, { external_source: 'imdb_id' });
     const movieResults = findResult.movie_results || [];
     if (movieResults.length === 0) {
-      collectionCache[imdbId] = null;
-      return null;
+      collectionCache[imdbId] = { collectionId: null, genres: [], year: '' };
+      return collectionCache[imdbId];
     }
     const tmdbId = movieResults[0].id;
 
@@ -312,7 +321,7 @@ async function lookupCollectionForImdbId(imdbId) {
     return entry;
   } catch (e) {
     console.warn(`[Collections] TMDB lookup failed for ${imdbId}:`, e.message);
-    collectionCache[imdbId] = null;
+    // Don't cache errors — allow retry on next request
     return null;
   }
 }

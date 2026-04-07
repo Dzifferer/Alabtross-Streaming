@@ -654,9 +654,19 @@ html, body {
   font-size: 13px;
   text-align: center;
   padding: 8px;
+}
+
+/* Shimmer only while image is loading (sibling has .loading class) */
+.card-poster img.loading ~ .poster-placeholder {
   background: linear-gradient(90deg, var(--bg-card) 25%, var(--bg-elevated) 50%, var(--bg-card) 75%);
   background-size: 200% 100%;
   animation: shimmer 1.5s ease-in-out infinite;
+}
+
+/* Hide placeholder once image has loaded */
+.card-poster img:not(.loading) ~ .poster-placeholder {
+  opacity: 0;
+  pointer-events: none;
 }
 
 @keyframes shimmer {

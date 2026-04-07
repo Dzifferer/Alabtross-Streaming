@@ -1639,11 +1639,16 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: background 0.2s;
+  transition: opacity 0.3s ease, background 0.2s;
 }
 
 .player-back-btn:hover {
   background: rgba(0,0,0,0.8);
+}
+
+.player-back-btn.player-controls-hidden {
+  opacity: 0;
+  pointer-events: none;
 }
 
 #player-container {
@@ -1947,7 +1952,12 @@ html, body {
   cursor: pointer;
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
-  transition: background 0.2s, color 0.2s;
+  transition: opacity 0.3s ease, background 0.2s, color 0.2s;
+}
+
+.cast-btn.player-controls-hidden {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .cast-btn:active {

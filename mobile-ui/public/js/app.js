@@ -122,8 +122,7 @@
     // We also check if the server is reachable on its local IP.
 
     try {
-      const serverUrl = api.getServerUrl() || '/stremio-api';
-      const resp = await fetch(serverUrl + '/stats.json', {
+      const resp = await fetch('/api/stats', {
         signal: AbortSignal.timeout(5000),
       });
 

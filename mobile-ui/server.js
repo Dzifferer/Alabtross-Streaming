@@ -1037,6 +1037,11 @@ app.use(express.static(path.join(__dirname, 'public'), {
   },
 }));
 
+// Health endpoint for VPN detection (if the client can reach this, the server is accessible)
+app.get('/api/stats', (req, res) => {
+  res.json({ ok: true });
+});
+
 // SPA fallback
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));

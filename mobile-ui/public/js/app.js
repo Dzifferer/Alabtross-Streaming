@@ -1700,12 +1700,12 @@
         <div style="font-size:13px;color:var(--text-dim);margin-bottom:16px;">
           ${[quality, format, seeds + ' seeds', source].filter(Boolean).join(' \u00b7 ')}
         </div>
-        <div style="display:flex;gap:12px;justify-content:center;">
-          <button class="btn-play" id="auto-play-btn" style="flex:1;max-width:180px;">
+        <div class="stream-action-bar stream-action-bar--inline">
+          <button class="btn-play" id="auto-play-btn">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
             Play
           </button>
-          <button class="btn-library" id="auto-library-btn" style="flex:1;max-width:180px;">
+          <button class="btn-library" id="auto-library-btn">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
               <polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>

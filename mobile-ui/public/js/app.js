@@ -2080,12 +2080,14 @@
 
       let html = '';
 
-      // Movies section (with collection grouping)
+      // Movies section (with collection grouping + genre grouping)
       if (movies.length > 0) {
         html += `<div class="library-section-header">Movies</div>`;
 
-        // Group movies by collection
         const colMap = movieCollectionData.collections || {};
+        const metaMap = movieCollectionData.movieMeta || {};
+
+        // Build reverse map: imdbId -> collectionId
         const imdbToCol = {};
         for (const [colId, col] of Object.entries(colMap)) {
           for (const movieId of col.movieIds || []) {
@@ -2105,10 +2107,16 @@
           }
         }
 
-        // Render collection groups (only if 2+ movies)
+        // Render collection groups (only if 2+ movies), sorted by year within each
         for (const [colId, colMovies] of Object.entries(collectionGroups)) {
           if (colMovies.length >= 2) {
             const col = colMap[colId];
+            // Sort by year (from metadata or item.year)
+            colMovies.sort((a, b) => {
+              const yearA = (metaMap[a.imdbId]?.year || a.year || '9999');
+              const yearB = (metaMap[b.imdbId]?.year || b.year || '9999');
+              return yearA.localeCompare(yearB);
+            });
             html += `<div class="library-collection-group">`;
             html += `<div class="library-collection-header collapsed" data-collection-id="${escapeHTML(colId)}">${escapeHTML(col.name)} (${colMovies.length})</div>`;
             html += `<div class="library-collection-movies collapsed" data-collection-id="${escapeHTML(colId)}">`;
@@ -2119,8 +2127,53 @@
           }
         }
 
-        // Render ungrouped movies
-        html += ungroupedMovies.map(item => renderLibraryItem(item)).join('');
+        // Group ungrouped movies by genre
+        const genreGroups = {};
+        const noGenreMovies = [];
+        for (const movie of ungroupedMovies) {
+          const meta = metaMap[movie.imdbId];
+          const genres = meta?.genres || [];
+          if (genres.length > 0) {
+            // Use the first genre as the primary group
+            const genre = genres[0];
+            if (!genreGroups[genre]) genreGroups[genre] = [];
+            genreGroups[genre].push(movie);
+          } else {
+            noGenreMovies.push(movie);
+          }
+        }
+
+        // Sort genres alphabetically, render each as a collapsible group
+        const sortedGenres = Object.keys(genreGroups).sort();
+        for (const genre of sortedGenres) {
+          const genreMovies = genreGroups[genre];
+          // Sort by year within genre
+          genreMovies.sort((a, b) => {
+            const yearA = (metaMap[a.imdbId]?.year || a.year || '9999');
+            const yearB = (metaMap[b.imdbId]?.year || b.year || '9999');
+            return yearA.localeCompare(yearB);
+          });
+          if (genreMovies.length >= 2) {
+            const genreId = 'genre_' + genre.toLowerCase().replace(/[^a-z0-9]/g, '_');
+            html += `<div class="library-collection-group">`;
+            html += `<div class="library-collection-header collapsed" data-collection-id="${escapeHTML(genreId)}">${escapeHTML(genre)} (${genreMovies.length})</div>`;
+            html += `<div class="library-collection-movies collapsed" data-collection-id="${escapeHTML(genreId)}">`;
+            html += genreMovies.map(item => renderLibraryItem(item)).join('');
+            html += `</div></div>`;
+          } else {
+            noGenreMovies.push(...genreMovies);
+          }
+        }
+
+        // Render remaining movies that have no genre or are alone in their genre
+        if (noGenreMovies.length > 0) {
+          noGenreMovies.sort((a, b) => {
+            const yearA = (metaMap[a.imdbId]?.year || a.year || '9999');
+            const yearB = (metaMap[b.imdbId]?.year || b.year || '9999');
+            return yearA.localeCompare(yearB);
+          });
+          html += noGenreMovies.map(item => renderLibraryItem(item)).join('');
+        }
       }
 
       // TV Shows section

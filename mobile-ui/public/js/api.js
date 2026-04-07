@@ -3,9 +3,8 @@
  *
  * Unified mode: fetches streams from both direct torrent scrapers (YTS/EZTV/1337x)
  * and configured Stremio addons, merged into a single list.
+ * Metadata sourced from TMDB.
  */
-
-const CINEMETA_URL = 'https://v3-cinemeta.strem.io';
 
 // Torrentio is now fetched server-side via the backend /api/streams/* endpoints
 // to avoid browser DNS resolution issues with torrentio.strem.io.
@@ -39,9 +38,7 @@ class StremioAPI {
       console.warn('Corrupted addon data — resetting', e);
       localStorage.removeItem('stremio_addons');
     }
-    const defaults = [
-      { url: CINEMETA_URL, name: 'Cinemeta', types: ['movie', 'series'] },
-    ];
+    const defaults = [];
     this._saveAddons(defaults);
     return defaults;
   }
@@ -173,9 +170,9 @@ class StremioAPI {
       return this._searchCache.get(cacheKey);
     }
 
-    let results;
+    let results = [];
 
-    // Try TMDB first (better relevance and fuzzy matching)
+    // Search via TMDB (sole metadata source)
     try {
       const params = new URLSearchParams({ q: query });
       if (type) params.set('type', type);
@@ -188,55 +185,7 @@ class StremioAPI {
       }
     } catch (e) {
       if (e.name === 'AbortError') return [];
-      console.warn('TMDB search failed, falling back to Cinemeta', e);
-    }
-
-    // Fallback to Cinemeta addon search (parallel across all addons)
-    if (!results) {
-      const types = type ? [type] : ['movie', 'series'];
-      const searchPromises = [];
-
-      for (const addon of this.addons) {
-        searchPromises.push((async () => {
-          try {
-            const manifest = await this._fetchManifest(addon.url);
-            if (!manifest.catalogs) return [];
-
-            const catalogPromises = [];
-            for (const catalog of manifest.catalogs) {
-              if (!types.includes(catalog.type)) continue;
-              const hasSearch = catalog.extra &&
-                catalog.extra.some(e => e.name === 'search');
-              if (!hasSearch) continue;
-
-              catalogPromises.push(
-                this.getCatalogItems(
-                  addon.url, catalog.type, catalog.id,
-                  `search=${encodeURIComponent(query)}`
-                )
-              );
-            }
-            const catalogResults = await Promise.all(catalogPromises);
-            return catalogResults.flat();
-          } catch (e) {
-            console.warn('Search failed for addon', addon.url, e);
-            return [];
-          }
-        })());
-      }
-
-      if (signal.aborted) return [];
-
-      const allResultArrays = await Promise.all(searchPromises);
-      const allResults = allResultArrays.flat();
-
-      const seen = new Set();
-      results = allResults.filter(item => {
-        const id = item.imdb_id || item.id;
-        if (seen.has(id)) return false;
-        seen.add(id);
-        return true;
-      }).slice(0, 100);
+      console.warn('TMDB search failed:', e);
     }
 
     // Cache the results
@@ -249,6 +198,44 @@ class StremioAPI {
   // ─── Metadata ────────────────────────────────────
 
   async getMeta(type, id) {
+    // TMDB metadata by IMDB ID
+    if (/^tt\d+/.test(id)) {
+      try {
+        const imdbId = id.match(/^(tt\d+)/)[1];
+        const resp = await fetch(`/api/tmdb-meta-imdb/${type}/${imdbId}`);
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data.meta) {
+            this._lastTitle = data.meta.name || null;
+            return data.meta;
+          }
+        }
+      } catch (e) {
+        console.warn('TMDB meta fetch failed for IMDB ID:', e);
+      }
+    }
+
+    // TMDB metadata by TMDB ID
+    if (id.startsWith('tmdb:')) {
+      try {
+        const tmdbId = id.replace('tmdb:', '');
+        const resp = await fetch(`/api/tmdb-meta/${type}/${tmdbId}`);
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data.meta) {
+            this._lastTitle = data.meta.name || null;
+            if (data.meta.imdb_id) {
+              data.meta._resolvedImdbId = data.meta.imdb_id;
+            }
+            return data.meta;
+          }
+        }
+      } catch (e) {
+        console.warn('TMDB meta fetch failed for TMDB ID:', e);
+      }
+    }
+
+    // Fallback: try any configured Stremio addons that provide metadata
     for (const addon of this.addons) {
       try {
         const manifest = await this._fetchManifest(addon.url);
@@ -262,33 +249,11 @@ class StremioAPI {
         if (!resp.ok) continue;
         const data = await resp.json();
         if (data.meta) {
-          // Cache the title for stream searches (TPB needs name, not IMDB ID)
           this._lastTitle = data.meta.name || null;
           return data.meta;
         }
       } catch (e) {
         console.warn('Meta fetch failed for', addon.url, e);
-      }
-    }
-
-    // Fallback: fetch metadata directly from TMDB for tmdb: IDs
-    if (id.startsWith('tmdb:')) {
-      try {
-        const tmdbId = id.replace('tmdb:', '');
-        const resp = await fetch(`/api/tmdb-meta/${type}/${tmdbId}`);
-        if (resp.ok) {
-          const data = await resp.json();
-          if (data.meta) {
-            this._lastTitle = data.meta.name || null;
-            // If TMDB resolved an IMDB ID, update the ID for stream lookups
-            if (data.meta.imdb_id) {
-              data.meta._resolvedImdbId = data.meta.imdb_id;
-            }
-            return data.meta;
-          }
-        }
-      } catch (e) {
-        console.warn('TMDB meta fallback failed:', e);
       }
     }
 

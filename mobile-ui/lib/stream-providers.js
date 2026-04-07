@@ -7,6 +7,7 @@
  *   - YTS (yts.mx)    — Fallback, movies with quality/size metadata
  *   - EZTV (eztv.re)  — Fallback, TV series episodes
  *   - 1337x           — Fallback, general
+ *   - Nyaa.si         — Anime, with title aliases and mirror support
  */
 
 const cheerio = require('cheerio');
@@ -528,91 +529,218 @@ async function search1337x(query) {
 
 // ─── Nyaa.si Provider (Anime) ──────────────────────
 
+// Mirror domains — try next if primary is unreachable
+const NYAA_DOMAINS = ['nyaa.si', 'nyaa.land', 'nyaa.ink'];
+
+// Anime title aliases: TMDB/English title → Nyaa fansub naming conventions
+const ANIME_TITLE_ALIASES = {
+  'naruto shippuden': ['naruto shippuuden'],
+  'naruto: shippuden': ['naruto shippuuden'],
+  'attack on titan': ['shingeki no kyojin'],
+  'my hero academia': ['boku no hero academia'],
+  'demon slayer': ['kimetsu no yaiba'],
+  'demon slayer: kimetsu no yaiba': ['kimetsu no yaiba'],
+  'jujutsu kaisen': ['jujutsu kaisen'],
+  'spy x family': ['spy x family'],
+  'one punch man': ['one punch man'],
+  'fullmetal alchemist: brotherhood': ['fullmetal alchemist brotherhood'],
+  'hunter x hunter': ['hunter x hunter'],
+  'dragon ball super': ['dragon ball super'],
+  'dragon ball super: super hero': ['dragon ball super super hero'],
+  'sword art online': ['sword art online'],
+  'tokyo ghoul': ['tokyo ghoul'],
+  'black clover': ['black clover'],
+  'fairy tail': ['fairy tail'],
+  'solo leveling': ['ore dake level up na ken', 'solo leveling'],
+  "frieren: beyond journey's end": ['sousou no frieren'],
+  'frieren beyond journeys end': ['sousou no frieren'],
+  'dandadan': ['dandadan', 'dandan'],
+  'one piece': ['one piece'],
+  'bleach': ['bleach'],
+  'bleach: thousand-year blood war': ['bleach sennen kessen-hen', 'bleach thousand year blood war'],
+  'vinland saga': ['vinland saga'],
+  'chainsaw man': ['chainsaw man'],
+  'mob psycho 100': ['mob psycho 100'],
+  're:zero': ['re zero'],
+  'mushoku tensei': ['mushoku tensei'],
+  'mushoku tensei: jobless reincarnation': ['mushoku tensei'],
+  'the eminence in shadow': ['kage no jitsuryokusha ni naritakute'],
+  'kaiju no. 8': ['kaiju no 8', 'kaiju 8-gou'],
+  'undead unluck': ['undead unluck'],
+  'mashle': ['mashle'],
+  'sakamoto days': ['sakamoto days'],
+};
+
+// Trusted fansub groups — boosted in ranking (not filtered)
+const TRUSTED_GROUPS = [
+  'subsplease', 'erai-raws', 'judas', 'ember', 'horriblesubs',
+  'commie', 'damedesuyo', 'chihiro', 'horrible subs', 'hs',
+  'sallysubs', 'yameii', 'tenshi', 'anime time', 'bonkai77',
+];
+
+/**
+ * Clean anime title for Nyaa search: strip unicode, punctuation, normalize whitespace.
+ * Returns array of unique search title variants (original cleaned + aliases).
+ */
+function getAnimeSearchTitles(rawTitle) {
+  // Normalize unicode: ū→u, ō→o, etc.
+  const normalized = rawTitle
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/\u016b/g, 'u').replace(/\u014d/g, 'o')
+    .replace(/\u016a/g, 'U').replace(/\u014c/g, 'O');
+  // Strip colons, parentheses, and other search-breaking punctuation
+  const cleaned = normalized
+    .replace(/[:()[\]!?'".,;]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const titles = new Set();
+  titles.add(cleaned);
+
+  // Look up aliases by lowercase cleaned title
+  const lower = cleaned.toLowerCase();
+  for (const [key, aliases] of Object.entries(ANIME_TITLE_ALIASES)) {
+    if (lower === key || lower.startsWith(key + ' ') || lower.includes(key)) {
+      for (const alias of aliases) titles.add(alias);
+    }
+  }
+
+  return [...titles];
+}
+
+/**
+ * Fetch Nyaa RSS from first responsive mirror domain.
+ */
+async function fetchNyaaRss(queryString, timeout = 12000) {
+  for (const domain of NYAA_DOMAINS) {
+    const url = `https://${domain}/?f=0&c=1_2&s=seeders&o=desc&page=rss&q=${encodeURIComponent(queryString)}`;
+    const xml = await fetchHTML(url, timeout).catch(() => null);
+    if (xml) return xml;
+  }
+  return null;
+}
+
+/**
+ * Parse Nyaa RSS XML into stream objects, deduplicating by infoHash.
+ */
+function parseNyaaRss(xml, seenHashes, maxItems = 40) {
+  const results = [];
+  if (!xml) return results;
+  const items = xml.split('<item>').slice(1);
+  for (const item of items.slice(0, maxItems)) {
+    const titleMatch = item.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>|<title>(.*?)<\/title>/);
+    const linkMatch = item.match(/<nyaa:infoHash>(.*?)<\/nyaa:infoHash>/);
+    const seedMatch = item.match(/<nyaa:seeders>(.*?)<\/nyaa:seeders>/);
+    const sizeMatch = item.match(/<nyaa:size>(.*?)<\/nyaa:size>/);
+
+    if (!linkMatch) continue;
+    const hash = linkMatch[1].toLowerCase();
+    if (seenHashes.has(hash)) continue;
+    seenHashes.add(hash);
+
+    const title = (titleMatch ? (titleMatch[1] || titleMatch[2]) : 'Unknown').trim();
+    const seeds = seedMatch ? parseInt(seedMatch[1], 10) : 0;
+    const sizeStr = sizeMatch ? sizeMatch[1] : '';
+
+    const quality = title.match(/\b(2160p|1080p|720p|480p)\b/i);
+
+    // Detect if this is a batch/pack release
+    const isBatch = /\bbatch\b/i.test(title) || /\bcomplete\b/i.test(title) ||
+      /\d+\s*[-~]\s*\d+/.test(title) || /\bseason\s*\d/i.test(title) ||
+      (/\bS\d+\b/i.test(title) && !/\bS\d+E\d+\b/i.test(title));
+
+    // Detect trusted fansub group: [GroupName] prefix
+    const groupMatch = title.match(/^\[([^\]]+)\]/);
+    const isTrusted = groupMatch
+      ? TRUSTED_GROUPS.some(g => groupMatch[1].toLowerCase().includes(g))
+      : false;
+
+    results.push({
+      infoHash: hash,
+      title: `${title}\n${quality ? quality[1] + ' ' : ''}${sizeStr} | Seeds: ${seeds}${isBatch ? ' | BATCH' : ''}${isTrusted ? ' | \u2605' : ''}`,
+      magnetUri: buildMagnet(hash, title),
+      quality: quality ? quality[1] : '',
+      size: sizeStr,
+      seeds,
+      source: 'Nyaa',
+      isBatch,
+      _isTrusted: isTrusted,
+    });
+  }
+  return results;
+}
+
 async function searchNyaa(query, season, episode, absoluteEpisode) {
   const streams = [];
 
   // Use absolute episode number when available (more accurate for anime)
   const ep = absoluteEpisode || episode;
 
-  // Build search query — for anime, try title + episode number
-  let searchQuery = query;
-  if (ep !== undefined) {
-    // Use 3-digit padding for episodes >= 100, 2-digit otherwise
-    const epStr = ep >= 100 ? String(ep).padStart(3, '0') : String(ep).padStart(2, '0');
-    searchQuery = `${query} ${epStr}`;
+  // Get all title variants (cleaned original + aliases)
+  const searchTitles = getAnimeSearchTitles(query);
+  console.log(`[Nyaa] Search titles for "${query}": ${JSON.stringify(searchTitles)}`);
+
+  // Build search URLs for all title variants × episode format combinations
+  const searchQueries = new Set();
+  for (const title of searchTitles) {
+    if (ep !== undefined) {
+      const epStr2 = String(ep).padStart(2, '0');
+      const epStr3 = String(ep).padStart(3, '0');
+      // Format 1: "Title 05" (standard)
+      searchQueries.add(`${title} ${epStr2}`);
+      // Format 2: "Title - 05" (fansub dash convention)
+      searchQueries.add(`${title} - ${epStr2}`);
+      if (ep >= 100) {
+        // Format 3: 3-digit padding for long-running series
+        searchQueries.add(`${title} ${epStr3}`);
+        searchQueries.add(`${title} - ${epStr3}`);
+      }
+    } else {
+      searchQueries.add(title);
+    }
   }
 
-  // For high episode numbers, also search with alternate format in parallel
-  const searchUrls = [];
-  const baseUrl = `https://nyaa.si/?f=0&c=1_2&s=seeders&o=desc&page=rss&q=`;
-  searchUrls.push(baseUrl + encodeURIComponent(searchQuery));
-
-  if (ep !== undefined && ep >= 100) {
-    // Alternate format: "Title - 847" (common fansub convention)
-    const altQuery = `${query} - ${String(ep).padStart(3, '0')}`;
-    searchUrls.push(baseUrl + encodeURIComponent(altQuery));
-  }
-
-  // Fetch all search variants in parallel
+  // Fetch all search variants in parallel (across mirrors)
   const xmlResults = await Promise.all(
-    searchUrls.map(url => fetchHTML(url, 12000).catch(() => null))
+    [...searchQueries].map(q => fetchNyaaRss(q).catch(() => null))
   );
 
   if (xmlResults.every(x => !x)) {
-    console.log(`[Nyaa] No response for "${searchQuery}"`);
+    console.log(`[Nyaa] No response for any query variant`);
     return streams;
   }
 
-  // Parse RSS XML from all results, dedup by infoHash
+  // Parse all results, dedup by infoHash
   const seenHashes = new Set();
   for (const xml of xmlResults) {
-    if (!xml) continue;
-    const items = xml.split('<item>').slice(1);
-    for (const item of items.slice(0, 40)) {
-      const titleMatch = item.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>|<title>(.*?)<\/title>/);
-      const linkMatch = item.match(/<nyaa:infoHash>(.*?)<\/nyaa:infoHash>/);
-      const seedMatch = item.match(/<nyaa:seeders>(.*?)<\/nyaa:seeders>/);
-      const sizeMatch = item.match(/<nyaa:size>(.*?)<\/nyaa:size>/);
-
-      if (!linkMatch) continue;
-      const hash = linkMatch[1].toLowerCase();
-      if (seenHashes.has(hash)) continue;
-      seenHashes.add(hash);
-
-      const title = (titleMatch ? (titleMatch[1] || titleMatch[2]) : 'Unknown').trim();
-      const seeds = seedMatch ? parseInt(seedMatch[1], 10) : 0;
-      const sizeStr = sizeMatch ? sizeMatch[1] : '';
-
-      const quality = title.match(/\b(2160p|1080p|720p|480p)\b/i);
-
-      // Detect if this is a batch/pack release
-      const isBatch = /\bbatch\b/i.test(title) || /\bcomplete\b/i.test(title) ||
-        /\d+\s*[-~]\s*\d+/.test(title) || /\bseason\s*\d/i.test(title) ||
-        /\bS\d+\b/i.test(title) && !/\bS\d+E\d+\b/i.test(title);
-
-      streams.push({
-        infoHash: hash,
-        title: `${title}\n${quality ? quality[1] + ' ' : ''}${sizeStr} | Seeds: ${seeds}${isBatch ? ' | BATCH' : ''}`,
-        magnetUri: buildMagnet(hash, title),
-        quality: quality ? quality[1] : '',
-        size: sizeStr,
-        seeds,
-        source: 'Nyaa',
-        isBatch,
-      });
-    }
+    streams.push(...parseNyaaRss(xml, seenHashes));
   }
 
   // Post-fetch episode filtering: verify results actually match the requested episode
   if (ep !== undefined && streams.length > 0) {
+    const epStr = String(ep);
     const epPatterns = [
-      new RegExp(`\\b0*${ep}\\b`),
-      new RegExp(`E0*${ep}\\b`, 'i'),
-      new RegExp(`-\\s*0*${ep}\\b`),
-      new RegExp(`Episode\\s*0*${ep}\\b`, 'i'),
+      // Match "- 05" or "- 005" (fansub convention) but not inside resolution like "1080"
+      new RegExp(`(?:^|\\s|-)\\s*0*${epStr}\\b(?!\\d|p)`, 'i'),
+      // Match "E05" or "EP05"
+      new RegExp(`E[Pp]?0*${epStr}\\b`, 'i'),
+      // Match "Episode 5" or "Episode 05"
+      new RegExp(`Episode\\s*0*${epStr}\\b`, 'i'),
+      // Match v2/v3 variants: "05v2", "05 v2"
+      new RegExp(`0*${epStr}\\s*v\\d\\b`, 'i'),
     ];
     const filtered = streams.filter(s => {
-      if (s.isBatch) return true; // keep batch results
+      if (s.isBatch) {
+        // For batches, check if episode falls within the range (e.g., "01-26")
+        const t = (s.title || '').split('\n')[0];
+        const rangeMatch = t.match(/(\d+)\s*[-~]\s*(\d+)/);
+        if (rangeMatch) {
+          const lo = parseInt(rangeMatch[1], 10);
+          const hi = parseInt(rangeMatch[2], 10);
+          return ep >= lo && ep <= hi;
+        }
+        return true; // keep batches without clear range
+      }
       const t = (s.title || '').split('\n')[0];
       return epPatterns.some(p => p.test(t));
     });
@@ -625,42 +753,27 @@ async function searchNyaa(query, season, episode, absoluteEpisode) {
 
   // If we didn't find individual episodes, try batch/pack search
   if (streams.length < 3 && season !== undefined) {
-    const batchQuery = `${query} batch`;
-    const batchUrl = `https://nyaa.si/?f=0&c=1_2&q=${encodeURIComponent(batchQuery)}&s=seeders&o=desc&page=rss`;
-    const batchXml = await fetchHTML(batchUrl, 12000);
-    if (batchXml) {
-      const batchItems = batchXml.split('<item>').slice(1);
-      for (const item of batchItems.slice(0, 10)) {
-        const titleMatch = item.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>|<title>(.*?)<\/title>/);
-        const linkMatch = item.match(/<nyaa:infoHash>(.*?)<\/nyaa:infoHash>/);
-        const seedMatch = item.match(/<nyaa:seeders>(.*?)<\/nyaa:seeders>/);
-        const sizeMatch = item.match(/<nyaa:size>(.*?)<\/nyaa:size>/);
-
-        if (!linkMatch) continue;
-        const hash = linkMatch[1].toLowerCase();
-        if (seenHashes.has(hash)) continue;
-        seenHashes.add(hash);
-
-        const title = (titleMatch ? (titleMatch[1] || titleMatch[2]) : 'Unknown').trim();
-        const seeds = seedMatch ? parseInt(seedMatch[1], 10) : 0;
-        const sizeStr = sizeMatch ? sizeMatch[1] : '';
-        const quality = title.match(/\b(2160p|1080p|720p|480p)\b/i);
-
-        streams.push({
-          infoHash: hash,
-          title: `${title}\n${quality ? quality[1] + ' ' : ''}${sizeStr} | Seeds: ${seeds} | BATCH`,
-          magnetUri: buildMagnet(hash, title),
-          quality: quality ? quality[1] : '',
-          size: sizeStr,
-          seeds,
-          source: 'Nyaa',
-          isBatch: true,
-        });
-      }
+    const batchTitles = getAnimeSearchTitles(query);
+    const batchQueries = [];
+    for (const title of batchTitles) {
+      batchQueries.push(`${title} batch`);
+      batchQueries.push(`${title} complete`);
+    }
+    const batchResults = await Promise.all(
+      batchQueries.map(q => fetchNyaaRss(q).catch(() => null))
+    );
+    for (const xml of batchResults) {
+      streams.push(...parseNyaaRss(xml, seenHashes, 10));
     }
   }
 
-  console.log(`[Nyaa] Found ${streams.length} results for "${searchQuery}"`);
+  // Sort: trusted groups first, then by seed count
+  streams.sort((a, b) => {
+    if (a._isTrusted !== b._isTrusted) return a._isTrusted ? -1 : 1;
+    return (b.seeds || 0) - (a.seeds || 0);
+  });
+
+  console.log(`[Nyaa] Found ${streams.length} results for "${query}" (${searchQueries.size} query variants)`);
   return streams;
 }
 
@@ -855,7 +968,7 @@ function isLikelyAnime(title, genres) {
   // Signal 2: Known anime titles
   if (/\b(shippuden|boruto|piece|naruto|bleach|dragon\s*ball|attack\s*on\s*titan|jujutsu|demon\s*slayer|one\s*punch|hunter\s*x|fullmetal|my\s*hero|sword\s*art|death\s*note|cowboy\s*bebop|neon\s*genesis|mob\s*psycho|chainsaw\s*man|spy\s*x|vinland|tokyo\s*ghoul|fairy\s*tail|black\s*clover|haikyuu|jojo|overlord|konosuba|re:?\s*zero|mushoku|frieren|eminence|solo\s*leveling|kaiju|dandadan|sakamoto|mashle|undead\s*unluck)\b/i.test(t)) return true;
 
-  // Signal 3: Genre metadata from Cinemeta
+  // Signal 3: Genre metadata from TMDB
   if (genres && Array.isArray(genres) && genres.length > 0) {
     const g = genres.map(x => x.toLowerCase());
     if (g.includes('anime')) return true;

@@ -1302,9 +1302,97 @@ async function getSeasonPackStreams(title, season, imdbId) {
   return ranked;
 }
 
+// ─── Complete Search ──────────────────────────────
+// Search for complete series/movie torrents (e.g., "Mad Men Complete Series 1080p")
+// across TPB and 1337x. Appends "complete" to the search query to find bulk downloads
+// containing all seasons in a single torrent.
+
+const COMPLETE_MIN_SIZE_BYTES = 3 * 1024 * 1024 * 1024; // 3 GB minimum for a complete pack
+
+function isCompletePack(name, sizeBytes) {
+  const upper = (name || '').toUpperCase();
+  // Must NOT be a single episode (S01E05 pattern)
+  if (/\bS\d+E\d+\b/i.test(name)) return false;
+  // Positive signals: "complete", "complete series", "all seasons", "collection", "boxset"
+  const hasCompleteSignal =
+    /\bcomplete\b/i.test(name) ||
+    /\ball\s*seasons?\b/i.test(name) ||
+    /\bcollection\b/i.test(name) ||
+    /\bbox\s*set\b/i.test(name) ||
+    /\bfull\s*series\b/i.test(name) ||
+    /\bintegrale?\b/i.test(name) ||
+    /\bS\d+\s*[-–~]\s*S?\d+/i.test(name);
+  // If size is known and large enough, that's a strong signal even without keywords
+  const isLarge = sizeBytes > 0 && sizeBytes >= COMPLETE_MIN_SIZE_BYTES;
+  return hasCompleteSignal || isLarge;
+}
+
+async function getCompleteStreams(title, imdbId) {
+  if (!title && !imdbId) return [];
+
+  const searchTitle = (title || '').replace(/['']/g, ' ').replace(/[^\w\s-]/g, ' ').replace(/\s+/g, ' ').trim();
+
+  const cacheKey = `complete:${imdbId || searchTitle}`;
+  const cached = getCachedStreams(cacheKey);
+  if (cached) {
+    console.log(`[Complete] Cache hit for ${cacheKey} (${cached.length} streams)`);
+    return cached;
+  }
+
+  console.log(`[Complete] Searching complete packs for "${searchTitle}"`);
+
+  // Build multiple search queries to maximize coverage
+  const queries = [
+    `${searchTitle} complete`,
+    `${searchTitle} complete series`,
+    `${searchTitle} all seasons`,
+  ];
+
+  // Run TPB and 1337x searches in parallel with all query variants
+  const promises = [];
+  for (const q of queries) {
+    promises.push(searchTPB(q).catch(e => { console.log(`[Complete/TPB] Error: ${e.message}`); return []; }));
+    promises.push(search1337x(q).catch(e => { console.log(`[Complete/1337x] Error: ${e.message}`); return []; }));
+  }
+
+  const results = await Promise.all(promises);
+  const allStreams = results.flat();
+
+  // Deduplicate by infoHash
+  const seen = new Set();
+  const unique = [];
+  for (const s of allStreams) {
+    if (!seen.has(s.infoHash)) {
+      seen.add(s.infoHash);
+      unique.push(s);
+    }
+  }
+
+  console.log(`[Complete] Raw results: ${allStreams.length}, unique: ${unique.length}`);
+
+  // Filter to only complete packs
+  const packs = unique.filter(s => {
+    const name = (s.title || '').split('\n')[0];
+    const sizeBytes = parsePackSizeBytes(s.size);
+    return isCompletePack(name, sizeBytes);
+  });
+
+  // Tag them as complete packs
+  for (const s of packs) {
+    s.isCompletePack = true;
+  }
+
+  console.log(`[Complete] After pack filter: ${packs.length} packs`);
+
+  const ranked = filterAndRank(packs);
+  if (ranked.length > 0) setCachedStreams(cacheKey, ranked);
+  return ranked;
+}
+
 module.exports = {
   getMovieStreams,
   getSeriesStreams,
   getSeasonPackStreams,
+  getCompleteStreams,
   diagnoseProviders,
 };

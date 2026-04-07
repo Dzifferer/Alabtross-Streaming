@@ -188,7 +188,7 @@
     // Hide all views, show target
     $$('.view').forEach(v => v.classList.remove('active'));
 
-    const target = $(('#' + (VIEW_MAP[view] || 'view-home')));
+    const target = $('#' + (VIEW_MAP[view] || 'view-home'));
     if (target) target.classList.add('active');
 
     // Update UI
@@ -1309,6 +1309,18 @@
           <div class="loading-state"><div class="spinner"></div><p>Finding streams & testing speeds...</p></div>
         </div>
       `;
+      html += `
+        <div style="margin-top:12px">
+          <button class="search-complete-btn" id="search-complete-btn" title="Search for complete download with 'complete' keyword">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="11" cy="11" r="8"/>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+            Search Complete
+          </button>
+        </div>
+        <div id="complete-container" class="hidden"></div>
+      `;
     }
 
     // Add to Library button (torrent data available for download)
@@ -1337,6 +1349,23 @@
     if (type === 'series') {
       attachSeriesHandlers(meta);
     }
+
+    // Attach Search Complete handler for movies
+    if (type === 'movie') {
+      const completeBtn = document.getElementById('search-complete-btn');
+      if (completeBtn) {
+        completeBtn.addEventListener('click', () => {
+          const showId = meta.imdb_id || meta.id;
+          const cc = document.getElementById('complete-container');
+          if (cc) {
+            cc.classList.remove('hidden');
+            cc.innerHTML = `<div class="loading-state"><div class="spinner"></div><p>Searching for complete download...</p></div>`;
+            cc.scrollIntoView({ behavior: 'smooth' });
+          }
+          loadCompleteStreams(showId, meta, 'complete-container');
+        });
+      }
+    }
   }
 
   // ─── Series Section ──────────────────────────────
@@ -1363,6 +1392,13 @@
         <line x1="12" y1="15" x2="12" y2="3"/>
       </svg>
       Season Pack
+    </button>`;
+    html += `<button class="search-complete-btn" id="search-complete-btn" title="Search for complete series download">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="11" cy="11" r="8"/>
+        <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+      </svg>
+      Search Complete
     </button>`;
     html += '</div>';
     html += `<div id="episode-list" class="episode-list">${renderEpisodes(videos, state.currentSeason)}</div>`;
@@ -1437,6 +1473,21 @@
           sc.scrollIntoView({ behavior: 'smooth' });
         }
         loadSeasonPacks(showId, season, meta);
+      });
+    }
+
+    // Search Complete button (series)
+    const completeBtn = document.getElementById('search-complete-btn');
+    if (completeBtn) {
+      completeBtn.addEventListener('click', () => {
+        const showId = meta.imdb_id || meta.id;
+        const sc = document.getElementById('stream-container');
+        if (sc) {
+          sc.classList.remove('hidden');
+          sc.innerHTML = `<div class="loading-state"><div class="spinner"></div><p>Searching for complete series...</p></div>`;
+          sc.scrollIntoView({ behavior: 'smooth' });
+        }
+        loadCompleteStreams(showId, meta);
       });
     }
 
@@ -2356,6 +2407,144 @@
     }
   }
 
+  async function loadCompleteStreams(showId, meta, containerId) {
+    const sc = document.getElementById(containerId || 'stream-container');
+    if (!sc) return;
+
+    const streams = await api.getCompleteStreams(showId);
+
+    if (streams.length === 0) {
+      sc.innerHTML = `
+        <div class="empty-state" style="padding:24px 0">
+          <p>No complete packs found</p>
+          <p style="font-size:12px;color:var(--text-muted)">Try searching for individual seasons or episodes instead</p>
+        </div>
+      `;
+      return;
+    }
+
+    let html = `<h4 style="margin:0 0 12px;font-size:14px;color:var(--text-dim)">Complete Packs (${streams.length} found)</h4>`;
+    html += '<div class="season-pack-results">';
+    streams.forEach((s, i) => {
+      const title = s.title || 'Unknown';
+      const lines = title.split('\n');
+      const mainTitle = escapeHTML(lines[0]);
+      const detail = lines.slice(1).map(l => escapeHTML(l)).join(' &middot; ');
+      const seeds = s.seeds || 0;
+      let seedColor = 'var(--success)';
+      let seedBg = 'rgba(0,206,201,0.15)';
+      if (seeds < 5) { seedColor = 'var(--danger)'; seedBg = 'rgba(255,107,107,0.15)'; }
+      else if (seeds < 20) { seedColor = 'var(--warning)'; seedBg = 'rgba(253,203,110,0.15)'; }
+
+      html += `
+        <div class="stream-item complete-pack-item" data-pack-index="${i}">
+          <div class="stream-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+          </div>
+          <div class="stream-info">
+            <div class="stream-title">${mainTitle}</div>
+            <div class="stream-detail">${detail}</div>
+          </div>
+          <span class="stream-quality" style="background:${seedBg};color:${seedColor}">${seeds} seeds</span>
+        </div>
+      `;
+    });
+    html += '</div>';
+
+    sc.innerHTML = html;
+
+    // Attach click handlers to complete pack items
+    sc.querySelectorAll('.complete-pack-item').forEach(item => {
+      item.addEventListener('click', () => {
+        const idx = parseInt(item.dataset.packIndex, 10);
+        const stream = streams[idx];
+        if (!stream) return;
+
+        // Highlight selected
+        sc.querySelectorAll('.complete-pack-item').forEach(el => el.classList.remove('selected'));
+        item.classList.add('selected');
+
+        // Show or update download button
+        let dlBtn = document.getElementById('complete-pack-dl-btn');
+        if (!dlBtn) {
+          const btnHtml = `<button id="complete-pack-dl-btn" class="season-pack-download-btn">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            Download Complete
+          </button>`;
+          sc.insertAdjacentHTML('beforeend', btnHtml);
+          dlBtn = document.getElementById('complete-pack-dl-btn');
+        }
+
+        dlBtn.onclick = () => addCompletePackToLibrary(stream, meta);
+      });
+    });
+  }
+
+  async function addCompletePackToLibrary(stream, meta) {
+    const btn = document.getElementById('complete-pack-dl-btn');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Starting download...';
+    }
+
+    try {
+      const body = {
+        imdbId: meta.imdb_id || meta.id,
+        name: meta.name || 'Unknown',
+        poster: meta.poster || '',
+        year: meta.releaseInfo || meta.year || '',
+        magnetUri: stream.magnetUri || stream.url,
+        infoHash: stream.infoHash,
+        quality: stream.quality || '',
+        size: stream.size || '',
+        season: 0,
+      };
+
+      const resp = await fetch('/api/library/add-pack', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      const data = await resp.json();
+      if (!resp.ok) {
+        throw new Error(data.error || 'Failed to start complete pack download');
+      }
+
+      if (data.status === 'already_downloading') {
+        showToast('This pack is already downloading');
+      } else if (data.status === 'no_video_files') {
+        showToast('No video files found in this torrent');
+      } else if (data.status === 'all_exist') {
+        showToast('All files already in library');
+      } else {
+        const count = (data.items || []).filter(i => i.status === 'started').length;
+        showToast(`Complete pack downloading — ${count} file${count !== 1 ? 's' : ''} added to library`);
+      }
+
+      if (btn) {
+        btn.innerHTML = `
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+          Downloading
+        `;
+      }
+    } catch (err) {
+      showToast(err.message);
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = 'Download Complete';
+      }
+    }
+  }
+
   async function loadLibrary() {
     hideLibraryGroupOverlay();
     dom.libraryContent.innerHTML = '';
@@ -2391,13 +2580,14 @@
       // Group shows by name (imdbId or name), then by season
       const showGroups = new Map();
       for (const ep of shows) {
-        const showKey = ep.imdbId || ep.name || 'Unknown Show';
+        const showKey = ep.imdbId || ep.showName || ep.name || 'Unknown Show';
         if (!showGroups.has(showKey)) {
-          showGroups.set(showKey, { name: ep.name, poster: ep.poster, year: ep.year, seasons: new Map() });
+          showGroups.set(showKey, { name: ep.showName || ep.name, poster: ep.poster, year: ep.year, seasons: new Map() });
         }
         const group = showGroups.get(showKey);
-        // Use the best poster/name available
+        // Use the best poster/name/showName available
         if (!group.poster && ep.poster) group.poster = ep.poster;
+        if (ep.showName && (!group.name || group.name.includes(' - '))) group.name = ep.showName;
         const seasonNum = ep.season || 1;
         if (!group.seasons.has(seasonNum)) {
           group.seasons.set(seasonNum, []);
@@ -2635,6 +2825,18 @@
           </div>
         </div>`;
       metaHtml = `<div class="library-card-meta converting">Converting to MP4...${item.convertError ? ' (retry failed)' : ''}</div>`;
+    } else if (item.status === 'paused') {
+      overlayHtml = `
+        <div class="library-card-overlay paused">Paused ${item.progress || 0}%</div>
+        <div class="library-card-progress">
+          <div class="library-card-progress-bar paused" style="width:${item.progress || 0}%"></div>
+        </div>
+        <div class="library-card-play library-card-resume" data-id="${escapeHTML(item.id)}">
+          <div class="library-card-play-circle">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          </div>
+        </div>`;
+      metaHtml = `<div class="library-card-meta paused">Paused</div>`;
     } else if (item.status === 'queued') {
       const posText = item._queuePosition ? `#${item._queuePosition} in queue` : 'Waiting...';
       overlayHtml = `<div class="library-card-overlay queued">Queued</div>`;
@@ -2649,8 +2851,14 @@
         </div>`;
       metaHtml = `<div class="library-card-meta complete">${size ? size : 'Ready'}</div>`;
     } else if (item.status === 'failed') {
-      overlayHtml = `<div class="library-card-overlay failed">${escapeHTML(item.error || 'Failed')}</div>`;
-      metaHtml = `<div class="library-card-meta failed">Failed</div>`;
+      overlayHtml = `
+        <div class="library-card-overlay failed">${escapeHTML(item.error || 'Failed')}</div>
+        <div class="library-card-play library-card-retry" data-id="${escapeHTML(item.id)}">
+          <div class="library-card-play-circle">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          </div>
+        </div>`;
+      metaHtml = `<div class="library-card-meta failed">Failed &middot; tap to retry</div>`;
     }
 
     return `
@@ -2995,6 +3203,32 @@
         const itemId = card.dataset.id;
         const itemName = card.dataset.itemName || '';
         showRelinkModal(itemId, itemName);
+      });
+    });
+
+    // Resume buttons on paused library cards
+    container.querySelectorAll('.library-card-resume').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = btn.dataset.id;
+        try {
+          await fetch(`/api/library/${encodeURIComponent(id)}/resume`, { method: 'POST' });
+          showToast('Resuming download...');
+          loadLibrary();
+        } catch { showToast('Failed to resume'); }
+      });
+    });
+
+    // Retry buttons on failed library cards
+    container.querySelectorAll('.library-card-retry').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = btn.dataset.id;
+        try {
+          await fetch(`/api/library/${encodeURIComponent(id)}/retry`, { method: 'POST' });
+          showToast('Retrying download...');
+          loadLibrary();
+        } catch { showToast('Failed to retry'); }
       });
     });
 
@@ -3453,7 +3687,7 @@
       result.push({
         _isPack: true,
         packId,
-        name: first.name,
+        name: first.showName || first.name,
         poster: first.poster,
         season: first.season,
         quality: first.quality,
@@ -3585,6 +3819,9 @@
         </button>`;
     } else if (pack.status === 'failed') {
       actions = `
+        <button class="download-action-btn resume" data-pack-id="${escapeHTML(pack.packId)}" data-action="retry-pack" title="Retry All">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        </button>
         <button class="download-action-btn cancel" data-pack-id="${escapeHTML(pack.packId)}" data-action="remove-pack" title="Remove All">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
         </button>`;
@@ -3597,10 +3834,11 @@
 
     // Build collapsed episode list (hidden by default)
     let episodeListHtml = pack.episodes.map(ep => {
-      const epLabel = ep.episode != null ? `E${String(ep.episode).padStart(2, '0')}` : ep.fileName || '?';
+      const epLabel = ep.episode != null ? `E${String(ep.episode).padStart(2, '0')}` : '?';
+      const epName = ep.name || ep.fileName || '';
       const epPct = ep.status === 'complete' ? '100%' : `${ep.progress || 0}%`;
       const epStatus = ep.status === 'complete' ? 'done' : ep.status === 'failed' ? 'fail' : '';
-      return `<div class="pack-episode-row ${epStatus}"><span class="pack-ep-label">${escapeHTML(epLabel)}</span><span class="pack-ep-file">${escapeHTML(ep.fileName || '')}</span><span class="pack-ep-pct">${epPct}</span></div>`;
+      return `<div class="pack-episode-row ${epStatus}"><span class="pack-ep-label">${escapeHTML(epLabel)}</span><span class="pack-ep-file">${escapeHTML(epName)}</span><span class="pack-ep-pct">${epPct}</span></div>`;
     }).join('');
 
     return `
@@ -3672,6 +3910,9 @@
         </button>`;
     } else if (item.status === 'failed') {
       actions = `
+        <button class="download-action-btn resume" data-id="${escapeHTML(item.id)}" data-action="retry" title="Retry">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        </button>
         <button class="download-action-btn cancel" data-id="${escapeHTML(item.id)}" data-action="remove" title="Remove">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
         </button>`;
@@ -3731,12 +3972,31 @@
           return;
         }
 
+        if (action === 'retry-pack' && packId) {
+          // Retry all failed episodes in this pack
+          try {
+            const resp = await fetch('/api/library');
+            const data = await resp.json();
+            const packItems = (data.items || []).filter(i => i.packId === packId && i.status === 'failed');
+            await Promise.all(packItems.map(i =>
+              fetch(`/api/library/${encodeURIComponent(i.id)}/retry`, { method: 'POST' })
+            ));
+            showToast('Retrying failed episodes...');
+          } catch { showToast('Failed to retry pack'); }
+          renderDownloads();
+          return;
+        }
+
         if (action === 'pause') {
           await fetch(`/api/library/${encodeURIComponent(id)}/pause`, { method: 'POST' });
           renderDownloads();
         } else if (action === 'resume') {
           await fetch(`/api/library/${encodeURIComponent(id)}/resume`, { method: 'POST' });
           renderDownloads();
+        } else if (action === 'retry') {
+          await fetch(`/api/library/${encodeURIComponent(id)}/retry`, { method: 'POST' });
+          renderDownloads();
+          showToast('Retrying download...');
         } else if (action === 'remove') {
           await fetch(`/api/library/${encodeURIComponent(id)}`, { method: 'DELETE' });
           renderDownloads();

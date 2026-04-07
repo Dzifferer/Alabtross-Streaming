@@ -837,6 +837,63 @@ html, body {
   display: none;
 }
 
+/* ===== Library Group Tiles ===== */
+.library-group-tile {
+  cursor: pointer;
+}
+
+/* ===== Library Group Overlay ===== */
+.library-group-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: var(--bg, #0f0f0f);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.library-group-overlay.hidden {
+  display: none;
+}
+
+.library-group-overlay-header {
+  position: sticky;
+  top: 0;
+  z-index: 11;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: var(--bg, #0f0f0f);
+  border-bottom: 1px solid var(--border, rgba(255,255,255,0.1));
+}
+
+.library-group-overlay-back {
+  background: none;
+  border: none;
+  color: var(--text-primary, #fff);
+  padding: 8px;
+  cursor: pointer;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.library-group-overlay-back:active {
+  background: rgba(255,255,255,0.1);
+}
+
+.library-group-overlay-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary, #fff);
+}
+
+.library-group-overlay-grid {
+  padding: 16px;
+}
+
 /* ===== Channel Cards (Live TV) ===== */
 .channel-card {
   flex-shrink: 0;

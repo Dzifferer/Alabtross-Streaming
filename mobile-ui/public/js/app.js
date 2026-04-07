@@ -212,6 +212,13 @@
   }
 
   function goBack() {
+    // If library group overlay is open, close it instead of navigating back
+    const libOverlay = document.getElementById('library-group-overlay');
+    if (libOverlay && !libOverlay.classList.contains('hidden')) {
+      hideLibraryGroupOverlay();
+      return;
+    }
+
     preload.cancel();
     _lastRankedStreams = [];
     _selectedStreamIndex = -1;
@@ -789,6 +796,26 @@
             : ''}
           <div class="poster-placeholder">${!poster ? name : ''}</div>
           <div class="collection-badge">${count} movies</div>
+        </div>
+        <div class="card-info">
+          <div class="card-title">${name}</div>
+        </div>
+      </div>
+    `;
+  }
+
+  function libraryGroupTileHTML(group) {
+    const poster = isSafePosterUrl(group.poster || '') ? group.poster : '';
+    const name = escapeHTML(group.name || 'Group');
+    const count = group.count;
+    const typeLabel = group.type === 'collection' ? 'movies' : 'titles';
+
+    return `
+      <div class="card library-group-tile" data-group-id="${escapeHTML(group.id)}" data-group-type="${group.type}">
+        <div class="card-poster collection-poster-stack">
+          ${poster ? `<img src="${poster}" alt="${name}" loading="lazy" class="loading">` : ''}
+          <div class="poster-placeholder">${!poster ? name : ''}</div>
+          <div class="collection-badge">${count} ${typeLabel}</div>
         </div>
         <div class="card-info">
           <div class="card-title">${name}</div>
@@ -2130,6 +2157,7 @@
   }
 
   async function loadLibrary() {
+    hideLibraryGroupOverlay();
     dom.libraryContent.innerHTML = '';
     dom.libraryEmpty.classList.add('hidden');
 
@@ -2228,7 +2256,8 @@
           }
         }
 
-        // Render collection groups (only if 2+ movies), sorted by year within each
+        // Render collection groups as poster tiles (only if 2+ movies)
+        _libraryGroupData = {};
         for (const [colId, colMovies] of Object.entries(collectionGroups)) {
           if (colMovies.length >= 2) {
             const col = colMap[colId];
@@ -2238,11 +2267,8 @@
               const yearB = (metaMap[b.imdbId]?.year || b.year || '9999');
               return yearA.localeCompare(yearB);
             });
-            html += `<div class="library-collection-group">`;
-            html += `<div class="library-collection-header collapsed" data-collection-id="${escapeHTML(colId)}">${escapeHTML(col.name)} (${colMovies.length})</div>`;
-            html += `<div class="library-collection-movies collapsed" data-collection-id="${escapeHTML(colId)}">`;
-            html += colMovies.map(item => renderLibraryItem(item)).join('');
-            html += `</div></div>`;
+            _libraryGroupData[colId] = { name: col.name, poster: col.poster || colMovies[0].poster, movies: colMovies };
+            html += libraryGroupTileHTML({ id: colId, name: col.name, poster: col.poster || colMovies[0].poster, count: colMovies.length, type: 'collection' });
           } else {
             ungroupedMovies.push(...colMovies);
           }
@@ -2284,7 +2310,7 @@
           }
         }
 
-        // Sort genres alphabetically, render each as a collapsible group
+        // Sort genres alphabetically, render each as a poster tile
         const sortedGenres = Object.keys(genreGroups).sort();
         for (const genre of sortedGenres) {
           const genreMovies = genreGroups[genre];
@@ -2295,11 +2321,8 @@
             return yearA.localeCompare(yearB);
           });
           const genreId = 'genre_' + genre.toLowerCase().replace(/[^a-z0-9]/g, '_');
-          html += `<div class="library-collection-group">`;
-          html += `<div class="library-collection-header collapsed" data-collection-id="${escapeHTML(genreId)}">${escapeHTML(genre)} (${genreMovies.length})</div>`;
-          html += `<div class="library-collection-movies collapsed" data-collection-id="${escapeHTML(genreId)}">`;
-          html += genreMovies.map(item => renderLibraryItem(item)).join('');
-          html += `</div></div>`;
+          _libraryGroupData[genreId] = { name: genre, poster: genreMovies[0].poster, movies: genreMovies };
+          html += libraryGroupTileHTML({ id: genreId, name: genre, poster: genreMovies[0].poster, count: genreMovies.length, type: 'genre' });
         }
 
         // Render remaining movies that have no genre or are alone in their genre
@@ -2339,7 +2362,7 @@
 
       dom.libraryContent.innerHTML = html;
 
-      // Attach collapse/expand handlers for library collection headers
+      // Attach collapse/expand handlers for TV Show headers only
       dom.libraryContent.querySelectorAll('.library-collection-header').forEach(header => {
         header.addEventListener('click', () => {
           const colId = header.dataset.collectionId;
@@ -2350,6 +2373,9 @@
           }
         });
       });
+
+      // Attach click handlers for movie collection/genre tiles
+      attachLibraryGroupTileListeners(dom.libraryContent, _libraryGroupData);
 
       attachLibraryHandlers();
 
@@ -2435,9 +2461,86 @@
       </div>`;
   }
 
-  function attachLibraryHandlers() {
+  // ─── Library Group Overlay ─────────────────────
+
+  let _libraryGroupData = {};
+
+  function showLibraryGroupOverlay(groupId, groupData) {
+    let overlay = document.getElementById('library-group-overlay');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.id = 'library-group-overlay';
+      overlay.className = 'library-group-overlay hidden';
+      document.getElementById('view-library').appendChild(overlay);
+    }
+
+    const name = escapeHTML(groupData.name);
+    overlay.innerHTML = `
+      <div class="library-group-overlay-header">
+        <button class="library-group-overlay-back" aria-label="Back">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="15 18 9 12 15 6"/>
+          </svg>
+        </button>
+        <span class="library-group-overlay-title">${name}</span>
+      </div>
+      <div class="library-group-overlay-grid library-grid">
+        ${groupData.movies.map(item => renderLibraryItem(item)).join('')}
+      </div>
+    `;
+
+    overlay.classList.remove('hidden');
+    dom.libraryContent.classList.add('hidden');
+    const emptyEl = document.getElementById('library-empty');
+    if (emptyEl) emptyEl.classList.add('hidden');
+
+    // Attach play/remove handlers inside overlay
+    attachLibraryHandlers(overlay.querySelector('.library-group-overlay-grid'));
+
+    // Back button
+    overlay.querySelector('.library-group-overlay-back').addEventListener('click', () => {
+      hideLibraryGroupOverlay();
+    });
+
+    // Image load/error handlers
+    overlay.querySelectorAll('img.loading').forEach(img => {
+      img.addEventListener('load', () => img.classList.remove('loading'));
+      img.addEventListener('error', () => { img.style.display = 'none'; });
+    });
+  }
+
+  function hideLibraryGroupOverlay() {
+    const overlay = document.getElementById('library-group-overlay');
+    if (overlay) {
+      overlay.classList.add('hidden');
+      overlay.innerHTML = '';
+    }
+    dom.libraryContent.classList.remove('hidden');
+  }
+
+  function attachLibraryGroupTileListeners(container, groupData) {
+    container.querySelectorAll('.library-group-tile').forEach(tile => {
+      tile.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const groupId = tile.dataset.groupId;
+        const data = groupData[groupId];
+        if (data) {
+          showLibraryGroupOverlay(groupId, data);
+        }
+      });
+    });
+
+    // Image load/error handlers for tile poster images
+    container.querySelectorAll('.library-group-tile img.loading').forEach(img => {
+      img.addEventListener('load', () => img.classList.remove('loading'));
+      img.addEventListener('error', () => { img.style.display = 'none'; });
+    });
+  }
+
+  function attachLibraryHandlers(container) {
+    container = container || dom.libraryContent;
     // Remove buttons
-    dom.libraryContent.querySelectorAll('.library-card-remove').forEach(btn => {
+    container.querySelectorAll('.library-card-remove').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         removeLibraryItem(btn.dataset.id);
@@ -2445,7 +2548,7 @@
     });
 
     // Click on card to play if complete or converting (converting items still play via remux)
-    dom.libraryContent.querySelectorAll('.card[data-status="complete"], .card[data-status="converting"]').forEach(card => {
+    container.querySelectorAll('.card[data-status="complete"], .card[data-status="converting"]').forEach(card => {
       card.addEventListener('click', () => {
         playLibraryItem(card.dataset.id);
       });

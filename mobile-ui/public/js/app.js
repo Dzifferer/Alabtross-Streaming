@@ -759,7 +759,6 @@
 
       await dom.videoPlayer.play();
       openCurtains();
-      enterPlayerFullscreen();
     } catch (e) {
       showPlayerError('Channel unavailable', escapeHTML(e.message));
     }
@@ -1588,15 +1587,24 @@
     `;
   }
 
+  let _curtainAnimating = false;
+
   function openCurtains() {
     const curtainStage = dom.playerOverlay.querySelector('.curtain-stage');
     if (curtainStage) {
+      _curtainAnimating = true;
       curtainStage.classList.remove('dropping');
       curtainStage.classList.add('opening');
       // Wait for curtain panels to fully slide off-screen (1.2s transition)
-      setTimeout(() => { dom.playerOverlay.classList.add('hidden'); }, 1600);
+      // then hide the overlay and enter fullscreen
+      setTimeout(() => {
+        _curtainAnimating = false;
+        dom.playerOverlay.classList.add('hidden');
+        enterPlayerFullscreen();
+      }, 1600);
     } else {
       dom.playerOverlay.classList.add('hidden');
+      enterPlayerFullscreen();
     }
   }
 
@@ -1705,14 +1713,11 @@
         dom.playerOverlay.classList.remove('hidden');
       };
       const onPlaying = () => {
-        dom.playerOverlay.classList.add('hidden');
+        if (!_curtainAnimating) dom.playerOverlay.classList.add('hidden');
       };
       dom.videoPlayer.addEventListener('waiting', onStalled);
       dom.videoPlayer.addEventListener('stalled', onStalled);
       dom.videoPlayer.addEventListener('playing', onPlaying);
-
-      // Enter fullscreen on mobile for immersive playback
-      enterPlayerFullscreen();
     } catch (e) {
       if (statusInterval) clearInterval(statusInterval);
       let hint = escapeHTML(e.message);
@@ -2044,7 +2049,6 @@
 
       await dom.videoPlayer.play();
       openCurtains();
-      enterPlayerFullscreen();
     } catch (e) {
       let hint = escapeHTML(e.message);
       if (e.message.includes('Media error') && e.message.includes('direct')) {
@@ -2064,7 +2068,6 @@
           });
           await dom.videoPlayer.play();
           openCurtains();
-          enterPlayerFullscreen();
           return;
         } catch (retryErr) {
           hint = escapeHTML(retryErr.message);

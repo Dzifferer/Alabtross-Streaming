@@ -856,8 +856,9 @@ else
     echo "  Then install Tailscale on your phone/laptop"
     echo "  and sign in with the same account."
     echo ""
-    echo "  Access Albatross via your Tailscale IP:"
-    echo "    http://<tailscale-ip>:8080"
+    echo "  After setup completes, access Albatross at:"
+    echo "    https://albatross  (short name, requires MagicDNS)"
+    echo "    https://albatross.<your-tailnet>.ts.net  (full name)"
     echo "---------------------------------------------"
     echo ""
 
@@ -875,6 +876,35 @@ else
   else
     err "Failed to install Tailscale. Install manually: https://tailscale.com/download"
   fi
+fi
+
+# ---------------------------------------------------------------
+# STEP 8b — Tailscale Serve (HTTPS proxy)
+# ---------------------------------------------------------------
+step "Configuring Tailscale Serve (HTTPS access)"
+
+if tailscale status &>/dev/null; then
+  # Rename machine to "albatross" for clean MagicDNS URL
+  info "Setting Tailscale hostname to 'albatross'..."
+  tailscale set --hostname=albatross
+
+  # Enable HTTPS proxy: tailscale serve proxies port 443 -> localhost:8080
+  info "Enabling Tailscale Serve (HTTPS on port 443 → localhost:8080)..."
+  tailscale serve --bg --https=443 http://localhost:8080
+
+  # Get the full MagicDNS name
+  TS_FQDN=$(tailscale status --json 2>/dev/null | grep -o '"DNSName":"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//')
+  if [[ -n "$TS_FQDN" ]]; then
+    ok "Tailscale Serve active — https://$TS_FQDN"
+    ok "Short URL (MagicDNS):  https://albatross"
+  else
+    ok "Tailscale Serve configured — https://albatross"
+  fi
+else
+  info "Tailscale not connected — skipping Tailscale Serve setup."
+  info "After authenticating, run:"
+  info "  sudo tailscale set --hostname=albatross"
+  info "  sudo tailscale serve --bg --https=443 http://localhost:8080"
 fi
 
 # ---------------------------------------------------------------
@@ -1017,7 +1047,8 @@ TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || echo "not connected")
 echo "  Local IP:        $LOCAL_IP"
 echo "  Tailscale IP:    $TAILSCALE_IP"
 echo "  Stremio Server:  http://$LOCAL_IP:11470"
-echo "  Mobile UI:       http://$LOCAL_IP:8080"
+echo "  Albatross:       https://albatross (via Tailscale Serve)"
+echo "  Albatross (LAN): http://$LOCAL_IP:8080"
 echo "  Storage:         $STORAGE_LABEL"
 echo "  VPN:             Tailscale (no port forwarding needed)"
 if [[ "$HAS_DUCKDNS" == "yes" && -n "$DUCKDNS_DOMAIN" ]]; then
@@ -1044,11 +1075,12 @@ echo "     Sign in with the same account"
 echo ""
 NEXT_STEP=$((NEXT_STEP+1))
 echo "  $NEXT_STEP. Access Albatross from anywhere via Tailscale:"
-echo "     http://$TAILSCALE_IP:8080"
+echo "     https://albatross"
+echo "     (or https://albatross.<your-tailnet>.ts.net)"
 echo "     Tip: Add to Home Screen for an app-like experience"
 echo ""
 NEXT_STEP=$((NEXT_STEP+1))
-echo "  $NEXT_STEP. On LAN, access directly:"
+echo "  $NEXT_STEP. On LAN, access directly (fallback):"
 echo "     http://$LOCAL_IP:8080"
 echo ""
 echo "  ---- USEFUL COMMANDS ----"
@@ -1058,6 +1090,7 @@ echo "  docker restart stremio-server  — restart Stremio"
 echo "  docker stats stremio-server    — CPU/RAM usage"
 echo "  tailscale status               — check Tailscale connection"
 echo "  tailscale ip                   — show Tailscale IP"
+echo "  tailscale serve status         — check HTTPS proxy status"
 echo "  df -h \"$MOUNT_POINT\"           — check drive space"
 echo "  cat $LOG_FILE                  — view setup log"
 echo ""

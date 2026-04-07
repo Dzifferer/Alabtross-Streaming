@@ -37,4 +37,9 @@ sudo docker run -d \
   -v "/mnt/movies/torrent-cache:/app/torrent-cache" \
   alabtross-mobile
 
-echo "==> Done! Albatross is live on port 8080"
+# Ensure Tailscale Serve is still active after container restart
+if command -v tailscale &>/dev/null && tailscale status &>/dev/null; then
+  tailscale serve --bg --https=443 http://localhost:8080 2>/dev/null || true
+fi
+
+echo "==> Done! Albatross is live at https://albatross (and http://localhost:8080)"

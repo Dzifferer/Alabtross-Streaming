@@ -76,8 +76,16 @@ tailscale status
 # Show Tailscale IP
 tailscale ip
 
+# Check HTTPS proxy status
+tailscale serve status
+
+# Re-enable HTTPS proxy (if needed)
+sudo tailscale serve --bg --https=443 http://localhost:8080
+
 # Restart Tailscale
 sudo systemctl restart tailscaled
+
+# Access URL: https://albatross (short) or https://albatross.<tailnet>.ts.net (full)
 ```
 
 ## SSH

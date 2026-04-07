@@ -165,7 +165,7 @@ No port forwarding or manual configuration needed — Tailscale handles NAT trav
 
 16. The Jetson is now running headless. Disconnect the USB cable if you want — everything runs over ethernet.
 
-17. On your phone: connect Tailscale, open `http://<jetson-tailscale-ip>:8080`
+17. On your phone: connect Tailscale, open `https://albatross`
 
 18. To SSH in anytime:
     ```bash
@@ -230,7 +230,7 @@ Metadata (movie info, posters, search) always comes from **Cinemeta** regardless
 ## After Setup
 
 1. **Connect** your phone/laptop to Tailscale
-2. **Open** `http://<jetson-tailscale-ip>:8080` in your mobile browser
+2. **Open** `https://albatross` in your mobile browser (or `https://albatross.<your-tailnet>.ts.net`)
 3. **Add to Home Screen** for an app-like experience (it's a PWA)
 4. Browse, search, and stream — the default Custom mode works immediately with no extra configuration
 
@@ -238,9 +238,12 @@ Metadata (movie info, posters, search) always comes from **Cinemeta** regardless
 
 | Service | Port | Protocol | Exposed to Internet |
 |---------|------|----------|---------------------|
+| Albatross (HTTPS) | 443 | TCP | No (Tailscale Serve) |
+| Albatross (HTTP) | 8080 | TCP | No (LAN fallback) |
 | Stremio Server | 11470 | TCP | No (Tailscale only) |
-| Albatross Mobile UI | 8080 | TCP | No (Tailscale only) |
 | SSH | 22 | TCP | No (LAN only) |
+
+> Port 443 is served by Tailscale Serve, which proxies HTTPS traffic to the local Express server on port 8080 with automatic TLS certificates.
 
 ## Mobile UI Features
 
@@ -315,6 +318,13 @@ docker restart stremio-server
 ```bash
 docker logs alabtross-mobile
 docker restart alabtross-mobile
+```
+
+**HTTPS URL not working (https://albatross):**
+```bash
+tailscale serve status                                      # check if serve is active
+sudo tailscale serve --bg --https=443 http://localhost:8080  # re-enable if needed
+tailscale set --hostname=albatross                           # ensure hostname is set
 ```
 
 **External drive not mounting on reboot:**

@@ -639,7 +639,10 @@ class StremioAPI {
    * Returns { winner, results, allStreams } where winner is null if no clear winner.
    */
   async raceTopStreams(streams, timeoutMs = 4000) {
-    const top3 = streams.slice(0, 3);
+    // Prefer browser-playable streams (MP4/WebM + H.264) to avoid HEVC playback failures.
+    // Fall back to all streams only if no browser-playable candidates exist.
+    const playable = streams.filter(s => s.browserPlayable);
+    const top3 = (playable.length > 0 ? playable : streams).slice(0, 3);
     if (top3.length === 0) return { winner: null, results: [], allStreams: streams };
 
     if (this._speedTestController) this._speedTestController.abort();

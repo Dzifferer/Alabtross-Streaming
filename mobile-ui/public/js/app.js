@@ -1764,55 +1764,74 @@
     `;
 
     try {
-      // Fetch library items, cache items, and active torrents in parallel
-      const [libResp, cacheResp, torrentResp] = await Promise.all([
-        fetch('/api/library').then(r => { if (!r.ok) throw new Error(`Library API ${r.status}`); return r.json(); }).catch(e => { console.error('[Library] fetch failed:', e); return { items: [] }; }),
-        fetch('/api/cache').then(r => { if (!r.ok) throw new Error(`Cache API ${r.status}`); return r.json(); }).catch(e => { console.error('[Cache] fetch failed:', e); return { items: [] }; }),
-        fetch('/api/torrent-status').then(r => r.json()).catch(() => ({ torrents: [] })),
-      ]);
+      const libResp = await fetch('/api/library').then(r => { if (!r.ok) throw new Error(`Library API ${r.status}`); return r.json(); }).catch(e => { console.error('[Library] fetch failed:', e); return { items: [] }; });
 
       const libraryItems = libResp.items || [];
-      const cacheItems = cacheResp.items || [];
-      const activeTorrents = torrentResp.torrents || [];
-      console.log(`[Library] ${libraryItems.length} library items, ${cacheItems.length} cache items, ${activeTorrents.length} active torrents`);
+      console.log(`[Library] ${libraryItems.length} library items`);
 
-      // Build a set of names already in library to avoid duplicates
-      const libraryNames = new Set(libraryItems.map(i => (i.name || '').toLowerCase()));
-
-      // Add cached items not in library
-      const cachedEntries = cacheItems
-        .filter(c => !libraryNames.has(c.name.toLowerCase()))
-        .map(c => {
-          // Check if this is actively streaming
-          const active = activeTorrents.find(t => t.name === c.name);
-          return {
-            id: 'cache_' + c.name,
-            name: c.name,
-            type: 'movie',
-            status: 'cached',
-            fileSize: c.videoSize || c.totalSize,
-            videoFile: c.videoFile,
-            downloadSpeed: active ? active.downloadSpeed : 0,
-            numPeers: active ? active.numPeers : 0,
-            poster: '',
-            year: '',
-            quality: '',
-          };
-        });
-
-      const allItems = [...libraryItems, ...cachedEntries];
-
-      if (allItems.length === 0) {
+      if (libraryItems.length === 0) {
         dom.libraryContent.innerHTML = '';
         dom.libraryEmpty.classList.remove('hidden');
         return;
       }
 
-      dom.libraryContent.innerHTML = allItems.map(item => renderLibraryItem(item)).join('');
+      // Separate movies and TV shows
+      const movies = libraryItems.filter(i => i.type !== 'series');
+      const shows = libraryItems.filter(i => i.type === 'series');
+
+      // Group shows by name (imdbId or name), then by season
+      const showGroups = new Map();
+      for (const ep of shows) {
+        const showKey = ep.imdbId || ep.name || 'Unknown Show';
+        if (!showGroups.has(showKey)) {
+          showGroups.set(showKey, { name: ep.name, poster: ep.poster, year: ep.year, seasons: new Map() });
+        }
+        const group = showGroups.get(showKey);
+        // Use the best poster/name available
+        if (!group.poster && ep.poster) group.poster = ep.poster;
+        const seasonNum = ep.season || 1;
+        if (!group.seasons.has(seasonNum)) {
+          group.seasons.set(seasonNum, []);
+        }
+        group.seasons.get(seasonNum).push(ep);
+      }
+
+      // Sort episodes within each season
+      for (const group of showGroups.values()) {
+        for (const [, episodes] of group.seasons) {
+          episodes.sort((a, b) => (a.episode || 0) - (b.episode || 0));
+        }
+      }
+
+      let html = '';
+
+      // Movies section
+      if (movies.length > 0) {
+        html += `<div class="library-section-header">Movies</div>`;
+        html += movies.map(item => renderLibraryItem(item)).join('');
+      }
+
+      // TV Shows section
+      if (showGroups.size > 0) {
+        html += `<div class="library-section-header">TV Shows</div>`;
+        for (const [, group] of showGroups) {
+          html += `<div class="library-show-group">`;
+          html += `<div class="library-show-header">${escapeHTML(group.name)}${group.year ? ' (' + escapeHTML(group.year) + ')' : ''}</div>`;
+          const sortedSeasons = [...group.seasons.keys()].sort((a, b) => a - b);
+          for (const seasonNum of sortedSeasons) {
+            const episodes = group.seasons.get(seasonNum);
+            html += `<div class="library-season-header">Season ${seasonNum}</div>`;
+            html += episodes.map(ep => renderLibraryItem(ep, true)).join('');
+          }
+          html += `</div>`;
+        }
+      }
+
+      dom.libraryContent.innerHTML = html;
       attachLibraryHandlers();
 
-      // Start progress polling for downloading or active items
-      const needsPoll = allItems.some(i => i.status === 'downloading' || i.downloadSpeed > 0);
+      // Start progress polling for downloading items
+      const needsPoll = libraryItems.some(i => i.status === 'downloading');
       if (needsPoll) {
         startLibraryProgressPoll();
       }
@@ -1826,9 +1845,14 @@
     }
   }
 
-  function renderLibraryItem(item) {
+  function renderLibraryItem(item, isEpisode) {
     const poster = item.poster || '';
-    const title = escapeHTML(item.name || 'Unknown');
+    let title;
+    if (isEpisode && item.episode != null) {
+      title = `E${item.episode}` + (item.name ? ` — ${escapeHTML(item.name)}` : '');
+    } else {
+      title = escapeHTML(item.name || 'Unknown');
+    }
     const year = item.year || '';
     const quality = item.quality ? `<span class="library-quality">${escapeHTML(item.quality)}</span>` : '';
 
@@ -1846,24 +1870,22 @@
     } else if (item.status === 'complete') {
       const size = item.fileSize ? formatSize(item.fileSize) : item.size || '';
       statusBadge = `<div class="library-status complete">${size ? size + ' &middot; ' : ''}Ready to play</div>`;
-    } else if (item.status === 'cached') {
-      const size = item.fileSize ? formatSize(item.fileSize) : '';
-      const speed = item.downloadSpeed > 0 ? formatSpeed(item.downloadSpeed) : '';
-      const peers = item.numPeers > 0 ? item.numPeers + ' peers' : '';
-      const details = [size, speed, peers].filter(Boolean).join(' &middot; ');
-      statusBadge = `<div class="library-status cached" style="color:var(--text-muted)">${details || 'In cache'}</div>`;
     } else if (item.status === 'failed') {
       statusBadge = `<div class="library-status failed">${escapeHTML(item.error || 'Download failed')}</div>`;
     }
 
+    const posterHtml = isEpisode
+      ? ''
+      : `<div class="library-item-poster">
+          ${poster ? `<img src="${poster}" alt="${escapeHTML(item.name || '')}">` : `<div class="poster-placeholder">${escapeHTML(item.name || 'Unknown')}</div>`}
+        </div>`;
+
     return `
-      <div class="library-item" data-id="${escapeHTML(item.id)}" data-status="${item.status}">
-        <div class="library-item-poster">
-          ${poster ? `<img src="${poster}" alt="${title}">` : `<div class="poster-placeholder">${title}</div>`}
-        </div>
+      <div class="library-item${isEpisode ? ' library-episode' : ''}" data-id="${escapeHTML(item.id)}" data-status="${item.status}">
+        ${posterHtml}
         <div class="library-item-info">
           <div class="library-item-title">${title}</div>
-          <div class="library-item-meta">${year}${quality ? ' &middot; ' : ''}${quality}</div>
+          <div class="library-item-meta">${isEpisode ? '' : year}${quality ? (isEpisode ? '' : ' &middot; ') : ''}${quality}</div>
           ${statusBadge}
         </div>
         <div class="library-item-actions">

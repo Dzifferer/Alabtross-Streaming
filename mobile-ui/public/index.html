@@ -211,67 +211,39 @@
         </div>
       </div>
 
-      <!-- Share / VPN QR Code View -->
+      <!-- Share / Tailscale VPN View -->
       <div id="view-share" class="view">
         <div class="share-panel">
           <div class="share-header">
             <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
               <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
             </svg>
-            <h2>WireGuard VPN</h2>
-            <p class="share-subtitle">Scan with the WireGuard app to join the VPN and access Alabtross</p>
-          </div>
-
-          <div class="setting-group">
-            <label>Tunnel Mode</label>
-            <div class="tunnel-mode-toggle">
-              <button class="tunnel-mode-btn active" id="tunnel-full" data-mode="full">Full Tunnel</button>
-              <button class="tunnel-mode-btn" id="tunnel-split" data-mode="split">Split Tunnel</button>
-            </div>
-            <span id="tunnel-mode-hint" class="setting-hint">All traffic goes through VPN — most secure, but local casting won't work</span>
-          </div>
-
-          <div class="setting-group">
-            <label>VPN Profile</label>
-            <div id="vpn-profile-list" class="vpn-profile-list">
-              <div class="loading-state" style="padding: 24px;">
-                <div class="spinner"></div>
-                <p>Loading profiles...</p>
-              </div>
-            </div>
-          </div>
-
-          <div id="qr-code-container" class="qr-container">
-            <p style="color: var(--text-muted);">Select a profile above</p>
-          </div>
-
-          <div id="vpn-profile-name" class="vpn-selected-name hidden"></div>
-
-          <div id="share-url-display" class="share-url-box hidden">
-            <span id="share-url-text"></span>
-            <button id="share-copy-btn" class="btn-sm" aria-label="Copy config">Copy</button>
+            <h2>Tailscale VPN</h2>
+            <p class="share-subtitle">Connect to your Tailscale network to access Alabtross remotely</p>
           </div>
 
           <div class="share-info">
             <div class="share-info-item">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-              <span>Open the WireGuard app, tap +, then "Scan from QR Code"</span>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              <span>Install the Tailscale app on your phone or computer</span>
+            </div>
+            <div class="share-info-item">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4-4v2"/><circle cx="8.5" cy="7" r="4"/><path d="M20 8v6M23 11h-6"/></svg>
+              <span>Log in with the same account used on the Jetson server</span>
             </div>
             <div class="share-info-item">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.55a11 11 0 0114.08 0M1.42 9a16 16 0 0121.16 0M8.53 16.11a6 6 0 016.95 0M12 20h.01"/></svg>
-              <span>Once connected, open Alabtross in your browser</span>
+              <span>Once connected, open Alabtross in your browser using the Tailscale IP</span>
             </div>
             <div class="share-info-item">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3M20 14v7h-7"/></svg>
-              <span>Each profile should only be used on one device</span>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+              <span>Tailscale handles encryption and NAT traversal automatically</span>
             </div>
           </div>
 
           <div class="setting-group" style="margin-top: 24px;">
-            <label>Manual Config</label>
-            <textarea id="share-custom-config" class="vpn-config-input" rows="4" placeholder="[Interface]&#10;PrivateKey = ...&#10;Address = ...&#10;&#10;[Peer]&#10;PublicKey = ..."></textarea>
-            <button id="share-manual-btn" class="btn-sm" style="margin-top: 8px; width: 100%;">Generate QR Code</button>
-            <span class="setting-hint">Paste a WireGuard config to generate a QR code manually</span>
+            <label>How it works</label>
+            <p class="setting-hint">Tailscale creates a secure peer-to-peer network between your devices. No port forwarding or manual configuration needed. Just install the app and sign in on each device you want to connect.</p>
           </div>
         </div>
       </div>

@@ -65,16 +65,17 @@ curl -s "https://apibay.org/q.php?q=test&cat=200" | head -c 200
 hostname -I
 ```
 
-## WireGuard VPN
+## Tailscale VPN
 
 ```bash
-# Start/Stop/Restart VPN
-sudo systemctl start wg-quick@wg0
-sudo systemctl stop wg-quick@wg0
-sudo systemctl restart wg-quick@wg0
-
 # Check VPN status
-sudo systemctl status wg-quick@wg0
+tailscale status
+
+# Show Tailscale IP
+tailscale ip
+
+# Restart Tailscale
+sudo systemctl restart tailscaled
 ```
 
 ## SSH

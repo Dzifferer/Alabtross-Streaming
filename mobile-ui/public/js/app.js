@@ -525,7 +525,10 @@
         });
       }
     } else {
-      moviePlaceholder.remove();
+      moviePlaceholder.innerHTML = `
+        <div class="catalog-row-header"><h3 class="catalog-row-title">Movies</h3></div>
+        <div class="catalog-scroll"><div class="row-loading" style="color:var(--text-muted)">Unable to load — check connection or try searching</div></div>
+      `;
     }
 
     // Render Series row (replace placeholder)
@@ -537,7 +540,10 @@
       `;
       attachCardListeners(seriesPlaceholder);
     } else {
-      seriesPlaceholder.remove();
+      seriesPlaceholder.innerHTML = `
+        <div class="catalog-row-header"><h3 class="catalog-row-title">Shows</h3></div>
+        <div class="catalog-scroll"><div class="row-loading" style="color:var(--text-muted)">Unable to load — check connection or try searching</div></div>
+      `;
     }
 
     // Render Live TV section (replace placeholder content in tvContainer)
@@ -630,15 +636,22 @@
       });
     }
 
-    // If nothing at all loaded (no recent, no movies, no shows), show empty state
-    // (Live TV section always stays visible so this is a fallback for extreme failure)
-    if (dom.homeCatalogs.children.length === 0) {
-      dom.homeCatalogs.innerHTML = `
-        <div class="empty-state">
-          <p>No content available</p>
-          <p style="font-size:13px;color:var(--text-muted)">Add Cinemeta addon in Settings to browse content</p>
+    // If nothing meaningful loaded, show a retry option
+    const hasContent = movieItems.length > 0 || seriesItems.length > 0 || recent.length > 0;
+    if (!hasContent) {
+      const retryRow = document.createElement('div');
+      retryRow.className = 'catalog-row';
+      retryRow.innerHTML = `
+        <div class="empty-state" style="padding:24px 16px;text-align:center">
+          <p style="margin:0 0 8px">Unable to load catalogs</p>
+          <p style="font-size:13px;color:var(--text-muted);margin:0 0 16px">The catalog server may be unreachable. You can still search for content directly.</p>
+          <button class="btn-sm" id="home-retry-btn" style="margin:0 auto">Retry</button>
         </div>
       `;
+      dom.homeCatalogs.appendChild(retryRow);
+      retryRow.querySelector('#home-retry-btn')?.addEventListener('click', () => {
+        loadHome();
+      });
     }
   }
 

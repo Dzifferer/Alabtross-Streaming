@@ -235,7 +235,30 @@
       dom.videoPlayer.pause();
       dom.videoPlayer.src = '';
       dom.videoPlayer.load(); // release previous resource from memory
+      exitPlayerFullscreen();
     }
+  }
+
+  // Enter true fullscreen for immersive playback (mobile + desktop)
+  function enterPlayerFullscreen() {
+    const container = document.getElementById('view-player');
+    try {
+      if (container.requestFullscreen) {
+        container.requestFullscreen().catch(() => {});
+      } else if (container.webkitRequestFullscreen) {
+        container.webkitRequestFullscreen();
+      }
+    } catch (_) { /* fullscreen not supported or blocked — player still fills viewport via CSS */ }
+  }
+
+  function exitPlayerFullscreen() {
+    try {
+      if (document.fullscreenElement) {
+        document.exitFullscreen().catch(() => {});
+      } else if (document.webkitFullscreenElement) {
+        document.webkitExitFullscreen();
+      }
+    } catch (_) {}
   }
 
   function updateNavUI(view) {
@@ -727,6 +750,7 @@
 
       await dom.videoPlayer.play();
       dom.playerOverlay.classList.add('hidden');
+      enterPlayerFullscreen();
     } catch (e) {
       showPlayerError('Channel unavailable', escapeHTML(e.message));
     }
@@ -1481,6 +1505,9 @@
       dom.videoPlayer.addEventListener('waiting', onStalled);
       dom.videoPlayer.addEventListener('stalled', onStalled);
       dom.videoPlayer.addEventListener('playing', onPlaying);
+
+      // Enter fullscreen on mobile for immersive playback
+      enterPlayerFullscreen();
     } catch (e) {
       if (statusInterval) clearInterval(statusInterval);
       let hint = escapeHTML(e.message);
@@ -1777,6 +1804,7 @@
 
       await dom.videoPlayer.play();
       dom.playerOverlay.classList.add('hidden');
+      enterPlayerFullscreen();
     } catch (e) {
       let hint = escapeHTML(e.message);
       if (e.message.includes('Media error')) {

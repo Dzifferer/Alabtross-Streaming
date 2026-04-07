@@ -1049,28 +1049,41 @@ html, body {
 
 /* ===== Player ===== */
 #view-player {
-  background: #000;
-  position: fixed;
-  inset: 0;
-  z-index: 200;
   display: none;
-  min-height: 0;
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  z-index: 9999;
+  background: #000;
 }
 
 #view-player.active {
   display: block;
 }
 
+/* Fullscreen mode — ensure player fills entire screen */
+#view-player:fullscreen,
+#view-player:-webkit-full-screen {
+  width: 100%;
+  height: 100%;
+  background: #000;
+}
+
 .player-back-btn {
   position: absolute;
   top: max(12px, env(safe-area-inset-top, 0px));
   left: max(12px, env(safe-area-inset-left, 0px));
-  z-index: 20;
-  width: 40px;
-  height: 40px;
+  z-index: 30;
+  width: 44px;
+  height: 44px;
   border-radius: 50%;
   border: none;
   background: rgba(0,0,0,0.6);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
   color: white;
   cursor: pointer;
   display: flex;
@@ -1085,14 +1098,19 @@ html, body {
 
 #player-container {
   position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
   background: #000;
+  overflow: hidden;
 }
 
+/* Video fills container — same pattern as YouTube/Netflix mobile web */
 #video-player {
+  position: absolute;
+  top: 0;
+  left: 0;
   width: 100%;
   height: 100%;
   object-fit: contain;

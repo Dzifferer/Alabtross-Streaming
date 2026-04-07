@@ -539,6 +539,22 @@ app.get('/api/collections/enrich', rateLimit, async (req, res) => {
       }
     }
 
+    // Apply manual category overrides
+    const manual = manualCategories[id];
+    if (manual) {
+      if (manual.genre) {
+        const genres = entry?.genres || [];
+        if (!genres.includes(manual.genre)) genres.unshift(manual.genre);
+        entry = entry || { collectionId: null, genres, year: '' };
+        entry.genres = genres;
+      }
+      if (manual.collectionId) {
+        entry = entry || { genres: [], year: '' };
+        entry.collectionId = manual.collectionId;
+        entry.collectionName = manual.collectionName;
+      }
+    }
+
     // Store per-movie metadata (genres, year) for genre grouping
     movieMeta[id] = { genres: entry?.genres || [], year: entry?.year || '' };
 
@@ -622,6 +638,69 @@ app.get('/api/collections/:collectionId', rateLimit, async (req, res) => {
     console.error('[Collections] Detail fetch error:', err.message);
     res.status(500).json({ error: 'Failed to fetch collection details' });
   }
+});
+
+// ─── Manual Category Overrides ───────────────────────────────────────
+
+const MANUAL_CATEGORIES_PATH = path.join(TORRENT_CACHE_PATH, 'manual-categories.json');
+let manualCategories = {}; // imdbId -> { genre: "Comedy" } or { collectionId: "...", collectionName: "..." }
+
+try {
+  if (fs.existsSync(MANUAL_CATEGORIES_PATH)) {
+    manualCategories = JSON.parse(fs.readFileSync(MANUAL_CATEGORIES_PATH, 'utf8'));
+    console.log(`[Categories] Loaded ${Object.keys(manualCategories).length} manual overrides`);
+  }
+} catch (e) {
+  console.warn('[Categories] Failed to load manual categories:', e.message);
+}
+
+function saveManualCategories() {
+  try {
+    fs.writeFileSync(MANUAL_CATEGORIES_PATH, JSON.stringify(manualCategories), 'utf8');
+  } catch (e) {
+    console.warn('[Categories] Failed to save manual categories:', e.message);
+  }
+}
+
+// POST /api/library/categorize - manually assign a genre or collection to a movie
+app.post('/api/library/categorize', rateLimit, (req, res) => {
+  const { imdbId, genre, collectionId, collectionName } = req.body || {};
+  if (!imdbId) return res.status(400).json({ error: 'imdbId is required' });
+
+  if (genre) {
+    manualCategories[imdbId] = { genre };
+    // Also update the collection cache so the genre persists for enrichment
+    if (collectionCache[imdbId]) {
+      if (!collectionCache[imdbId].genres) collectionCache[imdbId].genres = [];
+      if (!collectionCache[imdbId].genres.includes(genre)) {
+        collectionCache[imdbId].genres.unshift(genre);
+      }
+    } else {
+      collectionCache[imdbId] = { collectionId: null, genres: [genre], year: '' };
+    }
+    saveCollectionCache();
+  } else if (collectionId && collectionName) {
+    manualCategories[imdbId] = { collectionId, collectionName };
+  } else {
+    return res.status(400).json({ error: 'Provide genre or collectionId+collectionName' });
+  }
+
+  saveManualCategories();
+  console.log(`[Categories] Manual override for ${imdbId}:`, manualCategories[imdbId]);
+  res.json({ ok: true });
+});
+
+// DELETE /api/library/categorize/:imdbId - remove manual category override
+app.delete('/api/library/categorize/:imdbId', rateLimit, (req, res) => {
+  const { imdbId } = req.params;
+  delete manualCategories[imdbId];
+  saveManualCategories();
+  res.json({ ok: true });
+});
+
+// GET /api/library/categories - get all manual category overrides
+app.get('/api/library/categories', (req, res) => {
+  res.json(manualCategories);
 });
 
 // ─── Custom Mode API Routes ───────────────────────────────────────────

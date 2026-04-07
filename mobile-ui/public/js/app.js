@@ -2964,13 +2964,49 @@
         const r = results[key];
         if (!r) continue;
 
-        const indicator = r.ok && r.count > 0 ? 'ok' : 'fail';
-        const detail = r.ok
-          ? (r.count > 0 ? `${r.count} results returned` : 'Reachable but no results')
-          : (r.error || 'Unreachable');
+        const httpInfo = results[key + '_http'];
+
+        // Determine indicator: green (results), amber (reachable no results), red (unreachable)
+        let indicator, detail;
+        if (r.ok && r.count > 0) {
+          indicator = 'ok';
+          detail = `${r.count} results returned`;
+        } else if (r.ok && r.count === 0) {
+          // Reachable but no results — check HTTP info for why
+          indicator = 'warn';
+          if (httpInfo && httpInfo.cloudflare) {
+            detail = 'Blocked by Cloudflare challenge';
+          } else if (httpInfo && httpInfo.htmlResponse) {
+            detail = 'Received HTML instead of JSON (possible block/redirect)';
+          } else if (httpInfo && !httpInfo.ok) {
+            detail = `HTTP ${httpInfo.status || 'error'} — endpoint returned error`;
+          } else {
+            detail = 'Reachable but returned no results';
+          }
+        } else {
+          indicator = 'fail';
+          if (httpInfo && httpInfo.cloudflare) {
+            detail = 'Blocked by Cloudflare';
+          } else {
+            detail = r.error || 'Unreachable';
+          }
+        }
+
         const latency = r.ms ? `${r.ms}ms` : '';
+        const httpLatency = httpInfo?.ms ? `${httpInfo.ms}ms` : '';
         const configNote = key === 'torrentio' && results._torrentioConfig
           ? ` (config: ${escapeHTML(results._torrentioConfig)})` : '';
+
+        // HTTP connectivity sub-detail
+        let httpDetail = '';
+        if (httpInfo) {
+          const httpStatus = httpInfo.ok ? `HTTP ${httpInfo.status || 200}` : `HTTP ${httpInfo.status || 'fail'}`;
+          const flags = [];
+          if (httpInfo.cloudflare) flags.push('Cloudflare');
+          if (httpInfo.htmlResponse) flags.push('HTML response');
+          if (httpInfo.error) flags.push(httpInfo.error);
+          httpDetail = `Connectivity: ${httpStatus}${flags.length ? ' — ' + flags.join(', ') : ''} (${httpLatency})`;
+        }
 
         html += `
           <div class="diag-item">
@@ -2978,6 +3014,7 @@
             <div class="diag-info">
               <div class="diag-name">${label}${configNote}</div>
               <div class="diag-detail">${escapeHTML(detail)}</div>
+              ${httpDetail ? `<div class="diag-detail" style="opacity:0.6;margin-top:2px">${escapeHTML(httpDetail)}</div>` : ''}
             </div>
             <div class="diag-stats">
               ${latency ? `<div class="diag-latency">${latency}</div>` : ''}

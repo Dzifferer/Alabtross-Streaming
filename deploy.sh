@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Quick deploy — pull latest from main and restart Albatross
+set -e
+
+cd "$(dirname "$0")"
+
+echo "==> Pulling latest from main..."
+git pull origin main
+
+echo "==> Stopping container..."
+sudo docker stop alabtross-mobile 2>/dev/null || true
+sudo docker rm   alabtross-mobile 2>/dev/null || true
+
+echo "==> Building..."
+sudo docker build -t alabtross-mobile ./mobile-ui
+
+BIND_IP=$(ip route get 8.8.8.8 | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')
+
+echo "==> Starting container (bind IP: $BIND_IP)..."
+sudo docker run -d \
+  --name alabtross-mobile \
+  --restart unless-stopped \
+  --net=host \
+  -e PORT=8080 \
+  -e STREMIO_SERVER="http://${BIND_IP}:11470" \
+  -e TORRENT_CACHE="/app/torrent-cache" \
+  -e LIBRARY_PATH="/app/torrent-cache/library" \
+  -e TMDB_API_KEY="689b2177d2f7ce44d969f478383d71bd" \
+  -v "/mnt/movies/torrent-cache:/app/torrent-cache" \
+  alabtross-mobile
+
+echo "==> Done! Albatross is live on port 8080"

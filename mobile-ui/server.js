@@ -212,6 +212,61 @@ function saveCollectionCache() {
   }
 }
 
+// Title-based franchise detection (works without TMDB)
+const FRANCHISE_PATTERNS = [
+  { pattern: /^star\s*wars/i, name: 'Star Wars Collection', id: 'franchise_starwars' },
+  { pattern: /^avatar/i, name: 'Avatar Collection', id: 'franchise_avatar', exclude: /avatar:\s*the\s*last\s*air/i },
+  { pattern: /^indiana\s*jones|^raiders\s*of\s*the\s*lost\s*ark/i, name: 'Indiana Jones Collection', id: 'franchise_indianajones' },
+  { pattern: /james\s*bond|^0{0,2}7\b|^dr\.?\s*no$|^goldfinger$|^thunderball$|^goldeneye$|^skyfall$|^spectre$|^casino\s*royale|^quantum\s*of\s*solace|^no\s*time\s*to\s*die|^die\s*another\s*day|^tomorrow\s*never\s*dies|^the\s*world\s*is\s*not\s*enough|^licence\s*to\s*kill|^the\s*living\s*daylights|^a\s*view\s*to\s*a\s*kill|^octopussy|^for\s*your\s*eyes\s*only|^moonraker|^the\s*spy\s*who\s*loved\s*me|^the\s*man\s*with\s*the\s*golden\s*gun|^live\s*and\s*let\s*die|^diamonds\s*are\s*forever|^on\s*her\s*majesty/i, name: 'James Bond Collection', id: 'franchise_jamesbond' },
+  { pattern: /^pirates\s*of\s*the\s*caribbean/i, name: 'Pirates of the Caribbean Collection', id: 'franchise_potc' },
+  { pattern: /^the\s*lord\s*of\s*the\s*rings|^the\s*hobbit/i, name: 'Middle-earth Collection', id: 'franchise_middleearth' },
+  { pattern: /^harry\s*potter|^fantastic\s*beasts/i, name: 'Wizarding World Collection', id: 'franchise_wizardingworld' },
+  { pattern: /^the\s*hunger\s*games/i, name: 'The Hunger Games Collection', id: 'franchise_hungergames' },
+  { pattern: /^transformers/i, name: 'Transformers Collection', id: 'franchise_transformers' },
+  { pattern: /^mission:?\s*impossible/i, name: 'Mission: Impossible Collection', id: 'franchise_mi' },
+  { pattern: /^fast\s*(&|and)\s*furious|^the\s*fast\s*(and|&)\s*(the\s*)?furious|^furious\s*\d|^f\d|^fast\s*five|^fast\s*x/i, name: 'Fast & Furious Collection', id: 'franchise_fastandfurious' },
+  { pattern: /^jurassic\s*(park|world)/i, name: 'Jurassic Collection', id: 'franchise_jurassic' },
+  { pattern: /^the\s*matrix/i, name: 'The Matrix Collection', id: 'franchise_matrix' },
+  { pattern: /^john\s*wick/i, name: 'John Wick Collection', id: 'franchise_johnwick' },
+  { pattern: /^toy\s*story/i, name: 'Toy Story Collection', id: 'franchise_toystory' },
+  { pattern: /^shrek/i, name: 'Shrek Collection', id: 'franchise_shrek' },
+  { pattern: /^ice\s*age/i, name: 'Ice Age Collection', id: 'franchise_iceage' },
+  { pattern: /^despicable\s*me|^minions/i, name: 'Despicable Me Collection', id: 'franchise_despicableme' },
+  { pattern: /^kung\s*fu\s*panda/i, name: 'Kung Fu Panda Collection', id: 'franchise_kungfupanda' },
+  { pattern: /^how\s*to\s*train\s*your\s*dragon/i, name: 'How to Train Your Dragon Collection', id: 'franchise_httyd' },
+  { pattern: /^madagascar/i, name: 'Madagascar Collection', id: 'franchise_madagascar' },
+  { pattern: /^the\s*dark\s*knight|^batman\s*begins/i, name: 'The Dark Knight Collection', id: 'franchise_darkknight' },
+  { pattern: /^spider-?\s*man|^the\s*amazing\s*spider/i, name: 'Spider-Man Collection', id: 'franchise_spiderman' },
+  { pattern: /^x-?\s*men|^logan$|^deadpool|^the\s*wolverine/i, name: 'X-Men Collection', id: 'franchise_xmen' },
+  { pattern: /^guardians\s*of\s*the\s*galaxy/i, name: 'Guardians of the Galaxy Collection', id: 'franchise_gotg' },
+  { pattern: /^captain\s*america/i, name: 'Captain America Collection', id: 'franchise_captainamerica' },
+  { pattern: /^iron\s*man/i, name: 'Iron Man Collection', id: 'franchise_ironman' },
+  { pattern: /^thor\s*(:|$)/i, name: 'Thor Collection', id: 'franchise_thor' },
+  { pattern: /^the\s*avengers|^avengers/i, name: 'The Avengers Collection', id: 'franchise_avengers' },
+  { pattern: /^alien\s*(:|$)|^aliens$|^alien\s*3|^alien\s*resurr|^prometheus|^alien:\s*covenant|^alien:\s*romulus/i, name: 'Alien Collection', id: 'franchise_alien' },
+  { pattern: /^terminator/i, name: 'Terminator Collection', id: 'franchise_terminator' },
+  { pattern: /^rocky\s|^rocky$|^creed/i, name: 'Rocky / Creed Collection', id: 'franchise_rocky' },
+  { pattern: /^the\s*godfather/i, name: 'The Godfather Collection', id: 'franchise_godfather' },
+  { pattern: /^back\s*to\s*the\s*future/i, name: 'Back to the Future Collection', id: 'franchise_bttf' },
+  { pattern: /^ghostbusters/i, name: 'Ghostbusters Collection', id: 'franchise_ghostbusters' },
+  { pattern: /^the\s*conjuring|^annabelle|^the\s*nun/i, name: 'The Conjuring Universe', id: 'franchise_conjuring' },
+  { pattern: /^saw\s/i, name: 'Saw Collection', id: 'franchise_saw' },
+  { pattern: /^happy\s*gilmore|^billy\s*madison|^the\s*waterboy|^big\s*daddy|^mr\.?\s*deeds|^click$|^grown\s*ups|^you\s*don.t\s*mess\s*with\s*the\s*zohan|^just\s*go\s*with\s*it|^blended$|^the\s*longest\s*yard.*2005|^50\s*first\s*dates/i, name: 'Adam Sandler Comedies', id: 'franchise_sandler' },
+  { pattern: /^a\s*knight.s\s*tale/i, name: null, id: null }, // Not a franchise
+];
+
+function matchFranchiseByTitle(title) {
+  if (!title) return null;
+  for (const f of FRANCHISE_PATTERNS) {
+    if (f.exclude && f.exclude.test(title)) continue;
+    if (f.pattern.test(title)) {
+      if (!f.id) return null; // Explicit non-franchise
+      return { collectionId: f.id, collectionName: f.name, collectionPoster: null };
+    }
+  }
+  return null;
+}
+
 // In-memory cache for full collection details (1-hour TTL)
 const collectionDetailCache = new Map();
 const COLLECTION_DETAIL_TTL = 60 * 60 * 1000;
@@ -246,35 +301,49 @@ async function lookupCollectionForImdbId(imdbId) {
     collectionCache[imdbId] = entry;
     return entry;
   } catch (e) {
-    console.warn(`[Collections] Lookup failed for ${imdbId}:`, e.message);
+    console.warn(`[Collections] TMDB lookup failed for ${imdbId}:`, e.message);
     return null;
   }
 }
 
-// GET /api/collections/enrich?ids=tt123,tt456,...
+// GET /api/collections/enrich?ids=tt123,tt456,...&names=Movie+One,Movie+Two,...
 app.get('/api/collections/enrich', rateLimit, async (req, res) => {
   const idsParam = (req.query.ids || '').trim();
+  const namesParam = (req.query.names || '').trim();
   if (!idsParam) return res.json({ collections: {} });
 
   const ids = idsParam.split(',').filter(id => /^tt\d+$/.test(id)).slice(0, 50);
   if (ids.length === 0) return res.json({ collections: {} });
 
-  // Process in batches of 5 to respect TMDB rate limits
-  const batchSize = 5;
-  for (let i = 0; i < ids.length; i += batchSize) {
-    const batch = ids.slice(i, i + batchSize);
-    await Promise.allSettled(batch.map(id => lookupCollectionForImdbId(id)));
-    // Small delay between batches to avoid TMDB rate limiting
-    if (i + batchSize < ids.length) {
-      await new Promise(r => setTimeout(r, 300));
-    }
-  }
-  saveCollectionCache();
+  const names = namesParam ? namesParam.split('||') : [];
 
-  // Build response: group by collection
+  // Try TMDB enrichment first (if API key is configured)
+  let tmdbWorked = false;
+  if (TMDB_API_KEY) {
+    const batchSize = 5;
+    for (let i = 0; i < ids.length; i += batchSize) {
+      const batch = ids.slice(i, i + batchSize);
+      await Promise.allSettled(batch.map(id => lookupCollectionForImdbId(id)));
+      if (i + batchSize < ids.length) {
+        await new Promise(r => setTimeout(r, 300));
+      }
+    }
+    saveCollectionCache();
+    // Check if TMDB returned any real results
+    tmdbWorked = ids.some(id => collectionCache[id] && collectionCache[id].collectionId);
+  }
+
+  // Build response: group by collection (from TMDB cache)
   const collections = {};
-  for (const id of ids) {
-    const entry = collectionCache[id];
+  for (let i = 0; i < ids.length; i++) {
+    const id = ids[i];
+    let entry = collectionCache[id];
+
+    // Fallback to title-based matching if TMDB didn't work or no entry
+    if (!entry && names[i]) {
+      entry = matchFranchiseByTitle(names[i]);
+    }
+
     if (!entry) continue;
     const key = String(entry.collectionId);
     if (!collections[key]) {
@@ -289,6 +358,7 @@ app.get('/api/collections/enrich', rateLimit, async (req, res) => {
     }
   }
 
+  console.log(`[Collections] Enriched ${ids.length} IDs -> ${Object.keys(collections).length} collections (TMDB: ${tmdbWorked ? 'yes' : 'no'})`);
   res.json({ collections });
 });
 

@@ -20,6 +20,8 @@ class StremioAPI {
     this._searchController = null;
     this._searchCache = new Map();
     this._searchCacheTimestamps = new Map();
+    this._streamCache = new Map();
+    this._streamCacheTimestamps = new Map();
   }
 
   // ─── Addon Management ────────────────────────────
@@ -278,11 +280,22 @@ class StremioAPI {
    * then merge and deduplicate into a single list.
    */
   async getStreams(type, id, seasonEpisode) {
+    const cacheKey = `${type}:${id}:${seasonEpisode?.season}:${seasonEpisode?.episode}`;
+    const cachedTs = this._streamCacheTimestamps.get(cacheKey) || 0;
+    if (this._streamCache.has(cacheKey) && (Date.now() - cachedTs) < 300000) {
+      return this._streamCache.get(cacheKey);
+    }
+
     const [custom, addon] = await Promise.all([
       this._getCustomStreams(type, id, seasonEpisode),
       this._getAddonStreams(type, id).catch(() => []),
     ]);
-    return this._mergeStreams(custom, addon);
+    const merged = this._mergeStreams(custom, addon);
+    if (merged.length > 0) {
+      this._streamCache.set(cacheKey, merged);
+      this._streamCacheTimestamps.set(cacheKey, Date.now());
+    }
+    return merged;
   }
 
   /**
@@ -365,6 +378,8 @@ class StremioAPI {
       if (seasonEpisode && seasonEpisode.season !== undefined) {
         params.set('season', seasonEpisode.season);
         if (seasonEpisode.episode !== undefined) params.set('episode', seasonEpisode.episode);
+        if (seasonEpisode.absoluteEpisode !== undefined) params.set('absEp', seasonEpisode.absoluteEpisode);
+        if (seasonEpisode.genres && seasonEpisode.genres.length > 0) params.set('genres', seasonEpisode.genres.join(','));
       }
     }
     const qs = params.toString();

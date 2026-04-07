@@ -1674,14 +1674,17 @@
       if (statusInterval) clearInterval(statusInterval);
       await dom.videoPlayer.play();
 
-      // Open the curtains to reveal the video
+      // Open the curtains from the middle to reveal the video
       const curtainStage = dom.playerOverlay.querySelector('.curtain-stage');
       if (curtainStage) {
+        // First fade out poster quickly, then split curtains apart
+        curtainStage.classList.remove('dropping');
         curtainStage.classList.add('opening');
-        // Remove overlay after curtain animation completes
+        // Wait for curtain panels to fully slide off-screen (1.2s transition)
+        // then hide the overlay
         setTimeout(() => {
           dom.playerOverlay.classList.add('hidden');
-        }, 1400);
+        }, 1600);
       } else {
         dom.playerOverlay.classList.add('hidden');
       }

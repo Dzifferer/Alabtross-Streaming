@@ -192,7 +192,7 @@ app.get('/api/search', rateLimit, async (req, res) => {
 // ─── Collection / Franchise Grouping ─────────────────────────────────
 
 const COLLECTION_CACHE_PATH = path.join(TORRENT_CACHE_PATH, 'collection-cache.json');
-let collectionCache = {}; // imdbId -> { collectionId, collectionName, collectionPoster } | null
+let collectionCache = {}; // imdbId -> { collectionId, collectionName, collectionPoster, genres, year } | null
 
 // Load persistent collection cache
 try {
@@ -272,8 +272,12 @@ const collectionDetailCache = new Map();
 const COLLECTION_DETAIL_TTL = 60 * 60 * 1000;
 
 async function lookupCollectionForImdbId(imdbId) {
-  // Already cached (including null = no collection)
-  if (imdbId in collectionCache) return collectionCache[imdbId];
+  // Already cached — but re-fetch if missing genres (old cache format)
+  if (imdbId in collectionCache) {
+    const cached = collectionCache[imdbId];
+    if (cached === null || cached?.genres) return cached;
+    // Old cache entry without genres — re-fetch
+  }
 
   try {
     // Step 1: IMDB ID -> TMDB movie ID
@@ -285,18 +289,24 @@ async function lookupCollectionForImdbId(imdbId) {
     }
     const tmdbId = movieResults[0].id;
 
-    // Step 2: Get movie details including belongs_to_collection
+    // Step 2: Get movie details including belongs_to_collection and genres
     const movieDetail = await tmdbFetch(`/movie/${tmdbId}`);
+    const genres = (movieDetail.genres || []).map(g => g.name);
+    const year = (movieDetail.release_date || '').slice(0, 4);
     const col = movieDetail.belongs_to_collection;
+
     if (!col) {
-      collectionCache[imdbId] = null;
-      return null;
+      // No collection, but still store genres/year for genre grouping
+      collectionCache[imdbId] = { collectionId: null, genres, year };
+      return collectionCache[imdbId];
     }
 
     const entry = {
       collectionId: col.id,
       collectionName: col.name,
       collectionPoster: col.poster_path ? `https://image.tmdb.org/t/p/w342${col.poster_path}` : null,
+      genres,
+      year,
     };
     collectionCache[imdbId] = entry;
     return entry;
@@ -333,18 +343,29 @@ app.get('/api/collections/enrich', rateLimit, async (req, res) => {
     tmdbWorked = ids.some(id => collectionCache[id] && collectionCache[id].collectionId);
   }
 
-  // Build response: group by collection (from TMDB cache)
+  // Build response: group by collection + per-movie metadata (genres, year)
   const collections = {};
+  const movieMeta = {}; // imdbId -> { genres: [...], year: "2005" }
+
   for (let i = 0; i < ids.length; i++) {
     const id = ids[i];
     let entry = collectionCache[id];
 
-    // Fallback to title-based matching if TMDB didn't work or no entry
-    if (!entry && names[i]) {
-      entry = matchFranchiseByTitle(names[i]);
+    // Fallback to title-based matching if no collection found via TMDB
+    if ((!entry || !entry.collectionId) && names[i]) {
+      const titleMatch = matchFranchiseByTitle(names[i]);
+      if (titleMatch) {
+        // Merge: keep genres/year from TMDB cache if available
+        entry = { ...titleMatch, genres: entry?.genres || [], year: entry?.year || '' };
+      }
     }
 
-    if (!entry) continue;
+    // Store per-movie metadata (genres, year) for genre grouping
+    if (entry) {
+      movieMeta[id] = { genres: entry.genres || [], year: entry.year || '' };
+    }
+
+    if (!entry || !entry.collectionId) continue;
     const key = String(entry.collectionId);
     if (!collections[key]) {
       collections[key] = {
@@ -359,7 +380,7 @@ app.get('/api/collections/enrich', rateLimit, async (req, res) => {
   }
 
   console.log(`[Collections] Enriched ${ids.length} IDs -> ${Object.keys(collections).length} collections (TMDB: ${tmdbWorked ? 'yes' : 'no'})`);
-  res.json({ collections });
+  res.json({ collections, movieMeta });
 });
 
 // GET /api/collections/:collectionId

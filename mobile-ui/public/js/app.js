@@ -475,14 +475,51 @@
       api.getAllLiveTVChannels(),
     ]);
 
-    // Render Movies row (replace placeholder)
+    // Render Movies row (replace placeholder) — then enrich with collections
     const movieItems = movieResult.status === 'fulfilled' ? movieResult.value : [];
     if (movieItems.length > 0) {
+      // Render individual cards immediately
+      const movieSlice = movieItems.slice(0, 20);
       moviePlaceholder.innerHTML = `
         <div class="catalog-row-header"><h3 class="catalog-row-title">Movies</h3></div>
-        <div class="catalog-scroll">${movieItems.slice(0, 20).map(item => cardHTML(item, 'movie')).join('')}</div>
+        <div class="catalog-scroll">${movieSlice.map(item => cardHTML(item, 'movie')).join('')}</div>
       `;
       attachCardListeners(moviePlaceholder);
+
+      // Asynchronously enrich with collection data and re-render with grouping
+      const imdbIds = movieSlice.map(item => item.imdb_id || item.id).filter(id => /^tt\d+$/.test(id));
+      if (imdbIds.length > 0) {
+        api.enrichWithCollections(imdbIds).then(enrichment => {
+          const colEntries = Object.entries(enrichment.collections || {});
+          // Only re-render if there are collections with 2+ movies
+          const hasGroups = colEntries.some(([, c]) => (c.movieIds || []).length >= 2);
+          if (!hasGroups) return;
+
+          const { collections: grouped, ungrouped } = groupByCollection(movieSlice, enrichment);
+          if (grouped.length === 0) return;
+
+          // Build new scroll content: collection tiles first, then ungrouped movies
+          const scrollEl = moviePlaceholder.querySelector('.catalog-scroll');
+          if (!scrollEl) return;
+
+          let html = '';
+          html += grouped.map(col => collectionCardHTML(col)).join('');
+          html += ungrouped.map(item => cardHTML(item, 'movie')).join('');
+          scrollEl.innerHTML = html;
+
+          // Store collection data on card elements for expand
+          scrollEl.querySelectorAll('.card-collection').forEach(cardEl => {
+            const colId = cardEl.dataset.collectionId;
+            const col = grouped.find(c => c.id === colId);
+            if (col) cardEl._collectionData = col;
+          });
+
+          attachCardListeners(scrollEl);
+          attachCollectionListeners(scrollEl, movieSlice);
+        }).catch(err => {
+          console.warn('[Collections] Enrichment failed:', err.message);
+        });
+      }
     } else {
       moviePlaceholder.remove();
     }
@@ -671,6 +708,136 @@
       img.addEventListener('load', () => img.classList.remove('loading'));
       img.addEventListener('error', () => { img.style.display = 'none'; });
     });
+  }
+
+  // ─── Collection / Franchise Grouping ─────────────
+
+  /**
+   * Group catalog items by collection. Only groups when 2+ movies share a collection.
+   * Returns { collections: [{ id, name, poster, movies: [...items] }], ungrouped: [...items] }
+   */
+  function groupByCollection(items, enrichmentData) {
+    const collections = enrichmentData.collections || {};
+    // Build reverse map: imdbId -> collectionId
+    const imdbToCollection = {};
+    for (const [colId, col] of Object.entries(collections)) {
+      for (const movieId of col.movieIds || []) {
+        imdbToCollection[movieId] = colId;
+      }
+    }
+
+    // Group items
+    const collectionItems = {};
+    const ungrouped = [];
+    for (const item of items) {
+      const id = item.imdb_id || item.id;
+      const colId = imdbToCollection[id];
+      if (colId) {
+        if (!collectionItems[colId]) collectionItems[colId] = [];
+        collectionItems[colId].push(item);
+      } else {
+        ungrouped.push(item);
+      }
+    }
+
+    // Only group if 2+ movies; otherwise treat as ungrouped
+    const grouped = [];
+    for (const [colId, movies] of Object.entries(collectionItems)) {
+      if (movies.length >= 2) {
+        const col = collections[colId];
+        grouped.push({
+          id: colId,
+          name: col.name,
+          poster: col.poster || movies[0].poster,
+          movies,
+        });
+      } else {
+        ungrouped.push(...movies);
+      }
+    }
+
+    return { collections: grouped, ungrouped };
+  }
+
+  function collectionCardHTML(collection) {
+    const poster = isSafePosterUrl(collection.poster || '') ? collection.poster : '';
+    const name = escapeHTML(collection.name || 'Collection');
+    const count = collection.movies.length;
+
+    return `
+      <div class="card card-collection" data-collection-id="${escapeHTML(collection.id)}">
+        <div class="card-poster collection-poster-stack">
+          ${poster
+            ? `<img src="${poster}" alt="${name}" loading="lazy" class="loading">`
+            : ''}
+          <div class="poster-placeholder">${!poster ? name : ''}</div>
+          <div class="collection-badge">${count} movies</div>
+        </div>
+        <div class="card-info">
+          <div class="card-title">${name}</div>
+        </div>
+      </div>
+    `;
+  }
+
+  function attachCollectionListeners(container, allItems) {
+    container.querySelectorAll('.card-collection').forEach(card => {
+      card.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const colId = card.dataset.collectionId;
+        expandCollection(colId, card, container, allItems);
+      });
+    });
+    // Also attach image load handlers for collection posters
+    container.querySelectorAll('.card-collection img.loading').forEach(img => {
+      img.addEventListener('load', () => img.classList.remove('loading'));
+      img.addEventListener('error', () => { img.style.display = 'none'; });
+    });
+  }
+
+  function expandCollection(collectionId, cardEl, container, allItems) {
+    // Find the scroll container
+    const scrollContainer = cardEl.closest('.catalog-scroll') || cardEl.parentElement;
+
+    // Create expanded wrapper
+    const wrapper = document.createElement('div');
+    wrapper.className = 'collection-expanded';
+    wrapper.dataset.collectionId = collectionId;
+
+    // Collapse button
+    const collapseBtn = document.createElement('button');
+    collapseBtn.className = 'collection-collapse-btn';
+    collapseBtn.textContent = '\u2190 Back';
+    collapseBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      collapseCollection(collectionId, wrapper, cardEl, scrollContainer);
+    });
+    wrapper.appendChild(collapseBtn);
+
+    // Find movies for this collection from the stored data
+    const collectionData = cardEl._collectionData;
+    if (collectionData && collectionData.movies) {
+      for (const movie of collectionData.movies) {
+        const type = movie.type || 'movie';
+        const id = movie.imdb_id || movie.id;
+        const div = document.createElement('div');
+        div.innerHTML = cardHTML(movie, type);
+        const movieCard = div.firstElementChild;
+        wrapper.appendChild(movieCard);
+      }
+    }
+
+    // Hide the collection card and insert expanded view
+    cardEl.style.display = 'none';
+    cardEl.insertAdjacentElement('afterend', wrapper);
+
+    // Attach card listeners for the expanded movies
+    attachCardListeners(wrapper);
+  }
+
+  function collapseCollection(collectionId, wrapper, cardEl, scrollContainer) {
+    cardEl.style.display = '';
+    wrapper.remove();
   }
 
   // ─── Channel Card (Live TV) ─────────────────────
@@ -1882,12 +2049,62 @@
         }
       }
 
+      // Enrich movies with collection data, then render
+      let movieCollectionData = { collections: {} };
+      if (movies.length > 0) {
+        const movieImdbIds = movies.map(m => m.imdbId).filter(id => id && /^tt\d+$/.test(id));
+        if (movieImdbIds.length > 0) {
+          try {
+            movieCollectionData = await api.enrichWithCollections(movieImdbIds);
+          } catch (e) {
+            console.warn('[Library] Collection enrichment failed:', e.message);
+          }
+        }
+      }
+
       let html = '';
 
-      // Movies section
+      // Movies section (with collection grouping)
       if (movies.length > 0) {
         html += `<div class="library-section-header">Movies</div>`;
-        html += movies.map(item => renderLibraryItem(item)).join('');
+
+        // Group movies by collection
+        const colMap = movieCollectionData.collections || {};
+        const imdbToCol = {};
+        for (const [colId, col] of Object.entries(colMap)) {
+          for (const movieId of col.movieIds || []) {
+            imdbToCol[movieId] = colId;
+          }
+        }
+
+        const collectionGroups = {};
+        const ungroupedMovies = [];
+        for (const movie of movies) {
+          const colId = imdbToCol[movie.imdbId];
+          if (colId) {
+            if (!collectionGroups[colId]) collectionGroups[colId] = [];
+            collectionGroups[colId].push(movie);
+          } else {
+            ungroupedMovies.push(movie);
+          }
+        }
+
+        // Render collection groups (only if 2+ movies)
+        for (const [colId, colMovies] of Object.entries(collectionGroups)) {
+          if (colMovies.length >= 2) {
+            const col = colMap[colId];
+            html += `<div class="library-collection-group">`;
+            html += `<div class="library-collection-header" data-collection-id="${escapeHTML(colId)}">${escapeHTML(col.name)} (${colMovies.length})</div>`;
+            html += `<div class="library-collection-movies" data-collection-id="${escapeHTML(colId)}">`;
+            html += colMovies.map(item => renderLibraryItem(item)).join('');
+            html += `</div></div>`;
+          } else {
+            ungroupedMovies.push(...colMovies);
+          }
+        }
+
+        // Render ungrouped movies
+        html += ungroupedMovies.map(item => renderLibraryItem(item)).join('');
       }
 
       // TV Shows section
@@ -1909,6 +2126,19 @@
       }
 
       dom.libraryContent.innerHTML = html;
+
+      // Attach collapse/expand handlers for library collection headers
+      dom.libraryContent.querySelectorAll('.library-collection-header').forEach(header => {
+        header.addEventListener('click', () => {
+          const colId = header.dataset.collectionId;
+          const moviesDiv = dom.libraryContent.querySelector(`.library-collection-movies[data-collection-id="${CSS.escape(colId)}"]`);
+          if (moviesDiv) {
+            header.classList.toggle('collapsed');
+            moviesDiv.classList.toggle('collapsed');
+          }
+        });
+      });
+
       attachLibraryHandlers();
 
       // Start progress polling for downloading items

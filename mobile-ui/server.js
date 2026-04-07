@@ -189,6 +189,173 @@ app.get('/api/search', rateLimit, async (req, res) => {
   }
 });
 
+// ─── Collection / Franchise Grouping ─────────────────────────────────
+
+const COLLECTION_CACHE_PATH = path.join(TORRENT_CACHE_PATH, 'collection-cache.json');
+let collectionCache = {}; // imdbId -> { collectionId, collectionName, collectionPoster } | null
+
+// Load persistent collection cache
+try {
+  if (fs.existsSync(COLLECTION_CACHE_PATH)) {
+    collectionCache = JSON.parse(fs.readFileSync(COLLECTION_CACHE_PATH, 'utf8'));
+    console.log(`[Collections] Loaded cache with ${Object.keys(collectionCache).length} entries`);
+  }
+} catch (e) {
+  console.warn('[Collections] Failed to load cache:', e.message);
+}
+
+function saveCollectionCache() {
+  try {
+    fs.writeFileSync(COLLECTION_CACHE_PATH, JSON.stringify(collectionCache), 'utf8');
+  } catch (e) {
+    console.warn('[Collections] Failed to save cache:', e.message);
+  }
+}
+
+// In-memory cache for full collection details (1-hour TTL)
+const collectionDetailCache = new Map();
+const COLLECTION_DETAIL_TTL = 60 * 60 * 1000;
+
+async function lookupCollectionForImdbId(imdbId) {
+  // Already cached (including null = no collection)
+  if (imdbId in collectionCache) return collectionCache[imdbId];
+
+  try {
+    // Step 1: IMDB ID -> TMDB movie ID
+    const findResult = await tmdbFetch(`/find/${imdbId}`, { external_source: 'imdb_id' });
+    const movieResults = findResult.movie_results || [];
+    if (movieResults.length === 0) {
+      collectionCache[imdbId] = null;
+      return null;
+    }
+    const tmdbId = movieResults[0].id;
+
+    // Step 2: Get movie details including belongs_to_collection
+    const movieDetail = await tmdbFetch(`/movie/${tmdbId}`);
+    const col = movieDetail.belongs_to_collection;
+    if (!col) {
+      collectionCache[imdbId] = null;
+      return null;
+    }
+
+    const entry = {
+      collectionId: col.id,
+      collectionName: col.name,
+      collectionPoster: col.poster_path ? `https://image.tmdb.org/t/p/w342${col.poster_path}` : null,
+    };
+    collectionCache[imdbId] = entry;
+    return entry;
+  } catch (e) {
+    console.warn(`[Collections] Lookup failed for ${imdbId}:`, e.message);
+    return null;
+  }
+}
+
+// GET /api/collections/enrich?ids=tt123,tt456,...
+app.get('/api/collections/enrich', rateLimit, async (req, res) => {
+  const idsParam = (req.query.ids || '').trim();
+  if (!idsParam) return res.json({ collections: {} });
+
+  const ids = idsParam.split(',').filter(id => /^tt\d+$/.test(id)).slice(0, 50);
+  if (ids.length === 0) return res.json({ collections: {} });
+
+  // Process in batches of 5 to respect TMDB rate limits
+  const batchSize = 5;
+  for (let i = 0; i < ids.length; i += batchSize) {
+    const batch = ids.slice(i, i + batchSize);
+    await Promise.allSettled(batch.map(id => lookupCollectionForImdbId(id)));
+    // Small delay between batches to avoid TMDB rate limiting
+    if (i + batchSize < ids.length) {
+      await new Promise(r => setTimeout(r, 300));
+    }
+  }
+  saveCollectionCache();
+
+  // Build response: group by collection
+  const collections = {};
+  for (const id of ids) {
+    const entry = collectionCache[id];
+    if (!entry) continue;
+    const key = String(entry.collectionId);
+    if (!collections[key]) {
+      collections[key] = {
+        name: entry.collectionName,
+        poster: entry.collectionPoster,
+        movieIds: [],
+      };
+    }
+    if (!collections[key].movieIds.includes(id)) {
+      collections[key].movieIds.push(id);
+    }
+  }
+
+  res.json({ collections });
+});
+
+// GET /api/collections/:collectionId
+app.get('/api/collections/:collectionId', rateLimit, async (req, res) => {
+  const collectionId = parseInt(req.params.collectionId, 10);
+  if (isNaN(collectionId)) return res.status(400).json({ error: 'Invalid collection ID' });
+
+  // Check in-memory cache
+  const cached = collectionDetailCache.get(collectionId);
+  if (cached && Date.now() - cached.ts < COLLECTION_DETAIL_TTL) {
+    return res.json(cached.data);
+  }
+
+  try {
+    const detail = await tmdbFetch(`/collection/${collectionId}`);
+    const parts = detail.parts || [];
+
+    // Fetch IMDB IDs for all movies in the collection (batch 5 at a time)
+    const movies = [];
+    for (let i = 0; i < parts.length; i += 5) {
+      const batch = parts.slice(i, i + 5);
+      const results = await Promise.allSettled(batch.map(async (part) => {
+        try {
+          const ext = await tmdbFetch(`/movie/${part.id}/external_ids`);
+          return {
+            imdb_id: ext.imdb_id || null,
+            name: part.title,
+            year: (part.release_date || '').slice(0, 4),
+            poster: part.poster_path ? `https://image.tmdb.org/t/p/w342${part.poster_path}` : null,
+            overview: part.overview || '',
+          };
+        } catch {
+          return {
+            imdb_id: null,
+            name: part.title,
+            year: (part.release_date || '').slice(0, 4),
+            poster: part.poster_path ? `https://image.tmdb.org/t/p/w342${part.poster_path}` : null,
+            overview: part.overview || '',
+          };
+        }
+      }));
+      for (const r of results) {
+        if (r.status === 'fulfilled' && r.value.imdb_id) {
+          movies.push(r.value);
+        }
+      }
+      if (i + 5 < parts.length) await new Promise(r => setTimeout(r, 300));
+    }
+
+    // Sort by year
+    movies.sort((a, b) => (a.year || '9999').localeCompare(b.year || '9999'));
+
+    const data = {
+      name: detail.name,
+      poster: detail.poster_path ? `https://image.tmdb.org/t/p/w342${detail.poster_path}` : null,
+      movies,
+    };
+
+    collectionDetailCache.set(collectionId, { ts: Date.now(), data });
+    res.json(data);
+  } catch (err) {
+    console.error('[Collections] Detail fetch error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch collection details' });
+  }
+});
+
 // ─── Custom Mode API Routes ───────────────────────────────────────────
 
 // GET /api/streams/movie/:imdbId

@@ -14,7 +14,7 @@
 const torrentStream = require('torrent-stream');
 const path = require('path');
 const fs = require('fs');
-const { TRACKERS, isFileNameSafe, getMimeType } = require('./file-safety');
+const { VIDEO_EXTENSIONS, TRACKERS, isFileNameSafe, getMimeType } = require('./file-safety');
 
 const DEFAULT_MAX_CONCURRENT_DOWNLOADS = 5;
 const MAX_FILE_SIZE = 20 * 1024 * 1024 * 1024; // 20 GB
@@ -113,11 +113,13 @@ class LibraryManager {
   }
 
   /**
-   * Get all library items.
+   * Get all library items, including untracked video files found on disk.
    */
   getAll() {
-    const items = [...this._items.values()].sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
-    return items.map(i => this._sanitizeItem(i));
+    const tracked = [...this._items.values()];
+    const discovered = this._discoverUntrackedFiles();
+    const all = [...tracked, ...discovered].sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+    return all.map(i => this._sanitizeItem(i));
   }
 
   /**
@@ -125,14 +127,53 @@ class LibraryManager {
    */
   getItem(id) {
     const item = this._items.get(id);
-    if (!item) return null;
-    return this._sanitizeItem(item);
+    if (item) return this._sanitizeItem(item);
+
+    // Handle discovered (untracked) files
+    if (id.startsWith('disk_')) {
+      const relPath = id.slice(5);
+      const fullPath = path.join(this._libraryPath, relPath);
+      try {
+        if (!fs.existsSync(fullPath)) return null;
+        const stat = fs.statSync(fullPath);
+        const fileName = path.basename(relPath);
+        const ext = path.extname(fileName).toLowerCase();
+        return {
+          id,
+          name: path.basename(fileName, ext).replace(/[._]/g, ' ').trim(),
+          type: 'movie',
+          status: 'complete',
+          filePath: relPath,
+          fileName,
+          fileSize: stat.size,
+          addedAt: stat.mtimeMs,
+        };
+      } catch { return null; }
+    }
+
+    return null;
   }
 
   /**
    * Remove a library item and its file.
    */
   removeItem(id) {
+    // Handle discovered (untracked) files
+    if (id.startsWith('disk_') && !this._items.has(id)) {
+      const relPath = id.slice(5);
+      const fullPath = path.join(this._libraryPath, relPath);
+      try {
+        if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
+        const dir = path.dirname(fullPath);
+        if (dir !== this._libraryPath) {
+          try { fs.rmdirSync(dir); } catch { /* not empty */ }
+        }
+      } catch (err) {
+        console.error(`[Library] Failed to delete discovered file: ${err.message}`);
+      }
+      return true;
+    }
+
     const item = this._items.get(id);
     if (!item) return false;
 
@@ -163,7 +204,16 @@ class LibraryManager {
    * Get the full file path for streaming a completed item.
    */
   getFilePath(id) {
-    const item = this._items.get(id);
+    let item = this._items.get(id);
+
+    // Handle discovered (untracked) files
+    if (!item && id.startsWith('disk_')) {
+      const relPath = id.slice(5); // strip 'disk_' prefix
+      const fullPath = path.join(this._libraryPath, relPath);
+      if (fs.existsSync(fullPath)) return fullPath;
+      return null;
+    }
+
     if (!item || item.status !== 'complete' || !item.filePath) return null;
 
     const fullPath = path.join(this._libraryPath, item.filePath);
@@ -496,6 +546,87 @@ class LibraryManager {
     } catch (err) {
       console.error(`[Library] Failed to save metadata: ${err.message}`);
     }
+  }
+
+  /**
+   * Scan the library directory for video files not tracked in metadata.
+   * Returns them as synthetic library items so they show up in the UI.
+   */
+  _discoverUntrackedFiles() {
+    const discovered = [];
+    const trackedPaths = new Set(
+      [...this._items.values()]
+        .filter(i => i.filePath)
+        .map(i => i.filePath)
+    );
+
+    try {
+      const entries = fs.readdirSync(this._libraryPath, { withFileTypes: true });
+
+      for (const entry of entries) {
+        if (entry.name.startsWith('_metadata')) continue;
+        if (entry.name.endsWith('.tmp')) continue;
+
+        const entryPath = path.join(this._libraryPath, entry.name);
+
+        if (entry.isFile()) {
+          const ext = path.extname(entry.name).toLowerCase();
+          if (!VIDEO_EXTENSIONS.has(ext)) continue;
+          if (trackedPaths.has(entry.name)) continue;
+
+          const stat = fs.statSync(entryPath);
+          const name = path.basename(entry.name, ext).replace(/[._]/g, ' ').trim();
+          discovered.push({
+            id: 'disk_' + entry.name,
+            name,
+            type: 'movie',
+            status: 'complete',
+            filePath: entry.name,
+            fileName: entry.name,
+            fileSize: stat.size,
+            addedAt: stat.mtimeMs,
+          });
+        } else if (entry.isDirectory()) {
+          // Scan subdirectory for video files
+          try {
+            const subFiles = fs.readdirSync(entryPath);
+            let bestVideo = null;
+            let bestSize = 0;
+            for (const f of subFiles) {
+              const ext = path.extname(f).toLowerCase();
+              if (!VIDEO_EXTENSIONS.has(ext)) continue;
+              const relPath = path.join(entry.name, f);
+              if (trackedPaths.has(relPath)) continue;
+              const stat = fs.statSync(path.join(entryPath, f));
+              if (stat.size > bestSize) {
+                bestVideo = { name: f, relPath, size: stat.size, mtime: stat.mtimeMs };
+                bestSize = stat.size;
+              }
+            }
+            if (bestVideo && !trackedPaths.has(bestVideo.relPath)) {
+              const name = entry.name.replace(/[._]/g, ' ').trim();
+              discovered.push({
+                id: 'disk_' + bestVideo.relPath,
+                name,
+                type: 'movie',
+                status: 'complete',
+                filePath: bestVideo.relPath,
+                fileName: bestVideo.name,
+                fileSize: bestVideo.size,
+                addedAt: bestVideo.mtime,
+              });
+            }
+          } catch { /* skip unreadable dirs */ }
+        }
+      }
+    } catch (err) {
+      console.error(`[Library] Disk scan failed: ${err.message}`);
+    }
+
+    if (discovered.length > 0) {
+      console.log(`[Library] Discovered ${discovered.length} untracked file(s) on disk`);
+    }
+    return discovered;
   }
 
   _sanitizeItem(item) {

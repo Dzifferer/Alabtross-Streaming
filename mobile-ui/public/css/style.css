@@ -2862,6 +2862,11 @@ html, body {
   box-shadow: 0 0 6px rgba(0, 206, 201, 0.4);
 }
 
+.diag-indicator.warn {
+  background: var(--warning);
+  box-shadow: 0 0 6px rgba(253, 203, 110, 0.4);
+}
+
 .diag-indicator.fail {
   background: var(--danger);
   box-shadow: 0 0 6px rgba(255, 107, 107, 0.4);

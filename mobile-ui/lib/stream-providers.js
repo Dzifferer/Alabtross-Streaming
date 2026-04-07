@@ -956,6 +956,7 @@ async function getSeriesStreams(imdbId, season, episode, title, opts = {}) {
 /**
  * Test connectivity to each provider and return status.
  * Uses a well-known IMDB ID (The Shawshank Redemption) for testing.
+ * Reports both raw HTTP connectivity and actual search results.
  */
 async function diagnoseProviders() {
   const testImdb = 'tt0111161'; // The Shawshank Redemption
@@ -973,7 +974,42 @@ async function diagnoseProviders() {
     }
   };
 
+  // Raw connectivity checks (HTTP status + response snippet)
+  const testConnectivity = async (name, url) => {
+    const start = Date.now();
+    try {
+      const res = await httpGet(url, 10000);
+      const ms = Date.now() - start;
+      const bodySnippet = (res.body || '').slice(0, 200);
+      const isCloudflare = bodySnippet.includes('cf-') || bodySnippet.includes('Cloudflare') || bodySnippet.includes('Just a moment');
+      const isHtml = bodySnippet.trim().startsWith('<');
+      results[name + '_http'] = {
+        status: res.status || (res.ok ? 200 : 0),
+        ok: res.ok,
+        cloudflare: isCloudflare,
+        htmlResponse: isHtml && !bodySnippet.includes('{'),
+        ms,
+      };
+    } catch (e) {
+      const ms = Date.now() - start;
+      results[name + '_http'] = {
+        status: 0,
+        ok: false,
+        error: e.message,
+        ms,
+      };
+    }
+  };
+
   await Promise.all([
+    // Connectivity checks
+    testConnectivity('torrentio', `${TORRENTIO_BASE}/manifest.json`),
+    testConnectivity('yts', 'https://yts.mx/api/v2/list_movies.json?limit=1'),
+    testConnectivity('eztv', 'https://eztv.re/api/get-torrents?limit=1&page=1'),
+    testConnectivity('tpb', 'https://apibay.org/q.php?q=test&cat=200'),
+    testConnectivity('1337x', 'https://1337x.to/'),
+
+    // Search result checks
     testProvider('torrentio', async () => {
       for (const config of TORRENTIO_CONFIGS) {
         const url = config
@@ -990,8 +1026,9 @@ async function diagnoseProviders() {
     testProvider('tpb', () => searchTPB('Shawshank Redemption')),
     testProvider('yts', () => searchYTS(testImdb)),
     testProvider('eztv', async () => {
-      // EZTV is TV-only, just test connectivity
-      const data = await fetchJSON('https://eztv.re/api/get-torrents?imdb_id=303461&limit=5&page=1', 10000, 0);
+      // EZTV is TV-only — test with Breaking Bad (tt0903747) which always has results
+      const numericId = '903747';
+      const data = await fetchJSON(`https://eztv.re/api/get-torrents?imdb_id=${numericId}&limit=5&page=1`, 10000, 0);
       return data && data.torrents ? data.torrents : [];
     }),
     testProvider('1337x', () => search1337x('Shawshank Redemption')),
@@ -999,11 +1036,11 @@ async function diagnoseProviders() {
 
   // Overall status
   const working = Object.entries(results)
-    .filter(([k, v]) => !k.startsWith('_') && v.ok && v.count > 0)
+    .filter(([k, v]) => !k.startsWith('_') && !k.includes('_http') && v.ok && v.count > 0)
     .map(([k]) => k);
   results._summary = {
     working,
-    total: Object.keys(results).filter(k => !k.startsWith('_')).length,
+    total: Object.keys(results).filter(k => !k.startsWith('_') && !k.includes('_http')).length,
     allDown: working.length === 0,
   };
 

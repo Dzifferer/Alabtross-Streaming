@@ -630,9 +630,9 @@ class StremioAPI {
   // Known Stremio TV addons that users can quick-add
   static KNOWN_TV_ADDONS = [
     {
-      url: 'https://848b3516657c-usatv.baby-beamup.club',
-      name: 'USA TV',
-      description: 'US live TV — news, sports, entertainment (180+ channels)',
+      url: 'https://stremio-iptv-org.vercel.app',
+      name: 'IPTV-org',
+      description: 'Community IPTV — 8000+ channels worldwide',
     },
     {
       url: 'https://7a82163c306e-livetv.baby-beamup.club',
@@ -640,17 +640,17 @@ class StremioAPI {
       description: 'International live TV channels',
     },
     {
-      url: 'https://stremio-iptv-org.vercel.app',
-      name: 'IPTV-org',
-      description: 'Community IPTV — 8000+ channels worldwide',
+      url: 'https://848b3516657c-usatv.baby-beamup.club',
+      name: 'USA TV',
+      description: 'US live TV — news, sports, entertainment (180+ channels)',
     },
   ];
 
   // Default source added on first launch
   static DEFAULT_TV_SOURCE = {
     type: 'stremio-tv',
-    url: 'https://848b3516657c-usatv.baby-beamup.club',
-    name: 'USA TV',
+    url: 'https://stremio-iptv-org.vercel.app',
+    name: 'IPTV-org',
     enabled: true,
   };
 

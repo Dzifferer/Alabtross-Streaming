@@ -1209,8 +1209,8 @@
       <div class="loading-state"><div class="spinner"></div><p>Loading details...</p></div>
     `;
 
-    // For movies, start fetching streams in parallel with metadata
-    const streamsPromise = type === 'movie' ? api.getStreams(type, id) : null;
+    // For movies with IMDB IDs, start fetching streams in parallel with metadata
+    let streamsPromise = (type === 'movie' && !id.startsWith('tmdb:')) ? api.getStreams(type, id) : null;
 
     const meta = await api.getMeta(type, id);
     if (!meta) {
@@ -1218,6 +1218,15 @@
         <div class="empty-state"><p>Could not load details</p></div>
       `;
       return;
+    }
+
+    // If TMDB metadata resolved an IMDB ID, use it for streams and update the working ID
+    if (meta._resolvedImdbId && id.startsWith('tmdb:')) {
+      id = meta._resolvedImdbId;
+      // Start the movie stream fetch now that we have a real IMDB ID
+      if (type === 'movie' && !streamsPromise) {
+        streamsPromise = api.getStreams(type, id);
+      }
     }
 
     state.currentMeta = meta;

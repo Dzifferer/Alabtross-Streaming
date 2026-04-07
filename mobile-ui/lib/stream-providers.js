@@ -795,28 +795,29 @@ function setCachedStreams(key, streams) {
  */
 async function getMovieStreams(imdbId, title) {
   const id = sanitizeImdbId(imdbId);
-  if (!id) return [];
+  if (!id && !title) return [];
 
-  const cacheKey = `movie:${id}`;
+  const cacheKey = `movie:${id || `title:${title}`}`;
   const cached = getCachedStreams(cacheKey);
   if (cached) {
     console.log(`[Streams] Cache hit for ${cacheKey} (${cached.length} streams)`);
     return cached;
   }
 
-  console.log(`[Streams] Searching movie streams for ${id} (title: "${title || 'unknown'}")`);
+  console.log(`[Streams] Searching movie streams for ${id || 'no-imdb'} (title: "${title || 'unknown'}")`);
 
   // Run Torrentio AND fallbacks in parallel — don't wait for Torrentio first.
   // This halves latency when Torrentio is slow/down, and ensures fallbacks
   // always contribute results regardless of Torrentio's response.
+  // When no IMDB ID is available, skip providers that require it (Torrentio, YTS).
   const tpbQuery = title || id;
   const [torrentioStreams, tpb, yts, x1337] = await Promise.all([
-    searchTorrentio('movie', id).catch(e => {
+    id ? searchTorrentio('movie', id).catch(e => {
       console.log(`[Torrentio] Error: ${e.message}`);
       return [];
-    }),
+    }) : Promise.resolve([]),
     searchTPB(tpbQuery).catch(e => { console.log(`[TPB] Error: ${e.message}`); return []; }),
-    searchYTS(id).catch(e => { console.log(`[YTS] Error: ${e.message}`); return []; }),
+    id ? searchYTS(id).catch(e => { console.log(`[YTS] Error: ${e.message}`); return []; }) : Promise.resolve([]),
     search1337x(title || id).catch(e => { console.log(`[1337x] Error: ${e.message}`); return []; }),
   ]);
 
@@ -871,9 +872,9 @@ function isLikelyAnime(title, genres) {
  */
 async function getSeriesStreams(imdbId, season, episode, title, opts = {}) {
   const id = sanitizeImdbId(imdbId);
-  if (!id) return [];
+  if (!id && !title) return [];
 
-  const cacheKey = `series:${id}:${season}:${episode}`;
+  const cacheKey = `series:${id || `title:${title}`}:${season}:${episode}`;
   const cached = getCachedStreams(cacheKey);
   if (cached) {
     console.log(`[Streams] Cache hit for ${cacheKey} (${cached.length} streams)`);
@@ -885,7 +886,7 @@ async function getSeriesStreams(imdbId, season, episode, title, opts = {}) {
     ? `S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`
     : '';
 
-  console.log(`[Streams] Searching series streams for ${id} ${seTag} (title: "${title || 'unknown'}")`);
+  console.log(`[Streams] Searching series streams for ${id || 'no-imdb'} ${seTag} (title: "${title || 'unknown'}")`);
 
   // Determine if this might be anime (for Nyaa search)
   const { absEp, genres = [] } = opts;
@@ -894,9 +895,10 @@ async function getSeriesStreams(imdbId, season, episode, title, opts = {}) {
 
   // Run ALL providers in parallel — don't wait for Torrentio first.
   // This eliminates the sequential bottleneck when Torrentio is slow/down.
+  // When no IMDB ID is available, skip providers that require it (Torrentio, EZTV).
   const providerPromises = [
-    searchTorrentio('series', id, season, episode).catch(e => { console.log(`[Torrentio] Error: ${e.message}`); return []; }),
-    searchEZTV(id, season, episode).catch(e => { console.log(`[EZTV] Error: ${e.message}`); return []; }),
+    id ? searchTorrentio('series', id, season, episode).catch(e => { console.log(`[Torrentio] Error: ${e.message}`); return []; }) : Promise.resolve([]),
+    id ? searchEZTV(id, season, episode).catch(e => { console.log(`[EZTV] Error: ${e.message}`); return []; }) : Promise.resolve([]),
     searchTPB(tpbQuery).catch(e => { console.log(`[TPB] Error: ${e.message}`); return []; }),
     se ? search1337x(`${title || id} ${seTag}`).catch(e => { console.log(`[1337x] Error: ${e.message}`); return []; }) : Promise.resolve([]),
   ];

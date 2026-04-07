@@ -993,6 +993,41 @@ class StremioAPI {
       return [];
     }
   }
+  // ─── Collection / Franchise Grouping ──────────────
+
+  /**
+   * Enrich a list of IMDB IDs with collection/franchise info.
+   * Returns { collections: { "collectionId": { name, poster, movieIds: [imdbIds] } } }
+   */
+  async enrichWithCollections(imdbIds) {
+    const validIds = imdbIds.filter(id => /^tt\d+$/.test(id));
+    if (validIds.length === 0) return { collections: {} };
+    try {
+      const resp = await fetch('/api/collections/enrich?ids=' + validIds.join(','), {
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!resp.ok) return { collections: {} };
+      return resp.json();
+    } catch {
+      return { collections: {} };
+    }
+  }
+
+  /**
+   * Get full details of a collection (all movies with IMDB IDs, posters, years).
+   * Returns { name, poster, movies: [{ imdb_id, name, year, poster }] }
+   */
+  async getCollectionMovies(collectionId) {
+    try {
+      const resp = await fetch(`/api/collections/${collectionId}`, {
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!resp.ok) return null;
+      return resp.json();
+    } catch {
+      return null;
+    }
+  }
 }
 
 window.api = new StremioAPI();

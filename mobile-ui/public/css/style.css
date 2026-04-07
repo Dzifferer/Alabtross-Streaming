@@ -693,6 +693,97 @@ html, body {
   margin-top: 2px;
 }
 
+/* ===== Collection / Franchise Cards ===== */
+
+.card-collection {
+  cursor: pointer;
+}
+
+.collection-poster-stack {
+  position: relative;
+  box-shadow:
+    4px -3px 0 -1px var(--surface),
+    5px -4px 0 0 rgba(255,255,255,0.15),
+    8px -6px 0 -1px var(--surface),
+    9px -7px 0 0 rgba(255,255,255,0.08);
+}
+
+.collection-badge {
+  position: absolute;
+  bottom: 6px;
+  left: 6px;
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  backdrop-filter: blur(4px);
+  pointer-events: none;
+}
+
+.collection-expanded {
+  display: inline-flex;
+  gap: 10px;
+  align-items: flex-start;
+  flex-shrink: 0;
+}
+
+.collection-collapse-btn {
+  flex-shrink: 0;
+  align-self: center;
+  background: rgba(255,255,255,0.1);
+  color: var(--text-primary, #fff);
+  border: none;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.2s;
+}
+
+.collection-collapse-btn:hover {
+  background: rgba(255,255,255,0.2);
+}
+
+/* Library collection groups */
+.library-collection-group {
+  grid-column: 1 / -1;
+}
+
+.library-collection-header {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary, #fff);
+  padding: 8px 0 4px;
+  border-bottom: 1px solid rgba(255,255,255,0.1);
+  margin-bottom: 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.library-collection-header::before {
+  content: '\25BC';
+  font-size: 10px;
+  transition: transform 0.2s;
+}
+
+.library-collection-header.collapsed::before {
+  transform: rotate(-90deg);
+}
+
+.library-collection-movies {
+  display: contents;
+}
+
+.library-collection-movies.collapsed {
+  display: none;
+}
+
 /* ===== Channel Cards (Live TV) ===== */
 .channel-card {
   flex-shrink: 0;

@@ -2648,13 +2648,351 @@
       });
     });
 
+    // ─── Diagnostics Button ───────────────────────
+    const diagBtn = $('#run-diagnostics-btn');
+    if (diagBtn) {
+      diagBtn.addEventListener('click', () => {
+        runDiagnostics();
+      });
+    }
+
     dom.settingsToggle.addEventListener('click', () => {
       navigateTo('settings');
       renderAddonList();
       renderLiveTVSources();
+      refreshDownloads();
     });
 
     renderAddonList();
+  }
+
+  // ─── Downloads Panel ────────────────────────────
+
+  let _downloadsTimer = null;
+
+  function refreshDownloads() {
+    // Stop any existing timer
+    if (_downloadsTimer) {
+      clearInterval(_downloadsTimer);
+      _downloadsTimer = null;
+    }
+
+    renderDownloads();
+
+    // Auto-refresh while on settings view
+    _downloadsTimer = setInterval(() => {
+      if (state.currentView === 'settings') {
+        renderDownloads();
+      } else {
+        clearInterval(_downloadsTimer);
+        _downloadsTimer = null;
+      }
+    }, 3000);
+  }
+
+  async function renderDownloads() {
+    const panel = $('#downloads-panel');
+    if (!panel) return;
+
+    try {
+      const resp = await fetch('/api/library');
+      if (!resp.ok) throw new Error('Failed');
+      const data = await resp.json();
+      const items = data.items || [];
+
+      // Split into categories
+      const downloading = items.filter(i => i.status === 'downloading');
+      const paused = items.filter(i => i.status === 'paused');
+      const queued = items.filter(i => i.status === 'queued');
+      const completed = items.filter(i => i.status === 'complete').slice(0, 5);
+      const failed = items.filter(i => i.status === 'failed');
+
+      if (downloading.length === 0 && paused.length === 0 && queued.length === 0 && completed.length === 0 && failed.length === 0) {
+        panel.innerHTML = '<div class="downloads-empty"><span class="setting-hint">No downloads</span></div>';
+        renderSourceStats(items);
+        return;
+      }
+
+      let html = '';
+
+      // Active downloads
+      if (downloading.length > 0) {
+        html += '<div class="download-section-label">Downloading</div>';
+        html += downloading.map(i => downloadItemHTML(i)).join('');
+      }
+
+      // Paused
+      if (paused.length > 0) {
+        html += '<div class="download-section-label">Paused</div>';
+        html += paused.map(i => downloadItemHTML(i)).join('');
+      }
+
+      // Queue
+      if (queued.length > 0) {
+        html += '<div class="download-section-label">Queue (' + queued.length + ')</div>';
+        html += queued.map((i, idx) => downloadItemHTML(i, idx, queued.length)).join('');
+      }
+
+      // Failed
+      if (failed.length > 0) {
+        html += '<div class="download-section-label">Failed</div>';
+        html += failed.map(i => downloadItemHTML(i)).join('');
+      }
+
+      // Recent completed
+      if (completed.length > 0) {
+        html += '<div class="download-section-label">Completed</div>';
+        html += completed.map(i => downloadItemHTML(i)).join('');
+      }
+
+      panel.innerHTML = html;
+      attachDownloadListeners(panel);
+      renderSourceStats(items);
+    } catch {
+      panel.innerHTML = '<div class="downloads-empty"><span class="setting-hint">Could not load downloads</span></div>';
+    }
+  }
+
+  function downloadItemHTML(item, queueIdx, queueLen) {
+    const poster = item.poster
+      ? `<img class="download-poster" src="${escapeHTML(item.poster)}" alt="" loading="lazy">`
+      : '<div class="download-poster"></div>';
+
+    const speed = item.downloadSpeed > 0
+      ? `${(item.downloadSpeed / 1e6).toFixed(1)} MB/s`
+      : '';
+    const peers = item.numPeers > 0 ? `${item.numPeers} peers` : '';
+    const meta = [item.quality, speed, peers].filter(Boolean).join(' \u00b7 ');
+
+    const sizeStr = item.fileSize > 0
+      ? `${(item.fileSize / 1e9).toFixed(2)} GB`
+      : item.size || '';
+
+    const progressClass = item.status === 'complete' ? 'complete'
+      : item.status === 'paused' ? 'paused' : '';
+
+    let actions = '';
+    if (item.status === 'downloading') {
+      actions = `
+        <button class="download-action-btn pause" data-id="${escapeHTML(item.id)}" data-action="pause" title="Pause">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+        </button>
+        <button class="download-action-btn cancel" data-id="${escapeHTML(item.id)}" data-action="remove" title="Cancel">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>`;
+    } else if (item.status === 'paused') {
+      actions = `
+        <button class="download-action-btn resume" data-id="${escapeHTML(item.id)}" data-action="resume" title="Resume">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        </button>
+        <button class="download-action-btn cancel" data-id="${escapeHTML(item.id)}" data-action="remove" title="Remove">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>`;
+    } else if (item.status === 'queued') {
+      const upBtn = queueIdx > 0
+        ? `<button class="queue-move-btn" data-id="${escapeHTML(item.id)}" data-action="move-up" title="Move up">\u25B2</button>`
+        : '';
+      const downBtn = queueIdx < queueLen - 1
+        ? `<button class="queue-move-btn" data-id="${escapeHTML(item.id)}" data-action="move-down" title="Move down">\u25BC</button>`
+        : '';
+      actions = `
+        <div class="download-queue-controls">${upBtn}${downBtn}</div>
+        <button class="download-action-btn cancel" data-id="${escapeHTML(item.id)}" data-action="remove" title="Remove">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>`;
+    } else if (item.status === 'failed') {
+      actions = `
+        <button class="download-action-btn cancel" data-id="${escapeHTML(item.id)}" data-action="remove" title="Remove">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>`;
+    }
+
+    const showProgress = ['downloading', 'paused', 'queued'].includes(item.status);
+    const progressBar = showProgress
+      ? `<div class="download-progress-bar"><div class="download-progress-fill ${progressClass}" style="width:${item.progress || 0}%"></div></div>`
+      : '';
+
+    const statusLabel = item.status === 'downloading'
+      ? `${item.progress || 0}%` + (sizeStr ? ` of ${sizeStr}` : '')
+      : item.status === 'paused'
+      ? `Paused at ${item.progress || 0}%`
+      : item.status === 'failed'
+      ? (item.error || 'Failed')
+      : item.status === 'complete'
+      ? (sizeStr || 'Complete')
+      : 'Queued';
+
+    const queueIdxAttr = queueIdx != null ? ` data-queue-idx="${queueIdx}"` : '';
+    return `
+      <div class="download-item"${queueIdxAttr}>
+        ${poster}
+        <div class="download-info">
+          <div class="download-name">${escapeHTML(item.name)}</div>
+          <div class="download-meta">${escapeHTML(statusLabel)}${meta ? ' \u00b7 ' + escapeHTML(meta) : ''}</div>
+          ${progressBar}
+        </div>
+        <div class="download-actions">${actions}</div>
+      </div>`;
+  }
+
+  function attachDownloadListeners(panel) {
+    panel.querySelectorAll('[data-action]').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = btn.dataset.id;
+        const action = btn.dataset.action;
+
+        if (action === 'pause') {
+          await fetch(`/api/library/${encodeURIComponent(id)}/pause`, { method: 'POST' });
+          renderDownloads();
+        } else if (action === 'resume') {
+          await fetch(`/api/library/${encodeURIComponent(id)}/resume`, { method: 'POST' });
+          renderDownloads();
+        } else if (action === 'remove') {
+          await fetch(`/api/library/${encodeURIComponent(id)}`, { method: 'DELETE' });
+          renderDownloads();
+          showToast('Download removed');
+        } else if (action === 'move-up' || action === 'move-down') {
+          const row = btn.closest('.download-item');
+          const currentIdx = parseInt(row?.dataset?.queueIdx || '0', 10);
+          const newPos = action === 'move-up' ? Math.max(0, currentIdx - 1) : currentIdx + 1;
+          await fetch(`/api/library/${encodeURIComponent(id)}/reorder`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ position: newPos }),
+          });
+          renderDownloads();
+        }
+      });
+    });
+  }
+
+  // ─── Source Stats ───────────────────────────────
+
+  function renderSourceStats(items) {
+    const panel = $('#source-stats');
+    if (!panel) return;
+
+    const total = items.length;
+    const downloading = items.filter(i => i.status === 'downloading').length;
+    const completed = items.filter(i => i.status === 'complete').length;
+    const queued = items.filter(i => i.status === 'queued').length;
+    const paused = items.filter(i => i.status === 'paused').length;
+    const failed = items.filter(i => i.status === 'failed').length;
+    const totalSizeBytes = items
+      .filter(i => i.status === 'complete' && i.fileSize > 0)
+      .reduce((sum, i) => sum + i.fileSize, 0);
+    const totalSizeGB = (totalSizeBytes / 1e9).toFixed(1);
+
+    panel.innerHTML = `
+      <div class="source-stat-row">
+        <span class="source-stat-label">Total Library Items</span>
+        <span class="source-stat-value">${total}</span>
+      </div>
+      <div class="source-stat-row">
+        <span class="source-stat-label">Active Downloads</span>
+        <span class="source-stat-value">${downloading}</span>
+      </div>
+      <div class="source-stat-row">
+        <span class="source-stat-label">Queued</span>
+        <span class="source-stat-value">${queued}</span>
+      </div>
+      <div class="source-stat-row">
+        <span class="source-stat-label">Paused</span>
+        <span class="source-stat-value">${paused}</span>
+      </div>
+      <div class="source-stat-row">
+        <span class="source-stat-label">Completed</span>
+        <span class="source-stat-value">${completed}</span>
+      </div>
+      ${failed > 0 ? `<div class="source-stat-row">
+        <span class="source-stat-label">Failed</span>
+        <span class="source-stat-value" style="color:var(--danger)">${failed}</span>
+      </div>` : ''}
+      <div class="source-stat-row">
+        <span class="source-stat-label">Library Size</span>
+        <span class="source-stat-value">${totalSizeGB} GB</span>
+      </div>
+    `;
+  }
+
+  // ─── Source Diagnostics ─────────────────────────
+
+  async function runDiagnostics() {
+    const panel = $('#diagnostics-panel');
+    const btn = $('#run-diagnostics-btn');
+    if (!panel || !btn) return;
+
+    btn.disabled = true;
+    btn.textContent = 'Testing...';
+
+    // Show testing state
+    const providers = ['Torrentio', 'The Pirate Bay', 'YTS', 'EZTV', '1337x'];
+    panel.innerHTML = providers.map(name => `
+      <div class="diag-item">
+        <div class="diag-indicator testing"></div>
+        <div class="diag-info">
+          <div class="diag-name">${name}</div>
+          <div class="diag-detail">Testing...</div>
+        </div>
+      </div>
+    `).join('');
+
+    try {
+      const resp = await fetch('/api/streams/diagnose', { signal: AbortSignal.timeout(30000) });
+      if (!resp.ok) throw new Error('Diagnostics failed');
+      const results = await resp.json();
+
+      const providerMap = {
+        torrentio: 'Torrentio',
+        tpb: 'The Pirate Bay',
+        yts: 'YTS',
+        eztv: 'EZTV',
+        '1337x': '1337x',
+      };
+
+      const summary = results._summary || {};
+      const summaryClass = summary.allDown ? 'all-fail'
+        : summary.working?.length === summary.total ? 'all-ok' : 'some-fail';
+      const summaryText = summary.allDown ? 'All sources unreachable'
+        : summary.working?.length === summary.total ? 'All sources operational'
+        : `${summary.working?.length || 0} of ${summary.total || 0} sources working`;
+
+      let html = `<div class="diag-summary ${summaryClass}">${summaryText}</div>`;
+
+      for (const [key, label] of Object.entries(providerMap)) {
+        const r = results[key];
+        if (!r) continue;
+
+        const indicator = r.ok && r.count > 0 ? 'ok' : 'fail';
+        const detail = r.ok
+          ? (r.count > 0 ? `${r.count} results returned` : 'Reachable but no results')
+          : (r.error || 'Unreachable');
+        const latency = r.ms ? `${r.ms}ms` : '';
+        const configNote = key === 'torrentio' && results._torrentioConfig
+          ? ` (config: ${escapeHTML(results._torrentioConfig)})` : '';
+
+        html += `
+          <div class="diag-item">
+            <div class="diag-indicator ${indicator}"></div>
+            <div class="diag-info">
+              <div class="diag-name">${label}${configNote}</div>
+              <div class="diag-detail">${escapeHTML(detail)}</div>
+            </div>
+            <div class="diag-stats">
+              ${latency ? `<div class="diag-latency">${latency}</div>` : ''}
+              ${r.count > 0 ? `<div class="diag-count">${r.count} results</div>` : ''}
+            </div>
+          </div>`;
+      }
+
+      panel.innerHTML = html;
+    } catch (e) {
+      panel.innerHTML = `<div class="diagnostics-empty"><span class="setting-hint" style="color:var(--danger)">Diagnostics failed: ${escapeHTML(e.message)}</span></div>`;
+    }
+
+    btn.disabled = false;
+    btn.textContent = 'Run Diagnostics';
   }
 
   function renderAddonList() {

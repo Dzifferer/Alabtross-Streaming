@@ -742,6 +742,31 @@ app.delete('/api/library/:id', rateLimit, (req, res) => {
   res.json({ success: true });
 });
 
+// POST /api/library/:id/pause — pause a downloading item
+app.post('/api/library/:id/pause', rateLimit, (req, res) => {
+  const paused = library.pauseItem(req.params.id);
+  if (!paused) return res.status(400).json({ error: 'Cannot pause this item' });
+  res.json({ success: true });
+});
+
+// POST /api/library/:id/resume — resume a paused item
+app.post('/api/library/:id/resume', rateLimit, (req, res) => {
+  const resumed = library.resumeItem(req.params.id);
+  if (!resumed) return res.status(400).json({ error: 'Cannot resume this item' });
+  res.json({ success: true });
+});
+
+// POST /api/library/:id/reorder — reorder a queued item
+app.post('/api/library/:id/reorder', rateLimit, (req, res) => {
+  const position = parseInt(req.body.position, 10);
+  if (isNaN(position) || position < 0) {
+    return res.status(400).json({ error: 'Invalid position' });
+  }
+  const reordered = library.reorderQueue(req.params.id, position);
+  if (!reordered) return res.status(400).json({ error: 'Cannot reorder this item' });
+  res.json({ success: true });
+});
+
 // GET /api/library/:id/stream — stream a completed library item
 app.get('/api/library/:id/stream', async (req, res) => {
   const item = library.getItem(req.params.id);

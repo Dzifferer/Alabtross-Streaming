@@ -3,7 +3,7 @@
  *
  * Mobile-first streaming interface with:
  * - Auto stream speed testing (picks fastest source)
- * - VPN safety checks (warns if not on VPN)
+ * - VPN safety checks (warns if not on Tailscale)
  * - Catalog browsing, search, detail views
  * - Built-in video player
  */
@@ -118,7 +118,7 @@
   async function checkVPNStatus() {
     // Strategy: Try to detect if we're accessing the server through a
     // private/VPN IP. If the page is served from the Jetson (which is
-    // behind WireGuard), the connection itself proves VPN is active.
+    // behind Tailscale), the connection itself proves VPN is active.
     // We also check if the server is reachable on its local IP.
 
     try {
@@ -162,7 +162,7 @@
     svg.innerHTML = '<path d="M12 9v4M12 17h.01"/><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>';
 
     const msg = document.createElement('span');
-    msg.textContent = 'VPN not detected \u2014 connect to WireGuard for safe streaming';
+    msg.textContent = 'VPN not detected \u2014 connect to Tailscale for safe streaming';
 
     const closeBtn = document.createElement('button');
     closeBtn.textContent = '\u00d7';
@@ -235,7 +235,30 @@
       dom.videoPlayer.pause();
       dom.videoPlayer.src = '';
       dom.videoPlayer.load(); // release previous resource from memory
+      exitPlayerFullscreen();
     }
+  }
+
+  // Enter true fullscreen for immersive playback (mobile + desktop)
+  function enterPlayerFullscreen() {
+    const container = document.getElementById('view-player');
+    try {
+      if (container.requestFullscreen) {
+        container.requestFullscreen().catch(() => {});
+      } else if (container.webkitRequestFullscreen) {
+        container.webkitRequestFullscreen();
+      }
+    } catch (_) { /* fullscreen not supported or blocked — player still fills viewport via CSS */ }
+  }
+
+  function exitPlayerFullscreen() {
+    try {
+      if (document.fullscreenElement) {
+        document.exitFullscreen().catch(() => {});
+      } else if (document.webkitFullscreenElement) {
+        document.webkitExitFullscreen();
+      }
+    } catch (_) {}
   }
 
   function updateNavUI(view) {
@@ -336,11 +359,15 @@
             <div class="catalog-row-header">
               <h3 class="catalog-row-title">${escapeHTML(group.sourceName)}</h3>
               <span class="catalog-row-badge">LIVE</span>
+              <button class="catalog-row-more livetv-browse-btn">Browse All</button>
             </div>
             <div class="catalog-scroll">${group.channels.slice(0, 30).map(ch => channelCardHTML(ch)).join('')}</div>
           `;
           dom.homeCatalogs.appendChild(tvRow);
           attachChannelListeners(tvRow);
+          tvRow.querySelector('.livetv-browse-btn')?.addEventListener('click', () => {
+            openChannelBrowser(group);
+          });
         }
       } else {
         const sources = api.getLiveTVSources();
@@ -485,10 +512,14 @@
           <div class="catalog-row-header">
             <h3 class="catalog-row-title">${escapeHTML(firstGroup.sourceName)}</h3>
             <span class="catalog-row-badge">LIVE</span>
+            <button class="catalog-row-more livetv-browse-btn">Browse All</button>
           </div>
           <div class="catalog-scroll">${firstGroup.channels.slice(0, 30).map(ch => channelCardHTML(ch)).join('')}</div>
         `;
         attachChannelListeners(tvContainer);
+        tvContainer.querySelector('.livetv-browse-btn')?.addEventListener('click', () => {
+          openChannelBrowser(firstGroup);
+        });
 
         // Append additional groups as separate rows after tvContainer
         for (let i = 1; i < tvGroups.length; i++) {
@@ -498,11 +529,16 @@
             <div class="catalog-row-header">
               <h3 class="catalog-row-title">${escapeHTML(tvGroups[i].sourceName)}</h3>
               <span class="catalog-row-badge">LIVE</span>
+              <button class="catalog-row-more livetv-browse-btn">Browse All</button>
             </div>
             <div class="catalog-scroll">${tvGroups[i].channels.slice(0, 30).map(ch => channelCardHTML(ch)).join('')}</div>
           `;
           tvContainer.insertAdjacentElement('afterend', extraRow);
           attachChannelListeners(extraRow);
+          const groupRef = tvGroups[i];
+          extraRow.querySelector('.livetv-browse-btn')?.addEventListener('click', () => {
+            openChannelBrowser(groupRef);
+          });
         }
       } else {
         // Show error/config state — always keep the section visible
@@ -727,8 +763,106 @@
 
       await dom.videoPlayer.play();
       dom.playerOverlay.classList.add('hidden');
+      enterPlayerFullscreen();
     } catch (e) {
       showPlayerError('Channel unavailable', escapeHTML(e.message));
+    }
+  }
+
+  // ─── Channel Browser (Browse All Live TV) ───────
+
+  function openChannelBrowser(group) {
+    navigateTo('search');
+    dom.searchEmpty.classList.add('hidden');
+    dom.searchInput.value = '';
+    dom.searchClear.classList.add('hidden');
+
+    const channels = group.channels || [];
+    // Extract unique groups for filter chips
+    const groups = [...new Set(channels.map(ch => ch.group).filter(Boolean))].sort();
+
+    let html = `<div class="channel-browser" style="grid-column:1/-1">
+      <div class="channel-browser-header">
+        <h3>${escapeHTML(group.sourceName)} — ${channels.length} channels</h3>
+      </div>`;
+
+    // Group filter chips
+    if (groups.length > 1) {
+      html += `<div class="channel-browser-filters">
+        <button class="filter-chip active channel-group-chip" data-group="">All</button>
+        ${groups.slice(0, 30).map(g => `<button class="filter-chip channel-group-chip" data-group="${escapeHTML(g)}">${escapeHTML(g)}</button>`).join('')}
+      </div>`;
+    }
+
+    // Search within channels
+    html += `<div class="channel-browser-search">
+      <input type="search" class="channel-search-input" placeholder="Search channels..." autocomplete="off">
+    </div>`;
+
+    // Channel grid
+    html += `<div class="channel-browser-grid" id="channel-browser-grid">
+      ${channels.slice(0, 100).map(ch => channelCardHTML(ch)).join('')}
+    </div>`;
+
+    if (channels.length > 100) {
+      html += `<div class="channel-browser-more" style="text-align:center;padding:16px;">
+        <button class="btn-sm" id="channel-load-more">Show More (${channels.length - 100} remaining)</button>
+      </div>`;
+    }
+
+    html += `</div>`;
+
+    dom.searchResults.innerHTML = html;
+    attachChannelListeners(dom.searchResults);
+
+    // Local search within this group's channels
+    const searchInput = dom.searchResults.querySelector('.channel-search-input');
+    const grid = document.getElementById('channel-browser-grid');
+    let activeGroup = '';
+    let searchTimer;
+
+    function filterChannels() {
+      const q = (searchInput?.value || '').trim().toLowerCase();
+      let filtered = channels;
+      if (activeGroup) {
+        filtered = filtered.filter(ch => ch.group === activeGroup);
+      }
+      if (q.length >= 2) {
+        filtered = filtered.filter(ch =>
+          ch.name.toLowerCase().includes(q) ||
+          (ch.group || '').toLowerCase().includes(q) ||
+          (ch.country || '').toLowerCase().includes(q)
+        );
+      }
+      grid.innerHTML = filtered.slice(0, 100).map(ch => channelCardHTML(ch)).join('');
+      attachChannelListeners(grid);
+    }
+
+    if (searchInput) {
+      searchInput.addEventListener('input', () => {
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(filterChannels, 250);
+      });
+    }
+
+    // Group filter chip handlers
+    dom.searchResults.querySelectorAll('.channel-group-chip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        dom.searchResults.querySelectorAll('.channel-group-chip').forEach(c => c.classList.remove('active'));
+        chip.classList.add('active');
+        activeGroup = chip.dataset.group;
+        filterChannels();
+      });
+    });
+
+    // Load more button
+    const loadMoreBtn = document.getElementById('channel-load-more');
+    if (loadMoreBtn) {
+      loadMoreBtn.addEventListener('click', () => {
+        grid.innerHTML = channels.map(ch => channelCardHTML(ch)).join('');
+        attachChannelListeners(grid);
+        loadMoreBtn.parentElement.remove();
+      });
     }
   }
 
@@ -849,9 +983,14 @@
     `;
 
     const typeFilter = state.currentType || null;
-    const results = await api.search(query, typeFilter);
 
-    if (results.length === 0) {
+    // Search movies/series and Live TV in parallel
+    const [results, tvChannels] = await Promise.all([
+      api.search(query, typeFilter),
+      api.searchLiveTVChannels(query),
+    ]);
+
+    if (results.length === 0 && tvChannels.length === 0) {
       dom.searchResults.innerHTML = `
         <div class="empty-state" style="grid-column:1/-1">
           <p>No results for "${escapeHTML(query)}"</p>
@@ -860,12 +999,36 @@
       return;
     }
 
-    dom.searchResults.innerHTML = results.map(item => {
-      const type = item.type || 'movie';
-      return cardHTML(item, type);
-    }).join('');
+    let html = '';
 
+    // Live TV results first (if any)
+    if (tvChannels.length > 0) {
+      html += `<div class="search-section-header" style="grid-column:1/-1">
+        <h3>Live TV Channels</h3>
+      </div>`;
+      html += `<div class="search-tv-row" style="grid-column:1/-1">
+        <div class="catalog-scroll">${tvChannels.map(ch => channelCardHTML(ch)).join('')}</div>
+      </div>`;
+    }
+
+    // Movie/series results
+    if (results.length > 0) {
+      if (tvChannels.length > 0) {
+        html += `<div class="search-section-header" style="grid-column:1/-1">
+          <h3>Movies & Shows</h3>
+        </div>`;
+      }
+      html += results.map(item => {
+        const type = item.type || 'movie';
+        return cardHTML(item, type);
+      }).join('');
+    }
+
+    dom.searchResults.innerHTML = html;
+
+    // Attach listeners for both card types
     attachCardListeners(dom.searchResults);
+    attachChannelListeners(dom.searchResults);
   }
 
   // ─── Detail View ─────────────────────────────────
@@ -1481,6 +1644,9 @@
       dom.videoPlayer.addEventListener('waiting', onStalled);
       dom.videoPlayer.addEventListener('stalled', onStalled);
       dom.videoPlayer.addEventListener('playing', onPlaying);
+
+      // Enter fullscreen on mobile for immersive playback
+      enterPlayerFullscreen();
     } catch (e) {
       if (statusInterval) clearInterval(statusInterval);
       let hint = escapeHTML(e.message);
@@ -1777,6 +1943,7 @@
 
       await dom.videoPlayer.play();
       dom.playerOverlay.classList.add('hidden');
+      enterPlayerFullscreen();
     } catch (e) {
       let hint = escapeHTML(e.message);
       if (e.message.includes('Media error')) {
@@ -1863,152 +2030,10 @@
     return bytes + ' B';
   }
 
-  // ─── Share / VPN QR Code ──────────────────────────
-
-  let currentVPNConfig = '';
-
-  function generateConfigQR(config) {
-    const container = $('#qr-code-container');
-    try {
-      const svg = QRCode.toSVG(config, {
-        moduleSize: 6,
-        margin: 3,
-        dark: '#000000',
-        light: '#ffffff',
-      });
-      container.innerHTML = svg;
-    } catch (e) {
-      container.innerHTML = '<p style="color:#ff6b6b;">Config too long for QR code — try a shorter config</p>';
-    }
-  }
-
-  async function loadVPNProfiles() {
-    const list = $('#vpn-profile-list');
-    try {
-      const resp = await fetch('/api/vpn/profiles');
-      const data = await resp.json();
-
-      if (data.profiles.length === 0) {
-        list.innerHTML = `<div class="vpn-profile-empty">
-          <p>${data.error || 'No VPN profiles found'}</p>
-          <p style="margin-top:8px;">Create profiles with: <code>pivpn add</code></p>
-        </div>`;
-        return;
-      }
-
-      list.innerHTML = data.profiles.map(name => `
-        <button class="vpn-profile-btn" data-profile="${name}">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4-4v2"/>
-            <circle cx="8.5" cy="7" r="4"/><path d="M20 8v6M23 11h-6"/>
-          </svg>
-          ${name}
-        </button>
-      `).join('');
-
-      list.querySelectorAll('.vpn-profile-btn').forEach(btn => {
-        btn.addEventListener('click', () => selectVPNProfile(btn.dataset.profile));
-      });
-    } catch (e) {
-      list.innerHTML = '<div class="vpn-profile-empty">Failed to load VPN profiles</div>';
-    }
-  }
-
-  let currentTunnelMode = 'full'; // 'full' or 'split'
-  let currentProfileName = null;
-
-  function initTunnelModeToggle() {
-    const fullBtn = $('#tunnel-full');
-    const splitBtn = $('#tunnel-split');
-    const hint = $('#tunnel-mode-hint');
-
-    const hints = {
-      full: 'All traffic goes through VPN \u2014 most secure, but local casting won\'t work',
-      split: 'Only streaming traffic uses VPN \u2014 your WiFi stays active for AirPlay / Chromecast discovery',
-    };
-
-    function setMode(mode) {
-      currentTunnelMode = mode;
-      fullBtn.classList.toggle('active', mode === 'full');
-      splitBtn.classList.toggle('active', mode === 'split');
-      hint.textContent = hints[mode];
-      // Re-fetch current profile with the new mode
-      if (currentProfileName) selectVPNProfile(currentProfileName);
-    }
-
-    fullBtn.addEventListener('click', () => setMode('full'));
-    splitBtn.addEventListener('click', () => setMode('split'));
-  }
-
-  async function selectVPNProfile(name) {
-    currentProfileName = name;
-    const container = $('#qr-code-container');
-    const profileName = $('#vpn-profile-name');
-    const urlBox = $('#share-url-display');
-    const urlText = $('#share-url-text');
-
-    // Highlight selected button
-    $$('.vpn-profile-btn').forEach(b => b.classList.toggle('active', b.dataset.profile === name));
-
-    container.innerHTML = '<div class="spinner"></div><p>Loading config...</p>';
-
-    try {
-      // Fetch split-tunnel or full-tunnel config based on toggle
-      const endpoint = currentTunnelMode === 'split'
-        ? `/api/vpn/profile/${encodeURIComponent(name)}/split-tunnel`
-        : `/api/vpn/profile/${encodeURIComponent(name)}`;
-
-      const resp = await fetch(endpoint);
-      if (!resp.ok) throw new Error('Profile not found');
-      const data = await resp.json();
-      currentVPNConfig = data.config;
-
-      generateConfigQR(data.config);
-      profileName.textContent = name + (currentTunnelMode === 'split' ? ' (split tunnel)' : '');
-      profileName.classList.remove('hidden');
-      urlBox.classList.remove('hidden');
-      urlText.textContent = `${name}.conf`;
-    } catch (e) {
-      container.innerHTML = '<p style="color:#ff6b6b;">Failed to load profile</p>';
-      currentVPNConfig = '';
-    }
-  }
-
-  function copyToClipboard(text) {
-    navigator.clipboard.writeText(text).then(() => {
-      showToast('Copied to clipboard');
-    }).catch(() => {
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      ta.style.position = 'fixed';
-      ta.style.left = '-9999px';
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      document.body.removeChild(ta);
-      showToast('Copied to clipboard');
-    });
-  }
+  // ─── Share / Tailscale VPN ──────────────────────────
 
   function initShare() {
-    initTunnelModeToggle();
-
-    $('#share-copy-btn').addEventListener('click', () => {
-      if (currentVPNConfig) copyToClipboard(currentVPNConfig);
-    });
-
-    $('#share-manual-btn').addEventListener('click', () => {
-      const input = $('#share-custom-config');
-      const config = input.value.trim();
-      if (!config) { showToast('Paste a WireGuard config first'); return; }
-      currentVPNConfig = config;
-      generateConfigQR(config);
-      $('#vpn-profile-name').textContent = 'Manual Config';
-      $('#vpn-profile-name').classList.remove('hidden');
-      $('#share-url-display').classList.remove('hidden');
-      $('#share-url-text').textContent = 'manual.conf';
-      $$('.vpn-profile-btn').forEach(b => b.classList.remove('active'));
-    });
+    // Tailscale share page is static — no dynamic logic needed
   }
 
   // ─── Settings ────────────────────────────────────
@@ -2293,20 +2318,6 @@
     app.classList.add('theme-custom');
   }
 
-  // ─── Player Error Helper ──────────────────────────
-
-  function showPlayerError(title, hint) {
-    dom.playerOverlay.innerHTML = `
-      <p style="color:var(--danger)">${escapeHTML(title)}</p>
-      <p style="font-size:13px;color:var(--text-muted)">${hint}</p>
-      <button id="player-go-back" style="
-        margin-top:16px; padding:10px 24px; background:var(--accent);
-        border:none; border-radius:8px; color:white; font-size:14px; cursor:pointer;
-      ">Go Back</button>
-    `;
-    document.getElementById('player-go-back').addEventListener('click', () => goBack());
-  }
-
   // ─── Utility ─────────────────────────────────────
 
   const _escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
@@ -2317,11 +2328,11 @@
 
   // ─── Casting ─────────────────────────────────────
   //
-  // Strategy for VPN + local casting:
+  // Strategy for Tailscale + local casting:
   //   1. Phone discovers devices on its OWN WiFi via browser Remote Playback API
-  //      (AirPlay / Chromecast). This needs split-tunnel VPN so local network
-  //      traffic stays on WiFi while only Jetson traffic goes through the tunnel.
-  //   2. For AirPlay: the phone streams from VPN and relays to the AirPlay device
+  //      (AirPlay / Chromecast). Tailscale runs alongside WiFi so local network
+  //      traffic stays on WiFi while Jetson traffic goes through the Tailscale tunnel.
+  //   2. For AirPlay: the phone streams from Tailscale and relays to the AirPlay device
   //      on the local network — this works natively.
   //   3. For Chromecast: the browser handles proxying the media data.
   //   4. Server-side casting (Jetson → LAN devices) available as fallback.
@@ -2436,8 +2447,8 @@
         </button>
         <div class="cast-split-hint" id="cast-split-hint">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
-          <span>Not seeing devices? Enable <strong>split tunneling</strong> on your VPN so local WiFi stays active.
-          In WireGuard, set <code>AllowedIPs</code> to only the server's VPN IP instead of <code>0.0.0.0/0</code>.</span>
+          <span>Not seeing devices? Tailscale runs alongside your WiFi so local casting should work automatically.
+          If not, check that your WiFi is connected and Tailscale is active.</span>
         </div>
       `;
     }
@@ -2459,7 +2470,7 @@
         await dom.videoPlayer.remote.prompt();
       } catch (e) {
         if (e.name === 'NotFoundError') {
-          showToast('No cast devices found — check your WiFi and VPN split-tunnel settings');
+          showToast('No cast devices found — check your WiFi and Tailscale connection');
         } else if (e.name !== 'NotAllowedError') {
           showToast('Cast not available');
         }
@@ -2610,7 +2621,6 @@
           loadLibrary();
         } else if (view === 'share') {
           navigateTo('share');
-          loadVPNProfiles();
         } else {
           navigateTo('home');
           loadHome();

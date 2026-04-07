@@ -470,6 +470,73 @@ html, body {
   font-size: 13px;
 }
 
+/* ===== Search Section Headers ===== */
+.search-section-header {
+  padding: 8px 4px 4px;
+}
+
+.search-section-header h3 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.search-tv-row {
+  margin-bottom: 12px;
+}
+
+/* ===== Channel Browser ===== */
+.channel-browser-header h3 {
+  font-size: 17px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
+.channel-browser-filters {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 12px;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.channel-browser-filters::-webkit-scrollbar {
+  display: none;
+}
+
+.channel-browser-search {
+  margin-bottom: 16px;
+}
+
+.channel-search-input {
+  width: 100%;
+  padding: 10px 14px;
+  background: var(--bg-input);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 14px;
+  outline: none;
+}
+
+.channel-search-input:focus {
+  border-color: var(--accent);
+}
+
+.channel-browser-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.channel-browser-grid .channel-card {
+  width: 110px;
+  flex-shrink: 0;
+}
+
 /* ===== Catalog Rows (Home) ===== */
 .catalog-row {
   margin-bottom: 28px;
@@ -1049,28 +1116,41 @@ html, body {
 
 /* ===== Player ===== */
 #view-player {
-  background: #000;
-  position: fixed;
-  inset: 0;
-  z-index: 200;
   display: none;
-  min-height: 0;
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  z-index: 9999;
+  background: #000;
 }
 
 #view-player.active {
   display: block;
 }
 
+/* Fullscreen mode — ensure player fills entire screen */
+#view-player:fullscreen,
+#view-player:-webkit-full-screen {
+  width: 100%;
+  height: 100%;
+  background: #000;
+}
+
 .player-back-btn {
   position: absolute;
   top: max(12px, env(safe-area-inset-top, 0px));
   left: max(12px, env(safe-area-inset-left, 0px));
-  z-index: 20;
-  width: 40px;
-  height: 40px;
+  z-index: 30;
+  width: 44px;
+  height: 44px;
   border-radius: 50%;
   border: none;
   background: rgba(0,0,0,0.6);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
   color: white;
   cursor: pointer;
   display: flex;
@@ -1085,14 +1165,19 @@ html, body {
 
 #player-container {
   position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
   background: #000;
+  overflow: hidden;
 }
 
+/* Video fills container — same pattern as YouTube/Netflix mobile web */
 #video-player {
+  position: absolute;
+  top: 0;
+  left: 0;
   width: 100%;
   height: 100%;
   object-fit: contain;
@@ -1826,117 +1911,6 @@ html, body {
   color: var(--accent);
 }
 
-/* VPN profile list */
-.vpn-profile-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-bottom: 8px;
-  width: 100%;
-}
-
-.vpn-profile-btn {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 14px;
-  background: var(--bg-card);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: var(--radius-sm);
-  color: var(--text);
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.2s;
-  width: 100%;
-  text-align: left;
-}
-
-.vpn-profile-btn:active {
-  background: var(--bg-elevated);
-}
-
-.vpn-profile-btn.active {
-  border-color: var(--accent);
-  background: var(--bg-elevated);
-}
-
-.vpn-profile-btn svg {
-  flex-shrink: 0;
-  color: var(--accent);
-}
-
-.vpn-profile-empty {
-  text-align: center;
-  padding: 24px;
-  color: var(--text-muted);
-  font-size: 13px;
-}
-
-.vpn-selected-name {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--text);
-  margin-bottom: 16px;
-  text-align: center;
-}
-
-.vpn-config-input {
-  width: 100%;
-  padding: 12px 14px;
-  background: var(--bg-input);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: var(--radius-sm);
-  color: var(--text);
-  font-size: 13px;
-  font-family: monospace;
-  resize: vertical;
-  outline: none;
-}
-
-.vpn-config-input:focus {
-  border-color: var(--accent);
-}
-
-/* Custom theme overrides for share page */
-.theme-custom .qr-container {
-  box-shadow: 0 4px 24px rgba(0, 30, 15, 0.5);
-}
-
-.theme-custom .vpn-profile-btn.active {
-  border-color: #004225;
-}
-
-/* ===== Tunnel Mode Toggle ===== */
-.tunnel-mode-toggle {
-  display: flex;
-  gap: 0;
-  background: rgba(255, 255, 255, 0.06);
-  border-radius: 10px;
-  padding: 3px;
-}
-
-.tunnel-mode-btn {
-  flex: 1;
-  padding: 10px 16px;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text-muted, #888);
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.tunnel-mode-btn.active {
-  background: var(--accent, #6366f1);
-  color: white;
-}
-
-.theme-custom .tunnel-mode-btn.active {
-  background: #004225;
-}
 
 /* ===== Cast Device Picker ===== */
 .cast-picker-backdrop {

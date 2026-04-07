@@ -270,9 +270,11 @@ app.get('/api/cache', rateLimit, async (req, res) => {
 
     const entries = await fs.promises.readdir(cacheDir, { withFileTypes: true });
     const items = [];
+    const libraryDirName = path.basename(LIBRARY_PATH);
 
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
+      if (entry.name === libraryDirName) continue; // skip library subdirectory
       const dirPath = path.join(cacheDir, entry.name);
       const files = await fs.promises.readdir(dirPath).catch(() => []);
       let totalSize = 0;
@@ -642,19 +644,32 @@ function parseM3U(text) {
     const logoMatch = info.match(/tvg-logo="([^"]*)"/);
     const groupMatch = info.match(/group-title="([^"]*)"/);
     const idMatch = info.match(/tvg-id="([^"]*)"/);
+    const tvgNameMatch = info.match(/tvg-name="([^"]*)"/);
+    const countryMatch = info.match(/tvg-country="([^"]*)"/);
+    const languageMatch = info.match(/tvg-language="([^"]*)"/);
+
+    const name = (nameMatch ? nameMatch[1].trim() : 'Unknown');
+    const group = groupMatch ? groupMatch[1] : '';
+    const country = countryMatch ? countryMatch[1] : '';
+    const language = languageMatch ? languageMatch[1] : '';
 
     channels.push({
       id: idMatch ? idMatch[1] : String(channels.length),
-      name: nameMatch ? nameMatch[1].trim() : 'Unknown',
+      name,
+      tvgName: tvgNameMatch ? tvgNameMatch[1] : '',
       logo: logoMatch ? logoMatch[1] : '',
-      group: groupMatch ? groupMatch[1] : '',
+      group,
+      country,
+      language,
       url: urlLine,
+      // Pre-computed lowercase search text for fast filtering
+      _search: `${name} ${group} ${country} ${language}`.toLowerCase(),
     });
   }
   return channels;
 }
 
-// GET /api/iptv/channels?url=<m3u-playlist-url>
+// GET /api/iptv/channels?url=<m3u-playlist-url>[&search=X&group=X&country=X&limit=N&offset=N]
 app.get('/api/iptv/channels', rateLimit, async (req, res) => {
   const playlistUrl = req.query.url;
   if (!playlistUrl) return res.status(400).json({ error: 'Missing url parameter' });
@@ -665,26 +680,57 @@ app.get('/api/iptv/channels', rateLimit, async (req, res) => {
     return res.status(400).json({ error: 'Invalid or blocked URL' });
   }
 
-  // Return cached if same URL and fresh
+  // Fetch and cache playlist
+  let channels;
   const cached = playlistCache.get(playlistUrl);
   if (cached && Date.now() - cached.fetchedAt < PLAYLIST_CACHE_TTL) {
-    return res.json({ channels: cached.channels });
+    channels = cached.channels;
+  } else {
+    try {
+      const body = await fetchUrl(playlistUrl);
+      channels = parseM3U(body);
+      if (playlistCache.size >= PLAYLIST_CACHE_MAX) {
+        const oldest = playlistCache.keys().next().value;
+        playlistCache.delete(oldest);
+      }
+      playlistCache.set(playlistUrl, { channels, fetchedAt: Date.now() });
+    } catch (err) {
+      console.error('[IPTV] Playlist fetch error:', err.message);
+      return res.status(502).json({ error: 'Failed to fetch playlist' });
+    }
   }
 
-  try {
-    const body = await fetchUrl(playlistUrl);
-    const channels = parseM3U(body);
-    // Evict oldest entry if cache is full
-    if (playlistCache.size >= PLAYLIST_CACHE_MAX) {
-      const oldest = playlistCache.keys().next().value;
-      playlistCache.delete(oldest);
-    }
-    playlistCache.set(playlistUrl, { channels, fetchedAt: Date.now() });
-    res.json({ channels });
-  } catch (err) {
-    console.error('[IPTV] Playlist fetch error:', err.message);
-    res.status(502).json({ error: 'Failed to fetch playlist' });
+  // Apply optional search/filter params (no-op if none provided)
+  let filtered = channels;
+  const search = (req.query.search || '').trim().toLowerCase();
+  const group = (req.query.group || '').trim();
+  const country = (req.query.country || '').trim();
+
+  if (search) {
+    filtered = filtered.filter(ch => ch._search.includes(search));
   }
+  if (group) {
+    filtered = filtered.filter(ch => ch.group === group);
+  }
+  if (country) {
+    const lc = country.toLowerCase();
+    filtered = filtered.filter(ch => ch.country.toLowerCase().includes(lc));
+  }
+
+  // Pagination
+  const limit = Math.min(parseInt(req.query.limit, 10) || 0, 500);
+  const offset = parseInt(req.query.offset, 10) || 0;
+  const total = filtered.length;
+  if (limit > 0) {
+    filtered = filtered.slice(offset, offset + limit);
+  }
+
+  // Build group list from full (unfiltered) channels for filter UI
+  const groups = req.query.groups === '1'
+    ? [...new Set(channels.map(ch => ch.group).filter(Boolean))].sort()
+    : undefined;
+
+  res.json({ channels: filtered, total, groups });
 });
 
 // GET /api/iptv/stream?url=<stream-url> — proxy HLS/stream to avoid CORS
@@ -753,82 +799,6 @@ app.get('/api/iptv/stream', rateLimit, async (req, res) => {
   });
 });
 
-// ─── WireGuard VPN Profile API ─────────────────────────────────────
-const WG_CONFIGS_DIR = process.env.WG_CONFIGS_DIR || '/etc/wireguard/configs';
-
-app.get('/api/vpn/profiles', (req, res) => {
-  try {
-    if (!fs.existsSync(WG_CONFIGS_DIR)) {
-      return res.json({ profiles: [], error: 'WireGuard config directory not found' });
-    }
-    const files = fs.readdirSync(WG_CONFIGS_DIR)
-      .filter(f => f.endsWith('.conf'))
-      .map(f => f.replace(/\.conf$/, ''));
-    res.json({ profiles: files });
-  } catch (e) {
-    res.json({ profiles: [], error: 'Cannot read VPN profiles' });
-  }
-});
-
-app.get('/api/vpn/profile/:name', (req, res) => {
-  const name = req.params.name.replace(/[^a-zA-Z0-9_-]/g, '');
-  const confPath = path.join(WG_CONFIGS_DIR, `${name}.conf`);
-  try {
-    if (!fs.existsSync(confPath)) {
-      return res.status(404).json({ error: 'Profile not found' });
-    }
-    const config = fs.readFileSync(confPath, 'utf-8');
-    res.json({ name, config });
-  } catch (e) {
-    res.status(500).json({ error: 'Cannot read profile' });
-  }
-});
-
-// GET /api/vpn/profile/:name/split-tunnel — return a modified config for split tunneling
-// Rewrites AllowedIPs from 0.0.0.0/0 to just the server's VPN IP, so the phone's
-// local WiFi stays active for device discovery and casting.
-app.get('/api/vpn/profile/:name/split-tunnel', (req, res) => {
-  const name = req.params.name.replace(/[^a-zA-Z0-9_-]/g, '');
-  const confPath = path.join(WG_CONFIGS_DIR, `${name}.conf`);
-  try {
-    if (!fs.existsSync(confPath)) {
-      return res.status(404).json({ error: 'Profile not found' });
-    }
-    let config = fs.readFileSync(confPath, 'utf-8');
-
-    // Extract the server's VPN Address from the [Interface] section
-    // (the Address in the [Interface] is the CLIENT's VPN IP, not the server's)
-    // The server's VPN IP is the Endpoint's resolved IP or the Peer's AllowedIPs
-    // For split tunneling, we want to route only the VPN subnet through the tunnel
-
-    // Find the [Interface] Address (e.g., Address = 10.6.0.2/32)
-    const addrMatch = config.match(/^\s*Address\s*=\s*([^\n]+)/mi);
-    if (addrMatch) {
-      // Extract the subnet (e.g., 10.6.0.0/24 from 10.6.0.2/32)
-      const clientAddr = addrMatch[1].trim().split(',')[0].trim();
-      const ipParts = clientAddr.split('/');
-      const ip = ipParts[0];
-      // Build the VPN subnet: replace last octet with 0 and use /24
-      const octets = ip.split('.');
-      if (octets.length === 4) {
-        const vpnSubnet = `${octets[0]}.${octets[1]}.${octets[2]}.0/24`;
-
-        // Replace AllowedIPs = 0.0.0.0/0 (full tunnel) with just the VPN subnet
-        config = config.replace(
-          /^(\s*AllowedIPs\s*=\s*)0\.0\.0\.0\/0.*$/mi,
-          `$1${vpnSubnet}`
-        );
-
-        // Also remove ::/0 if present (IPv6 full tunnel)
-        config = config.replace(/,\s*::\/0/g, '');
-      }
-    }
-
-    res.json({ name, config, splitTunnel: true });
-  } catch (e) {
-    res.status(500).json({ error: 'Cannot read profile' });
-  }
-});
 
 // ─── Concurrent Streams Settings API ──────────────────────────────────
 app.get('/api/settings/max-streams', (req, res) => {
@@ -856,7 +826,7 @@ app.post('/api/settings/max-streams', (req, res) => {
 });
 
 // ─── Cast / Local Discovery API ──────────────────────────────────────
-// These endpoints let a VPN-connected phone discover and cast to devices
+// These endpoints let a Tailscale-connected phone discover and cast to devices
 // on the Jetson's local network. The Jetson acts as the casting bridge.
 
 // Device discovery cache (refreshed on demand, cached briefly)
@@ -913,7 +883,7 @@ app.post('/api/cast/play', rateLimit, async (req, res) => {
 
   // Build a LAN-reachable URL for the cast device
   // The stream path is relative to this server, so we build an absolute URL
-  // using the server's LAN IP (not VPN IP)
+  // using the server's LAN IP (not Tailscale IP)
   const lanIP = getLocalIP();
   const mediaUrl = `http://${lanIP}:${PORT}${streamPath}`;
 

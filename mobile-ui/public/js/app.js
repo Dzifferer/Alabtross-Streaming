@@ -1591,8 +1591,10 @@
   function openCurtains() {
     const curtainStage = dom.playerOverlay.querySelector('.curtain-stage');
     if (curtainStage) {
+      curtainStage.classList.remove('dropping');
       curtainStage.classList.add('opening');
-      setTimeout(() => { dom.playerOverlay.classList.add('hidden'); }, 1400);
+      // Wait for curtain panels to fully slide off-screen (1.2s transition)
+      setTimeout(() => { dom.playerOverlay.classList.add('hidden'); }, 1600);
     } else {
       dom.playerOverlay.classList.add('hidden');
     }

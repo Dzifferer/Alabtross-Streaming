@@ -1278,6 +1278,11 @@ html, body {
   padding: 0;
 }
 
+/* Transparent background while curtains open so video shows through */
+#player-overlay:has(.curtain-stage.opening) {
+  background: transparent;
+}
+
 /* Landscape: horizontal layout for loading screen */
 @media (orientation: landscape) and (max-height: 500px) {
   #player-overlay {
@@ -1474,7 +1479,11 @@ html, body {
   to { transform: translateY(0); }
 }
 
-/* Open animation — curtains slide apart */
+/* Open animation — curtains slide apart to reveal video */
+.curtain-stage.opening {
+  background: transparent;
+}
+
 .curtain-stage.opening .curtain-panel-left {
   transform: translateX(-100%);
 }
@@ -1485,7 +1494,7 @@ html, body {
 
 .curtain-stage.opening .curtain-poster-wrap {
   opacity: 0;
-  transition: opacity 0.4s ease;
+  transition: opacity 0.3s ease;
 }
 
 .curtain-stage.opening .curtain-valance {

@@ -243,6 +243,7 @@
       dom.videoPlayer.pause();
       dom.videoPlayer.src = '';
       dom.videoPlayer.load(); // release previous resource from memory
+      clearPlayerControlsTimer();
       exitPlayerFullscreen();
     }
   }
@@ -1945,6 +1946,38 @@
 
   let _curtainAnimating = false;
 
+  /* ── Player controls auto-hide (fade after 3s of inactivity) ── */
+  let _playerControlsTimer = null;
+
+  function showPlayerControls() {
+    dom.playerBackBtn.classList.remove('player-controls-hidden');
+    if (!dom.castBtn.classList.contains('hidden')) {
+      dom.castBtn.classList.remove('player-controls-hidden');
+    }
+    resetPlayerControlsTimer();
+  }
+
+  function hidePlayerControls() {
+    // Don't hide if buffering overlay or cast overlay is visible
+    if (!dom.playerOverlay.classList.contains('hidden') ||
+        !dom.castOverlay.classList.contains('hidden')) {
+      return;
+    }
+    dom.playerBackBtn.classList.add('player-controls-hidden');
+    dom.castBtn.classList.add('player-controls-hidden');
+  }
+
+  function resetPlayerControlsTimer() {
+    clearTimeout(_playerControlsTimer);
+    _playerControlsTimer = setTimeout(hidePlayerControls, 3000);
+  }
+
+  function clearPlayerControlsTimer() {
+    clearTimeout(_playerControlsTimer);
+    dom.playerBackBtn.classList.remove('player-controls-hidden');
+    dom.castBtn.classList.remove('player-controls-hidden');
+  }
+
   function openCurtains() {
     const curtainStage = dom.playerOverlay.querySelector('.curtain-stage');
     if (curtainStage) {
@@ -1957,10 +1990,12 @@
         _curtainAnimating = false;
         dom.playerOverlay.classList.add('hidden');
         enterPlayerFullscreen();
+        showPlayerControls();
       }, 1600);
     } else {
       dom.playerOverlay.classList.add('hidden');
       enterPlayerFullscreen();
+      showPlayerControls();
     }
   }
 
@@ -4182,8 +4217,9 @@
     // Back button
     dom.backBtn.addEventListener('click', goBack);
 
-    // Player back button
+    // Player back button — exit fullscreen and navigate back in one press
     dom.playerBackBtn.addEventListener('click', () => {
+      exitPlayerFullscreen();
       dom.videoPlayer.pause();
       dom.videoPlayer.src = '';
       dom.videoPlayer.load();
@@ -4214,6 +4250,14 @@
     dom.videoPlayer.addEventListener('playing', () => {
       state.playerStarted = true;
       dom.playerOverlay.classList.add('hidden');
+    });
+
+    // Auto-fade player controls on touch/mouse inactivity
+    const playerContainer = document.getElementById('player-container');
+    ['touchstart', 'touchmove', 'mousemove', 'click'].forEach(evt => {
+      playerContainer.addEventListener(evt, () => {
+        if (state.currentView === 'player') showPlayerControls();
+      }, { passive: true });
     });
 
     // Keyboard controls for video player
@@ -4259,12 +4303,11 @@
           v.muted = !v.muted;
           break;
         case 'Escape':
-          if (!document.fullscreenElement) {
-            v.pause();
-            v.src = '';
-            v.load();
-            goBack();
-          }
+          exitPlayerFullscreen();
+          v.pause();
+          v.src = '';
+          v.load();
+          goBack();
           break;
       }
     });

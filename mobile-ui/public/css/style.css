@@ -1374,25 +1374,27 @@ html, body {
 /* ===== Grid View (Search, Browse) ===== */
 .grid-view {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
   padding: 16px;
 }
 
 @media (min-width: 480px) {
   .grid-view {
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }
 
 @media (min-width: 768px) {
   .grid-view {
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(5, minmax(0, 1fr));
   }
 }
 
 .grid-view .card {
   width: 100%;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .grid-view .card-poster {
@@ -2572,26 +2574,28 @@ html, body {
 /* ===== Library Tile Grid ===== */
 .library-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
   padding: 12px 12px 24px;
 }
 
 @media (min-width: 480px) {
-  .library-grid { grid-template-columns: repeat(3, 1fr); }
+  .library-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
 @media (min-width: 768px) {
-  .library-grid { grid-template-columns: repeat(4, 1fr); }
+  .library-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
 
 @media (min-width: 1024px) {
-  .library-grid { grid-template-columns: repeat(5, 1fr); }
+  .library-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 }
 
 /* Library cards reuse .card/.card-poster/.card-info base styles */
 .library-grid .card {
   width: 100%;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .library-grid .card-poster {

@@ -2127,17 +2127,37 @@
           }
         }
 
-        // Group ungrouped movies by genre
+        // Group ungrouped movies by genre (smart: try all genres for best fit)
         const genreGroups = {};
         const noGenreMovies = [];
+
+        // First pass: count how many movies each genre would have
+        const genreCounts = {};
+        for (const movie of ungroupedMovies) {
+          const meta = metaMap[movie.imdbId];
+          const genres = meta?.genres || [];
+          for (const g of genres) {
+            genreCounts[g] = (genreCounts[g] || 0) + 1;
+          }
+        }
+
+        // Second pass: assign each movie to its best genre (largest group)
         for (const movie of ungroupedMovies) {
           const meta = metaMap[movie.imdbId];
           const genres = meta?.genres || [];
           if (genres.length > 0) {
-            // Use the first genre as the primary group
-            const genre = genres[0];
-            if (!genreGroups[genre]) genreGroups[genre] = [];
-            genreGroups[genre].push(movie);
+            // Pick the genre with the most movies
+            let bestGenre = genres[0];
+            let bestCount = genreCounts[genres[0]] || 0;
+            for (let i = 1; i < genres.length; i++) {
+              const count = genreCounts[genres[i]] || 0;
+              if (count > bestCount) {
+                bestCount = count;
+                bestGenre = genres[i];
+              }
+            }
+            if (!genreGroups[bestGenre]) genreGroups[bestGenre] = [];
+            genreGroups[bestGenre].push(movie);
           } else {
             noGenreMovies.push(movie);
           }
@@ -2153,16 +2173,12 @@
             const yearB = (metaMap[b.imdbId]?.year || b.year || '9999');
             return yearA.localeCompare(yearB);
           });
-          if (genreMovies.length >= 2) {
-            const genreId = 'genre_' + genre.toLowerCase().replace(/[^a-z0-9]/g, '_');
-            html += `<div class="library-collection-group">`;
-            html += `<div class="library-collection-header collapsed" data-collection-id="${escapeHTML(genreId)}">${escapeHTML(genre)} (${genreMovies.length})</div>`;
-            html += `<div class="library-collection-movies collapsed" data-collection-id="${escapeHTML(genreId)}">`;
-            html += genreMovies.map(item => renderLibraryItem(item)).join('');
-            html += `</div></div>`;
-          } else {
-            noGenreMovies.push(...genreMovies);
-          }
+          const genreId = 'genre_' + genre.toLowerCase().replace(/[^a-z0-9]/g, '_');
+          html += `<div class="library-collection-group">`;
+          html += `<div class="library-collection-header collapsed" data-collection-id="${escapeHTML(genreId)}">${escapeHTML(genre)} (${genreMovies.length})</div>`;
+          html += `<div class="library-collection-movies collapsed" data-collection-id="${escapeHTML(genreId)}">`;
+          html += genreMovies.map(item => renderLibraryItem(item)).join('');
+          html += `</div></div>`;
         }
 
         // Render remaining movies that have no genre or are alone in their genre
@@ -2176,21 +2192,27 @@
         }
       }
 
-      // TV Shows section
+      // TV Shows section (collapsible show headers with nested collapsible seasons)
       if (showGroups.size > 0) {
         html += `<div class="library-section-header">TV Shows</div>`;
+        let showIndex = 0;
         for (const [, group] of showGroups) {
-          html += `<div class="library-show-group">`;
-          html += `<div class="library-show-header">${escapeHTML(group.name)}${group.year ? ' (' + escapeHTML(group.year) + ')' : ''}</div>`;
+          const totalEpisodes = [...group.seasons.values()].reduce((sum, eps) => sum + eps.length, 0);
+          const showId = 'show_' + showIndex++;
+          html += `<div class="library-collection-group">`;
+          html += `<div class="library-collection-header collapsed" data-collection-id="${escapeHTML(showId)}">${escapeHTML(group.name)}${group.year ? ' (' + escapeHTML(group.year) + ')' : ''} — ${totalEpisodes} episode${totalEpisodes !== 1 ? 's' : ''}</div>`;
+          html += `<div class="library-collection-movies collapsed" data-collection-id="${escapeHTML(showId)}">`;
           const sortedSeasons = [...group.seasons.keys()].sort((a, b) => a - b);
           for (const seasonNum of sortedSeasons) {
             const episodes = group.seasons.get(seasonNum);
-            html += `<div class="library-show-episodes">`;
-            html += `<div class="library-season-header">Season ${seasonNum}</div>`;
+            const seasonId = showId + '_s' + seasonNum;
+            html += `<div class="library-collection-group" style="grid-column:1/-1">`;
+            html += `<div class="library-collection-header collapsed" data-collection-id="${escapeHTML(seasonId)}" style="padding-left:12px;font-size:13px">Season ${seasonNum} (${episodes.length})</div>`;
+            html += `<div class="library-collection-movies collapsed" data-collection-id="${escapeHTML(seasonId)}">`;
             html += episodes.map(ep => renderLibraryItem(ep)).join('');
-            html += `</div>`;
+            html += `</div></div>`;
           }
-          html += `</div>`;
+          html += `</div></div>`;
         }
       }
 

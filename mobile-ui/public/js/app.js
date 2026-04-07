@@ -4613,12 +4613,8 @@
     // Back button
     dom.backBtn.addEventListener('click', goBack);
 
-    // Player back button — exit fullscreen and navigate back in one press
+    // Player back button — navigate back (goBack handles video cleanup after hiding view)
     dom.playerBackBtn.addEventListener('click', () => {
-      exitPlayerFullscreen();
-      dom.videoPlayer.pause();
-      dom.videoPlayer.src = '';
-      dom.videoPlayer.load();
       goBack();
     });
 
@@ -4699,10 +4695,6 @@
           v.muted = !v.muted;
           break;
         case 'Escape':
-          exitPlayerFullscreen();
-          v.pause();
-          v.src = '';
-          v.load();
           goBack();
           break;
       }

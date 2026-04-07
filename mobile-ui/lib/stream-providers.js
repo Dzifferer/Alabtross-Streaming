@@ -176,6 +176,12 @@ function buildMagnet(infoHash, name) {
 const TORRENTIO_CONFIG = process.env.TORRENTIO_CONFIG || '';
 const TORRENTIO_BASE = process.env.TORRENTIO_BASE || 'https://torrentio.strem.io';
 
+// Alternative Torrentio instances to try if primary DNS fails
+const TORRENTIO_MIRRORS = [
+  TORRENTIO_BASE,
+  'https://torrentio.strem.fun',
+];
+
 // Config variations to try — ordered by most likely to work.
 // Torrentio may require explicit provider selection depending on version.
 const TORRENTIO_CONFIGS = TORRENTIO_CONFIG
@@ -193,21 +199,24 @@ async function searchTorrentio(type, imdbId, season, episode) {
     stremioId = `${imdbId}:${season}:${episode}`;
   }
 
-  // Try each config variation until one returns results
+  // Try each mirror + config variation until one returns results
   let data = null;
-  for (const config of TORRENTIO_CONFIGS) {
-    const url = config
-      ? `${TORRENTIO_BASE}/${config}/stream/${type}/${stremioId}.json`
-      : `${TORRENTIO_BASE}/stream/${type}/${stremioId}.json`;
-    data = await fetchJSON(url, 12000, 1);
-    if (data && Array.isArray(data.streams) && data.streams.length > 0) {
-      console.log(`[Torrentio] Config "${config || '(bare)'}" returned ${data.streams.length} results`);
-      break;
+  for (const base of TORRENTIO_MIRRORS) {
+    for (const config of TORRENTIO_CONFIGS) {
+      const url = config
+        ? `${base}/${config}/stream/${type}/${stremioId}.json`
+        : `${base}/stream/${type}/${stremioId}.json`;
+      data = await fetchJSON(url, 12000, 1);
+      if (data && Array.isArray(data.streams) && data.streams.length > 0) {
+        console.log(`[Torrentio] ${base} config "${config || '(bare)'}" returned ${data.streams.length} results`);
+        break;
+      }
     }
+    if (data && Array.isArray(data.streams) && data.streams.length > 0) break;
   }
 
   if (!data || !Array.isArray(data.streams)) {
-    console.log(`[Torrentio] No results for ${type}/${stremioId} (tried ${TORRENTIO_CONFIGS.length} configs)`);
+    console.log(`[Torrentio] No results for ${type}/${stremioId} (tried ${TORRENTIO_MIRRORS.length} mirrors × ${TORRENTIO_CONFIGS.length} configs)`);
     return streams;
   }
 
@@ -295,13 +304,22 @@ async function searchTPB(query) {
 
 // ─── YTS Provider (Movies) ──────────────────────────
 
+const YTS_DOMAINS = ['yts.mx', 'yts.torrentbay.net', 'yts.do', 'yts.rs'];
+
 async function searchYTS(imdbId) {
   const streams = [];
-  const data = await fetchJSON(
-    `https://yts.mx/api/v2/list_movies.json?query_term=${imdbId}&limit=1`
-  );
+  let data = null;
+  for (const domain of YTS_DOMAINS) {
+    data = await fetchJSON(
+      `https://${domain}/api/v2/list_movies.json?query_term=${imdbId}&limit=1`
+    );
+    if (data && data.data && data.data.movies) {
+      console.log(`[YTS] Using mirror: ${domain}`);
+      break;
+    }
+  }
   if (!data || !data.data || !data.data.movies) {
-    console.log(`[YTS] No results for ${imdbId}`);
+    console.log(`[YTS] No results for ${imdbId} (tried ${YTS_DOMAINS.length} mirrors)`);
     return streams;
   }
 
@@ -334,6 +352,8 @@ async function searchYTS(imdbId) {
 
 // ─── EZTV Provider (TV Series) ──────────────────────
 
+const EZTV_DOMAINS = ['eztv.re', 'eztv.wf', 'eztv.tf', 'eztv.yt'];
+
 async function searchEZTV(imdbId, targetSeason, targetEpisode) {
   const streams = [];
   // EZTV wants numeric IMDB ID without 'tt' prefix
@@ -341,11 +361,20 @@ async function searchEZTV(imdbId, targetSeason, targetEpisode) {
 
   // First, get page 1 to find total_count and check for matches
   const limit = 100;
-  const firstPage = await fetchJSON(
-    `https://eztv.re/api/get-torrents?imdb_id=${numericId}&limit=${limit}&page=1`
-  );
+  let firstPage = null;
+  let eztvDomain = EZTV_DOMAINS[0];
+  for (const domain of EZTV_DOMAINS) {
+    firstPage = await fetchJSON(
+      `https://${domain}/api/get-torrents?imdb_id=${numericId}&limit=${limit}&page=1`
+    );
+    if (firstPage && firstPage.torrents && firstPage.torrents.length > 0) {
+      eztvDomain = domain;
+      console.log(`[EZTV] Using mirror: ${domain}`);
+      break;
+    }
+  }
   if (!firstPage || !firstPage.torrents || firstPage.torrents.length === 0) {
-    console.log(`[EZTV] No results for ${imdbId} (numeric: ${numericId})`);
+    console.log(`[EZTV] No results for ${imdbId} (numeric: ${numericId}, tried ${EZTV_DOMAINS.length} mirrors)`);
     return streams;
   }
 
@@ -372,7 +401,7 @@ async function searchEZTV(imdbId, targetSeason, targetEpisode) {
     const pagePromises = [];
     for (let page = 2; page <= maxPages; page++) {
       pagePromises.push(
-        fetchJSON(`https://eztv.re/api/get-torrents?imdb_id=${numericId}&limit=${limit}&page=${page}`)
+        fetchJSON(`https://${eztvDomain}/api/get-torrents?imdb_id=${numericId}&limit=${limit}&page=${page}`)
           .catch(() => null)
       );
     }
@@ -386,7 +415,7 @@ async function searchEZTV(imdbId, targetSeason, targetEpisode) {
     // Small show — fetch remaining pages sequentially
     for (let page = 2; page <= totalPages; page++) {
       const data = await fetchJSON(
-        `https://eztv.re/api/get-torrents?imdb_id=${numericId}&limit=${limit}&page=${page}`
+        `https://${eztvDomain}/api/get-torrents?imdb_id=${numericId}&limit=${limit}&page=${page}`
       );
       if (!data || !data.torrents || data.torrents.length === 0) break;
       allTorrents.push(...data.torrents);
@@ -439,8 +468,8 @@ async function search1337x(query) {
   const streams = [];
   // Clean query: remove special chars that confuse search
   const cleanQuery = query.replace(/['']/g, ' ').replace(/[^\w\s-]/g, ' ').replace(/\s+/g, ' ').trim();
-  // Try primary domain first, then mirror if 403/blocked
-  const domains = ['1337x.to', '1337x.st', '1337x.gd'];
+  // Try primary domain first, then mirrors if 403/blocked
+  const domains = ['1337x.to', '1337x.st', '1337x.gd', '1337x.ws', '1337x.is'];
   let html = null;
   for (const domain of domains) {
     html = await fetchHTML(
@@ -1002,23 +1031,26 @@ async function diagnoseProviders() {
   };
 
   await Promise.all([
-    // Connectivity checks
+    // Connectivity checks (test primary domain)
     testConnectivity('torrentio', `${TORRENTIO_BASE}/manifest.json`),
-    testConnectivity('yts', 'https://yts.mx/api/v2/list_movies.json?limit=1'),
-    testConnectivity('eztv', 'https://eztv.re/api/get-torrents?limit=1&page=1'),
+    testConnectivity('yts', `https://${YTS_DOMAINS[0]}/api/v2/list_movies.json?limit=1`),
+    testConnectivity('eztv', `https://${EZTV_DOMAINS[0]}/api/get-torrents?limit=1&page=1`),
     testConnectivity('tpb', 'https://apibay.org/q.php?q=test&cat=200'),
     testConnectivity('1337x', 'https://1337x.to/'),
 
-    // Search result checks
+    // Search result checks (these try all mirrors automatically)
     testProvider('torrentio', async () => {
-      for (const config of TORRENTIO_CONFIGS) {
-        const url = config
-          ? `${TORRENTIO_BASE}/${config}/stream/movie/${testImdb}.json`
-          : `${TORRENTIO_BASE}/stream/movie/${testImdb}.json`;
-        const data = await fetchJSON(url, 12000, 0);
-        if (data && Array.isArray(data.streams) && data.streams.length > 0) {
-          results._torrentioConfig = config || '(bare)';
-          return data.streams;
+      for (const base of TORRENTIO_MIRRORS) {
+        for (const config of TORRENTIO_CONFIGS) {
+          const url = config
+            ? `${base}/${config}/stream/movie/${testImdb}.json`
+            : `${base}/stream/movie/${testImdb}.json`;
+          const data = await fetchJSON(url, 12000, 0);
+          if (data && Array.isArray(data.streams) && data.streams.length > 0) {
+            results._torrentioConfig = config || '(bare)';
+            results._torrentioMirror = base;
+            return data.streams;
+          }
         }
       }
       return [];
@@ -1028,8 +1060,14 @@ async function diagnoseProviders() {
     testProvider('eztv', async () => {
       // EZTV is TV-only — test with Breaking Bad (tt0903747) which always has results
       const numericId = '903747';
-      const data = await fetchJSON(`https://eztv.re/api/get-torrents?imdb_id=${numericId}&limit=5&page=1`, 10000, 0);
-      return data && data.torrents ? data.torrents : [];
+      for (const domain of EZTV_DOMAINS) {
+        const data = await fetchJSON(`https://${domain}/api/get-torrents?imdb_id=${numericId}&limit=5&page=1`, 10000, 0);
+        if (data && data.torrents && data.torrents.length > 0) {
+          results._eztvMirror = domain;
+          return data.torrents;
+        }
+      }
+      return [];
     }),
     testProvider('1337x', () => search1337x('Shawshank Redemption')),
   ]);

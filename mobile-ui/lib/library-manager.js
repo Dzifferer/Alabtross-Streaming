@@ -248,6 +248,9 @@ class LibraryManager {
         this._engines.set(packId, engine);
         this._startPeriodicSave();
 
+        // Track the last observed file size per item so we can confirm writes have settled
+        const lastSizeMap = new Map();
+
         // Track progress for each file individually
         const progressTimer = setInterval(() => {
           if (!this._engines.has(packId)) {
@@ -268,24 +271,29 @@ class LibraryManager {
 
             // Calculate progress from file size on disk
             const fullPath = path.join(this._libraryPath, item.filePath);
+            let currentSize = 0;
             try {
               if (fs.existsSync(fullPath)) {
                 const stat = fs.statSync(fullPath);
-                item.progress = Math.min(100, Math.round((stat.size / item.fileSize) * 100));
+                currentSize = stat.size;
+                item.progress = Math.min(100, Math.round((currentSize / item.fileSize) * 100));
               }
             } catch { /* file might not exist yet */ }
 
             if (item.progress >= 100) {
-              // Verify file is actually complete
-              const fullPath2 = path.join(this._libraryPath, item.filePath);
-              try {
-                const finalSize = fs.statSync(fullPath2).size;
-                if (finalSize < item.fileSize * 0.99) {
-                  item.progress = Math.round((finalSize / item.fileSize) * 100);
-                  allComplete = false;
-                  continue;
-                }
-              } catch {
+              // Require file size to match expected size (allow at most 1KB rounding difference)
+              // AND size must be stable since the last poll to ensure the write has finished
+              const prevSize = lastSizeMap.get(itemId) || 0;
+              lastSizeMap.set(itemId, currentSize);
+
+              if (currentSize < item.fileSize - 1024) {
+                item.progress = Math.round((currentSize / item.fileSize) * 100);
+                allComplete = false;
+                continue;
+              }
+
+              if (currentSize !== prevSize) {
+                // File is still being written — wait for next poll
                 allComplete = false;
                 continue;
               }
@@ -296,6 +304,7 @@ class LibraryManager {
               console.log(`[Library] Pack episode complete: "${item.fileName}"`);
               this._checkAndConvert(itemId);
             } else {
+              lastSizeMap.set(itemId, currentSize);
               allComplete = false;
             }
           }
@@ -687,6 +696,7 @@ class LibraryManager {
         console.warn(`[Library] Suspiciously small file size (${(expectedSize / 1e6).toFixed(1)} MB) — may be corrupt torrent metadata`);
       }
 
+      let lastObservedSize = 0;
       const progressTimer = setInterval(() => {
         if (!this._engines.has(id)) {
           clearInterval(progressTimer);
@@ -698,28 +708,33 @@ class LibraryManager {
 
         // Calculate progress from on-disk file size vs expected torrent file size
         const fullPath = path.join(this._libraryPath, item.filePath);
+        let currentSize = 0;
         try {
           if (fs.existsSync(fullPath)) {
             const stat = fs.statSync(fullPath);
-            item.progress = Math.min(100, Math.round((stat.size / expectedSize) * 100));
+            currentSize = stat.size;
+            item.progress = Math.min(100, Math.round((currentSize / expectedSize) * 100));
           }
         } catch {
           // File might not exist yet
         }
 
-        // Check if download is complete — require file size to match expected size
-        // (not just progress >= 100) to guard against sparse files or rounding
+        // Check if download is complete — require file size within 1KB of expected
+        // AND stable since last poll (no active writes)
         if (item.progress >= 100) {
-          const fullPath2 = path.join(this._libraryPath, item.filePath);
-          try {
-            const finalSize = fs.statSync(fullPath2).size;
-            if (finalSize < expectedSize * 0.99) {
-              // File is not actually complete despite rounding to 100%
-              console.warn(`[Library] Progress shows 100% but file size ${finalSize} < expected ${expectedSize} — continuing download`);
-              item.progress = Math.round((finalSize / expectedSize) * 100);
-              return;
-            }
-          } catch { /* ignore */ }
+          if (currentSize < expectedSize - 1024) {
+            // File is not actually complete despite rounding to 100%
+            console.warn(`[Library] Progress shows 100% but file size ${currentSize} < expected ${expectedSize} — continuing download`);
+            item.progress = Math.round((currentSize / expectedSize) * 100);
+            lastObservedSize = currentSize;
+            return;
+          }
+
+          if (currentSize !== lastObservedSize) {
+            // File is still being written — wait for next poll
+            lastObservedSize = currentSize;
+            return;
+          }
 
           item.status = 'complete';
           item.completedAt = Date.now();
@@ -731,6 +746,8 @@ class LibraryManager {
 
           // Check if conversion to browser-compatible MP4 is needed
           this._checkAndConvert(id);
+        } else {
+          lastObservedSize = currentSize;
         }
       }, 2000);
 

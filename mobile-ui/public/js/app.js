@@ -1914,10 +1914,36 @@
     `;
 
     try {
-      // Always use remux endpoint to ensure browser-compatible audio.
-      // Many files use AC3/DTS audio that browsers can't decode natively.
-      // FFmpeg copies video and transcodes audio to AAC — lightweight.
-      const url = `/api/library/${encodeURIComponent(id)}/stream/remux`;
+      // Probe the file to decide the best playback strategy.
+      // Direct stream supports range requests (seeking, duration, mobile).
+      // Remux is needed for MKV containers or incompatible audio (AC3/DTS).
+      const encodedId = encodeURIComponent(id);
+      let url;
+      let useRemux = true;
+
+      try {
+        const probeResp = await fetch(`/api/library/${encodedId}/probe`);
+        if (probeResp.ok) {
+          const probe = await probeResp.json();
+          console.log('[Library] Probe result:', probe);
+          if (probe.directPlay) {
+            useRemux = false;
+          }
+        }
+      } catch (e) {
+        console.warn('[Library] Probe failed, falling back to remux:', e.message);
+      }
+
+      if (useRemux) {
+        url = `/api/library/${encodedId}/stream/remux`;
+        dom.playerOverlay.innerHTML = `
+          <div class="spinner"></div>
+          <p>Preparing for playback...</p>
+        `;
+      } else {
+        url = `/api/library/${encodedId}/stream`;
+      }
+
       dom.videoPlayer.src = url;
       dom.videoPlayer.load();
 
@@ -1926,7 +1952,7 @@
         const onError = () => {
           cleanup();
           const err = dom.videoPlayer.error;
-          reject(new Error(err ? `Media error (code ${err.code})` : 'Failed to load video'));
+          reject(new Error(err ? `Media error (code ${err.code}): ${useRemux ? 'remux' : 'direct'}` : 'Failed to load video'));
         };
         const cleanup = () => {
           dom.videoPlayer.removeEventListener('canplay', onCanPlay);
@@ -1936,7 +1962,7 @@
         const timeoutMs = 240000;
         const timer = setTimeout(() => {
           cleanup();
-          reject(new Error('Remux timed out — try again'));
+          reject(new Error('Playback timed out — try again'));
         }, timeoutMs);
         dom.videoPlayer.addEventListener('canplay', onCanPlay, { once: true });
         dom.videoPlayer.addEventListener('error', onError, { once: true });
@@ -1947,6 +1973,31 @@
       enterPlayerFullscreen();
     } catch (e) {
       let hint = escapeHTML(e.message);
+      if (e.message.includes('Media error') && e.message.includes('direct')) {
+        // Direct stream failed — retry with remux (audio may be incompatible)
+        console.warn('[Library] Direct stream failed, retrying with remux');
+        try {
+          const encodedId = encodeURIComponent(id);
+          dom.playerOverlay.innerHTML = `
+            <div class="spinner"></div>
+            <p>Retrying with audio transcode...</p>
+          `;
+          dom.videoPlayer.src = `/api/library/${encodedId}/stream/remux`;
+          dom.videoPlayer.load();
+          await new Promise((resolve, reject) => {
+            const onCanPlay = () => { dom.videoPlayer.removeEventListener('error', onErr); resolve(); };
+            const onErr = () => { dom.videoPlayer.removeEventListener('canplay', onCanPlay); reject(new Error('Remux also failed')); };
+            dom.videoPlayer.addEventListener('canplay', onCanPlay, { once: true });
+            dom.videoPlayer.addEventListener('error', onErr, { once: true });
+          });
+          await dom.videoPlayer.play();
+          dom.playerOverlay.classList.add('hidden');
+          enterPlayerFullscreen();
+          return;
+        } catch (retryErr) {
+          hint = escapeHTML(retryErr.message);
+        }
+      }
       if (e.message.includes('Media error')) {
         hint += '<br><span style="font-size:12px">The file format may not be supported by your browser</span>';
       } else if (e.message.includes('timed out')) {

@@ -629,6 +629,74 @@ app.get('/api/library/:id/stream/remux', async (req, res) => {
   });
 });
 
+// GET /api/library/:id/probe — check if file is directly browser-playable
+app.get('/api/library/:id/probe', async (req, res) => {
+  const item = library.getItem(req.params.id);
+  if (!item) return res.status(404).json({ error: 'Item not found' });
+  if (item.status !== 'complete') {
+    return res.status(400).json({ error: 'Download not complete' });
+  }
+
+  const filePath = library.getFilePath(req.params.id);
+  if (!filePath) return res.status(404).json({ error: 'File not found' });
+
+  const ext = path.extname(filePath).toLowerCase();
+  const { spawn } = require('child_process');
+
+  // Use ffprobe to check container and codec info
+  const ffprobe = spawn('ffprobe', [
+    '-v', 'quiet',
+    '-print_format', 'json',
+    '-show_format',
+    '-show_streams',
+    filePath,
+  ]);
+
+  let output = '';
+  ffprobe.stdout.on('data', (d) => { output += d.toString(); });
+
+  ffprobe.on('close', (code) => {
+    if (code !== 0) {
+      return res.json({ directPlay: false, reason: 'ffprobe failed' });
+    }
+
+    try {
+      const info = JSON.parse(output);
+      const videoStream = (info.streams || []).find(s => s.codec_type === 'video');
+      const audioStream = (info.streams || []).find(s => s.codec_type === 'audio');
+
+      const videoCodec = videoStream ? videoStream.codec_name : null;
+      const audioCodec = audioStream ? audioStream.codec_name : null;
+      const container = info.format ? info.format.format_name : null;
+      const duration = info.format ? parseFloat(info.format.duration) : null;
+
+      // Browser-compatible: MP4 container + H.264 video + AAC audio
+      const compatibleVideo = ['h264', 'hevc'].includes(videoCodec);
+      const compatibleAudio = !audioStream || ['aac', 'mp3'].includes(audioCodec);
+      const compatibleContainer = ext === '.mp4' || ext === '.m4v';
+      const directPlay = compatibleVideo && compatibleAudio && compatibleContainer;
+
+      res.json({
+        directPlay,
+        container,
+        ext,
+        videoCodec,
+        audioCodec,
+        duration,
+        reason: !directPlay
+          ? (!compatibleContainer ? 'container needs remux' : !compatibleVideo ? 'video codec incompatible' : 'audio codec needs transcode')
+          : null,
+      });
+    } catch {
+      res.json({ directPlay: false, reason: 'probe parse error' });
+    }
+  });
+
+  ffprobe.on('error', () => {
+    res.json({ directPlay: false, reason: 'ffprobe not available' });
+  });
+});
+
 // ─── Stremio Addon Proxy ──────────────────────────────────────────────
 // Proxy JSON requests to Stremio addons to avoid CORS issues.
 const ADDON_JSON_PATH_RE = /^\/(manifest\.json|catalog\/|meta\/|stream\/)/;

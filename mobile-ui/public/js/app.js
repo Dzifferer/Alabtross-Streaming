@@ -2332,7 +2332,14 @@
             const yearB = (metaMap[b.imdbId]?.year || b.year || '9999');
             return yearA.localeCompare(yearB);
           });
-          html += noGenreMovies.map(item => renderLibraryItem(item)).join('');
+          if (noGenreMovies.length > 0) {
+            html += `<div class="library-section-header" style="font-size:14px;margin-top:12px">Uncategorized</div>`;
+          }
+          html += noGenreMovies.map(item => {
+            const card = renderLibraryItem(item);
+            // Inject data-uncategorized and data-imdb attributes for the categorize feature
+            return card.replace('<div class="card"', `<div class="card" data-uncategorized="true" data-imdb="${escapeHTML(item.imdbId || '')}" data-movie-name="${escapeHTML(item.name || '')}"`);
+          }).join('');
         }
       }
 
@@ -2378,6 +2385,9 @@
       attachLibraryGroupTileListeners(dom.libraryContent, _libraryGroupData);
 
       attachLibraryHandlers();
+
+      // Attach categorize buttons on uncategorized movie cards
+      attachCategorizeHandlers(dom.libraryContent);
 
       // Start progress polling for downloading/converting items
       const needsPoll = libraryItems.some(i => i.status === 'downloading' || i.status === 'queued' || i.status === 'converting');
@@ -2516,6 +2526,111 @@
       overlay.innerHTML = '';
     }
     dom.libraryContent.classList.remove('hidden');
+  }
+
+  function showCategorizeModal(imdbId, movieName) {
+    // Remove any existing modal
+    const existing = document.getElementById('categorize-modal');
+    if (existing) existing.remove();
+
+    // Collect existing group names from current _libraryGroupData
+    const existingGroups = [];
+    for (const [groupId, data] of Object.entries(_libraryGroupData)) {
+      existingGroups.push({ id: groupId, name: data.name, type: groupId.startsWith('genre_') ? 'genre' : 'collection' });
+    }
+
+    const modal = document.createElement('div');
+    modal.id = 'categorize-modal';
+    modal.className = 'categorize-modal';
+
+    let groupListHtml = '';
+    if (existingGroups.length > 0) {
+      groupListHtml = `<div class="categorize-section-label">Add to existing group</div>
+        <div class="categorize-group-list">
+          ${existingGroups.map(g => `<button class="categorize-group-btn" data-genre="${escapeHTML(g.name)}">${escapeHTML(g.name)}</button>`).join('')}
+        </div>`;
+    }
+
+    modal.innerHTML = `
+      <div class="categorize-modal-backdrop"></div>
+      <div class="categorize-modal-content">
+        <div class="categorize-modal-header">
+          <span>Categorize: ${escapeHTML(movieName)}</span>
+          <button class="categorize-modal-close" aria-label="Close">&times;</button>
+        </div>
+        ${groupListHtml}
+        <div class="categorize-section-label">Or create new genre</div>
+        <div class="categorize-new-genre">
+          <input type="text" class="categorize-genre-input" placeholder="e.g. Comedy, Drama, Action..." maxlength="50">
+          <button class="categorize-genre-submit">Add</button>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(modal);
+
+    // Close handlers
+    const close = () => modal.remove();
+    modal.querySelector('.categorize-modal-backdrop').addEventListener('click', close);
+    modal.querySelector('.categorize-modal-close').addEventListener('click', close);
+
+    // Existing group buttons
+    modal.querySelectorAll('.categorize-group-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const genre = btn.dataset.genre;
+        await submitCategorize(imdbId, genre);
+        close();
+        loadLibrary();
+      });
+    });
+
+    // New genre submit
+    const input = modal.querySelector('.categorize-genre-input');
+    const submitBtn = modal.querySelector('.categorize-genre-submit');
+    const submitNew = async () => {
+      const genre = input.value.trim();
+      if (!genre) return;
+      await submitCategorize(imdbId, genre);
+      close();
+      loadLibrary();
+    };
+    submitBtn.addEventListener('click', submitNew);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitNew(); });
+    input.focus();
+  }
+
+  async function submitCategorize(imdbId, genre) {
+    try {
+      await fetch('/api/library/categorize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imdbId, genre }),
+      });
+    } catch (e) {
+      console.error('[Library] Categorize failed:', e.message);
+    }
+  }
+
+  function attachCategorizeHandlers(container) {
+    container.querySelectorAll('.card[data-uncategorized="true"]').forEach(card => {
+      // Add a long-press handler to show categorize modal
+      let pressTimer = null;
+      const imdbId = card.dataset.imdb;
+      const movieName = card.dataset.movieName;
+      if (!imdbId) return;
+
+      // Add a visible categorize button
+      const btn = document.createElement('button');
+      btn.className = 'library-card-categorize';
+      btn.title = 'Categorize';
+      btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h7"/><path d="M15 15l2 2 4-4"/></svg>`;
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        showCategorizeModal(imdbId, movieName);
+      });
+      const posterDiv = card.querySelector('.card-poster');
+      if (posterDiv) posterDiv.appendChild(btn);
+    });
   }
 
   function attachLibraryGroupTileListeners(container, groupData) {

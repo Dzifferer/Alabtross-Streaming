@@ -1060,12 +1060,16 @@ class StremioAPI {
    * Returns { collections: { "collectionId": { name, poster, movieIds: [imdbIds] } } }
    */
   async enrichWithCollections(imdbIds, names) {
-    const validIds = imdbIds.filter(id => /^tt\d+$/.test(id));
-    if (validIds.length === 0) return { collections: {} };
+    // Filter to valid IDs but keep names aligned with their corresponding IDs
+    const paired = imdbIds.map((id, i) => ({ id, name: names ? names[i] || '' : '' }))
+      .filter(p => /^tt\d+$/.test(p.id));
+    if (paired.length === 0) return { collections: {} };
     try {
+      const validIds = paired.map(p => p.id);
+      const validNames = paired.map(p => p.name);
       let url = '/api/collections/enrich?ids=' + validIds.join(',');
-      if (names && names.length > 0) {
-        url += '&names=' + encodeURIComponent(names.join('||'));
+      if (validNames.some(n => n)) {
+        url += '&names=' + encodeURIComponent(validNames.join('||'));
       }
       const resp = await fetch(url, {
         signal: AbortSignal.timeout(15000),

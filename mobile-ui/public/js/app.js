@@ -2110,8 +2110,8 @@
           if (colMovies.length >= 2) {
             const col = colMap[colId];
             html += `<div class="library-collection-group">`;
-            html += `<div class="library-collection-header" data-collection-id="${escapeHTML(colId)}">${escapeHTML(col.name)} (${colMovies.length})</div>`;
-            html += `<div class="library-collection-movies" data-collection-id="${escapeHTML(colId)}">`;
+            html += `<div class="library-collection-header collapsed" data-collection-id="${escapeHTML(colId)}">${escapeHTML(col.name)} (${colMovies.length})</div>`;
+            html += `<div class="library-collection-movies collapsed" data-collection-id="${escapeHTML(colId)}">`;
             html += colMovies.map(item => renderLibraryItem(item)).join('');
             html += `</div></div>`;
           } else {

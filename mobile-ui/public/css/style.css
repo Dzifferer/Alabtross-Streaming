@@ -777,7 +777,38 @@ html, body {
 }
 
 .library-collection-movies {
-  display: contents;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+  padding: 4px 0;
+}
+
+@media (min-width: 480px) {
+  .library-collection-movies { grid-template-columns: repeat(3, 1fr); }
+}
+@media (min-width: 768px) {
+  .library-collection-movies { grid-template-columns: repeat(4, 1fr); }
+}
+@media (min-width: 1024px) {
+  .library-collection-movies { grid-template-columns: repeat(5, 1fr); }
+}
+
+.library-collection-movies .card {
+  width: 100%;
+}
+
+.library-collection-movies .card-poster {
+  width: 100%;
+  height: 0;
+  padding-bottom: 150%;
+}
+
+.library-collection-movies .card-poster img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .library-collection-movies.collapsed {

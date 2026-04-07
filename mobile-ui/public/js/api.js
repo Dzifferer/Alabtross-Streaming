@@ -1,9 +1,8 @@
 /**
- * Alabtross Mobile — Stremio API Layer
+ * Alabtross Mobile — Streaming API Layer
  *
- * Supports two modes:
- *   - "stremio" : Original behavior — addons + Stremio server for streams
- *   - "custom"  : Direct torrent sources (YTS/EZTV/1337x) + local WebTorrent engine
+ * Unified mode: fetches streams from both direct torrent scrapers (YTS/EZTV/1337x)
+ * and configured Stremio addons, merged into a single list.
  */
 
 const CINEMETA_URL = 'https://v3-cinemeta.strem.io';
@@ -13,9 +12,7 @@ const CINEMETA_URL = 'https://v3-cinemeta.strem.io';
 
 class StremioAPI {
   constructor() {
-    this.mode = localStorage.getItem('streaming_mode') || 'custom';
     this.addons = this._loadAddons();
-    this.serverUrl = localStorage.getItem('stremio_server') || '';
     this._manifestCache = new Map();
     this._cacheTimestamps = new Map();
     this._speedTestInProgress = false;
@@ -23,18 +20,6 @@ class StremioAPI {
     this._searchController = null;
     this._searchCache = new Map();
     this._searchCacheTimestamps = new Map();
-  }
-
-  // ─── Mode Management ─────────────────────────────
-
-  getMode() {
-    return this.mode;
-  }
-
-  setMode(mode) {
-    if (mode !== 'stremio' && mode !== 'custom') return;
-    this.mode = mode;
-    localStorage.setItem('streaming_mode', mode);
   }
 
   // ─── Addon Management ────────────────────────────
@@ -104,28 +89,6 @@ class StremioAPI {
     return this.addons;
   }
 
-  // ─── Server Configuration ────────────────────────
-
-  setServerUrl(url) {
-    this.serverUrl = url.replace(/\/$/, '');
-    localStorage.setItem('stremio_server', this.serverUrl);
-  }
-
-  getServerUrl() {
-    return this.serverUrl;
-  }
-
-  async testServer() {
-    const url = this.serverUrl || '/stremio-api';
-    try {
-      const resp = await fetch(url + '/stats.json', { signal: AbortSignal.timeout(5000) });
-      if (resp.ok) return { ok: true };
-      return { ok: false, error: 'Server responded with ' + resp.status };
-    } catch {
-      return { ok: false, error: 'Server unreachable' };
-    }
-  }
-
   // ─── Manifest Fetching (with TTL cache) ──────────
 
   async _fetchManifest(addonUrl) {
@@ -149,7 +112,6 @@ class StremioAPI {
   }
 
   // ─── Catalogs ────────────────────────────────────
-  // Catalogs always come from addons (Cinemeta) regardless of mode
 
   async getCatalogs(type) {
     const results = [];
@@ -193,7 +155,6 @@ class StremioAPI {
   }
 
   // ─── Search ──────────────────────────────────────
-  // Search always uses addon catalogs (Cinemeta) regardless of mode
 
   async search(query, type) {
     if (!query || query.length > 200) return [];
@@ -284,7 +245,6 @@ class StremioAPI {
   }
 
   // ─── Metadata ────────────────────────────────────
-  // Metadata always comes from addons (Cinemeta) regardless of mode
 
   async getMeta(type, id) {
     for (const addon of this.addons) {
@@ -300,7 +260,7 @@ class StremioAPI {
         if (!resp.ok) continue;
         const data = await resp.json();
         if (data.meta) {
-          // Cache the title for custom mode stream searches (TPB needs name, not IMDB ID)
+          // Cache the title for stream searches (TPB needs name, not IMDB ID)
           this._lastTitle = data.meta.name || null;
           return data.meta;
         }
@@ -313,17 +273,22 @@ class StremioAPI {
 
   // ─── Streams ─────────────────────────────────────
 
+  /**
+   * Fetch streams from both backend scrapers and configured Stremio addons,
+   * then merge and deduplicate into a single list.
+   */
   async getStreams(type, id, seasonEpisode) {
-    if (this.mode === 'custom') {
-      return this._getCustomStreams(type, id, seasonEpisode);
-    }
-    return this._getStremioStreams(type, id);
+    const [custom, addon] = await Promise.all([
+      this._getCustomStreams(type, id, seasonEpisode),
+      this._getAddonStreams(type, id).catch(() => []),
+    ]);
+    return this._mergeStreams(custom, addon);
   }
 
   /**
-   * Stremio mode: fetch streams from all added addons.
+   * Fetch streams from configured Stremio addons, tagged for local playback.
    */
-  async _getStremioStreams(type, id) {
+  async _getAddonStreams(type, id) {
     const allStreams = [];
     for (const addon of this.addons) {
       try {
@@ -338,10 +303,19 @@ class StremioAPI {
         if (!resp.ok) continue;
         const data = await resp.json();
         if (data.streams) {
-          allStreams.push(...data.streams.slice(0, 50).map(s => ({
-            ...s,
-            addonName: addon.name,
-          })));
+          allStreams.push(...data.streams.slice(0, 50).map(s => {
+            // Extract seed count from title if present (e.g. "👤 45")
+            let seeds = 0;
+            const seedMatch = (s.title || '').match(/👤\s*(\d+)/);
+            if (seedMatch) seeds = parseInt(seedMatch[1], 10);
+            return {
+              ...s,
+              _customMode: true,
+              seeds: seeds || s.seeds || 0,
+              source: addon.name,
+              addonName: addon.name,
+            };
+          }));
         }
       } catch (e) {
         console.warn('Stream fetch failed for', addon.url, e);
@@ -351,7 +325,31 @@ class StremioAPI {
   }
 
   /**
-   * Custom mode: fetch streams from the backend, which queries Torrentio + scrapers server-side.
+   * Merge scraped and addon streams, deduplicating by infoHash.
+   * Scraped streams take priority over addon duplicates.
+   */
+  _mergeStreams(custom, addon) {
+    const seen = new Set();
+    const merged = [];
+
+    // Custom (scraped) streams first — they have richer metadata
+    for (const s of custom) {
+      if (s.infoHash) seen.add(s.infoHash.toLowerCase());
+      merged.push(s);
+    }
+
+    // Add unique addon streams
+    for (const s of addon) {
+      if (s.infoHash && seen.has(s.infoHash.toLowerCase())) continue;
+      if (s.infoHash) seen.add(s.infoHash.toLowerCase());
+      merged.push(s);
+    }
+
+    return merged;
+  }
+
+  /**
+   * Fetch streams from the backend, which queries Torrentio + scrapers server-side.
    */
   async _getCustomStreams(type, id, seasonEpisode) {
     const imdbId = id.match(/^tt\d+/) ? id.match(/^(tt\d+)/)[1] : id;
@@ -451,12 +449,10 @@ class StremioAPI {
   // ─── Playback URL Resolution ─────────────────────
 
   getPlaybackUrl(stream) {
-    // Custom mode: use local streaming endpoint
-    if (stream._customMode && stream.infoHash) {
+    // All infoHash streams use local remux endpoint for browser-compatible audio.
+    // FFmpeg copies video (-c:v copy) and transcodes audio to AAC — lightweight.
+    if (stream.infoHash) {
       if (!/^[0-9a-f]{40}$/i.test(stream.infoHash)) return null;
-      // Always use remux endpoint to ensure browser-compatible audio.
-      // Many torrents use AC3/DTS audio which browsers can't decode natively.
-      // FFmpeg copies video (-c:v copy) and transcodes audio to AAC — lightweight.
       let url = `/api/play/${stream.infoHash}/remux`;
       const params = new URLSearchParams();
       if (stream.fileIdx !== undefined) {
@@ -475,20 +471,6 @@ class StremioAPI {
         if (!['http:', 'https:'].includes(u.protocol)) return null;
         return stream.url;
       } catch { return null; }
-    }
-
-    if (stream.infoHash) {
-      // Validate infoHash is a hex string
-      if (!/^[0-9a-f]{40}$/i.test(stream.infoHash)) return null;
-
-      const server = this.serverUrl || '/stremio-api';
-      let url = `${server}/hlsv2/${stream.infoHash}`;
-      if (stream.fileIdx !== undefined) {
-        const idx = parseInt(stream.fileIdx, 10);
-        if (isNaN(idx) || idx < 0) return null;
-        url += `/${idx}`;
-      }
-      return url + '/master.m3u8';
     }
 
     if (stream.ytId) {
@@ -518,10 +500,9 @@ class StremioAPI {
       return { stream, responseTime: Infinity, error: 'External' };
     }
 
-    // In custom mode, skip speed testing — rank by seeds instead
-    if (stream._customMode) {
+    // Torrent streams: rank by seeds instead of speed testing
+    if (stream.infoHash) {
       const seeds = stream.seeds || 0;
-      // Simulate response time inversely proportional to seeds
       const fakeTime = seeds > 0 ? Math.max(50, 5000 / seeds) : 9999;
       return { stream, responseTime: fakeTime };
     }

@@ -11,6 +11,8 @@
 (function () {
   'use strict';
 
+  let _streamLoadGeneration = 0; // incremented each loadStreams call to detect stale async completions
+
   // ─── State ───────────────────────────────────────
 
   const state = {
@@ -1198,6 +1200,8 @@
   async function openDetail(type, id) {
     navigateTo('detail', { title: 'Loading...' });
     preload.cancel(); // invalidate any preload from a previously viewed title
+    if (api._speedTestController) api._speedTestController.abort(); // cancel stale speed tests
+    ++_streamLoadGeneration; // invalidate any in-flight loadStreams from a previous title
 
     dom.detailContent.innerHTML = `
       <div class="loading-state"><div class="spinner"></div><p>Loading details...</p></div>
@@ -1412,6 +1416,8 @@
   // ─── Stream Loading with Speed Testing ───────────
 
   async function loadStreams(type, id, seasonEpisode, prefetchedStreamsPromise) {
+    const generation = ++_streamLoadGeneration;
+
     const container = document.getElementById('stream-container');
     if (!container) return;
 
@@ -1419,6 +1425,9 @@
     const streams = prefetchedStreamsPromise
       ? await prefetchedStreamsPromise
       : await api.getStreams(type, id, seasonEpisode);
+
+    // If user navigated to a different title while we were fetching, discard results
+    if (generation !== _streamLoadGeneration) return;
 
     if (streams.length === 0) {
       container.innerHTML = `
@@ -1504,6 +1513,9 @@
       // Update individual stream items with their speed
       updateStreamItemSpeed(result);
     });
+
+    // If user navigated away during speed testing, discard results
+    if (generation !== _streamLoadGeneration) return;
 
     // Start warming the best stream in the background
     const bestPlayable = ranked.find(r => r.responseTime < Infinity);

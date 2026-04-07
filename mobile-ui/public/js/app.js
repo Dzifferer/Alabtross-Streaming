@@ -1884,8 +1884,10 @@
           const sortedSeasons = [...group.seasons.keys()].sort((a, b) => a - b);
           for (const seasonNum of sortedSeasons) {
             const episodes = group.seasons.get(seasonNum);
+            html += `<div class="library-show-episodes">`;
             html += `<div class="library-season-header">Season ${seasonNum}</div>`;
-            html += episodes.map(ep => renderLibraryItem(ep, true)).join('');
+            html += episodes.map(ep => renderLibraryItem(ep)).join('');
+            html += `</div>`;
           }
           html += `</div>`;
         }
@@ -1909,84 +1911,69 @@
     }
   }
 
-  function renderLibraryItem(item, isEpisode) {
+  function renderLibraryItem(item) {
     const poster = item.poster || '';
-    let title;
-    if (isEpisode && item.episode != null) {
-      title = `E${item.episode}` + (item.name ? ` — ${escapeHTML(item.name)}` : '');
-    } else {
-      title = escapeHTML(item.name || 'Unknown');
-    }
+    const title = escapeHTML(item.name || 'Unknown');
     const year = item.year || '';
-    const quality = item.quality ? `<span class="library-quality">${escapeHTML(item.quality)}</span>` : '';
+    const quality = item.quality || '';
 
-    let statusBadge = '';
+    // Build poster overlay based on status
+    let overlayHtml = '';
+    let metaHtml = '';
+
     if (item.status === 'downloading') {
       const speed = item.downloadSpeed > 0 ? formatSpeed(item.downloadSpeed) : '';
-      statusBadge = `
-        <div class="library-progress">
-          <div class="library-progress-bar" style="width:${item.progress}%"></div>
-        </div>
-        <div class="library-status downloading">
-          ${item.progress}%${speed ? ' &middot; ' + speed : ''}${item.numPeers ? ' &middot; ' + item.numPeers + ' peers' : ''}
-        </div>
-      `;
+      overlayHtml = `
+        <div class="library-card-overlay downloading">${item.progress}%</div>
+        <div class="library-card-progress">
+          <div class="library-card-progress-bar" style="width:${item.progress}%"></div>
+        </div>`;
+      metaHtml = `<div class="library-card-meta downloading">${speed || 'Starting...'}${item.numPeers ? ' &middot; ' + item.numPeers + ' peers' : ''}</div>`;
     } else if (item.status === 'complete') {
       const size = item.fileSize ? formatSize(item.fileSize) : item.size || '';
-      statusBadge = `<div class="library-status complete">${size ? size + ' &middot; ' : ''}Ready to play</div>`;
+      overlayHtml = `
+        <div class="library-card-play">
+          <div class="library-card-play-circle">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          </div>
+        </div>`;
+      metaHtml = `<div class="library-card-meta complete">${size ? size : 'Ready'}</div>`;
     } else if (item.status === 'failed') {
-      statusBadge = `<div class="library-status failed">${escapeHTML(item.error || 'Download failed')}</div>`;
+      overlayHtml = `<div class="library-card-overlay failed">${escapeHTML(item.error || 'Failed')}</div>`;
+      metaHtml = `<div class="library-card-meta failed">Failed</div>`;
     }
 
-    const posterHtml = isEpisode
-      ? ''
-      : `<div class="library-item-poster">
-          ${poster ? `<img src="${poster}" alt="${escapeHTML(item.name || '')}">` : `<div class="poster-placeholder">${escapeHTML(item.name || 'Unknown')}</div>`}
-        </div>`;
-
     return `
-      <div class="library-item${isEpisode ? ' library-episode' : ''}" data-id="${escapeHTML(item.id)}" data-status="${item.status}">
-        ${posterHtml}
-        <div class="library-item-info">
-          <div class="library-item-title">${title}</div>
-          <div class="library-item-meta">${isEpisode ? '' : year}${quality ? (isEpisode ? '' : ' &middot; ') : ''}${quality}</div>
-          ${statusBadge}
-        </div>
-        <div class="library-item-actions">
-          ${item.status === 'complete' ? `
-            <button class="library-play-btn" data-id="${escapeHTML(item.id)}" title="Play">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-            </button>
-          ` : ''}
-          <button class="library-remove-btn" data-id="${escapeHTML(item.id)}" title="Remove">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+      <div class="card" data-id="${escapeHTML(item.id)}" data-status="${item.status}">
+        <div class="card-poster">
+          ${poster ? `<img src="${poster}" alt="${title}">` : ''}
+          ${!poster ? `<div class="poster-placeholder">${title}</div>` : ''}
+          ${overlayHtml}
+          <button class="library-card-remove" data-id="${escapeHTML(item.id)}" title="Remove">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
           </button>
         </div>
-      </div>
-    `;
+        <div class="card-info">
+          <div class="card-title">${title}</div>
+          <div class="card-year">${year}${quality ? ' &middot; ' + escapeHTML(quality) : ''}</div>
+          ${metaHtml}
+        </div>
+      </div>`;
   }
 
   function attachLibraryHandlers() {
-    // Play buttons
-    dom.libraryContent.querySelectorAll('.library-play-btn').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        playLibraryItem(btn.dataset.id);
-      });
-    });
-
     // Remove buttons
-    dom.libraryContent.querySelectorAll('.library-remove-btn').forEach(btn => {
+    dom.libraryContent.querySelectorAll('.library-card-remove').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         removeLibraryItem(btn.dataset.id);
       });
     });
 
-    // Click on item to play if complete
-    dom.libraryContent.querySelectorAll('.library-item[data-status="complete"]').forEach(item => {
-      item.addEventListener('click', () => {
-        playLibraryItem(item.dataset.id);
+    // Click on card to play if complete
+    dom.libraryContent.querySelectorAll('.card[data-status="complete"]').forEach(card => {
+      card.addEventListener('click', () => {
+        playLibraryItem(card.dataset.id);
       });
     });
   }
@@ -2120,16 +2107,18 @@
 
         // Update progress for downloading items in-place
         for (const item of items) {
-          const el = dom.libraryContent.querySelector(`.library-item[data-id="${CSS.escape(item.id)}"]`);
+          const el = dom.libraryContent.querySelector(`.card[data-id="${CSS.escape(item.id)}"]`);
           if (!el) continue;
 
           if (item.status === 'downloading') {
-            const bar = el.querySelector('.library-progress-bar');
-            const status = el.querySelector('.library-status');
+            const bar = el.querySelector('.library-card-progress-bar');
+            const overlay = el.querySelector('.library-card-overlay');
+            const meta = el.querySelector('.library-card-meta');
             if (bar) bar.style.width = item.progress + '%';
-            if (status) {
+            if (overlay) overlay.textContent = item.progress + '%';
+            if (meta) {
               const speed = item.downloadSpeed > 0 ? formatSpeed(item.downloadSpeed) : '';
-              status.innerHTML = `${item.progress}%${speed ? ' &middot; ' + speed : ''}${item.numPeers ? ' &middot; ' + item.numPeers + ' peers' : ''}`;
+              meta.innerHTML = `${speed || 'Starting...'}${item.numPeers ? ' &middot; ' + item.numPeers + ' peers' : ''}`;
             }
           } else if (el.dataset.status !== item.status) {
             // Status changed — reload full list

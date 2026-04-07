@@ -734,11 +734,8 @@
     }
 
     navigateTo('player');
-    dom.playerOverlay.classList.remove('hidden');
-    dom.playerOverlay.innerHTML = `
-      <div class="spinner"></div>
-      <p>Tuning to ${escapeHTML(name)}...</p>
-    `;
+    const logo = channel.logo || '';
+    showCurtainOverlay({ poster: logo, title: name, status: `Tuning to ${name}...` });
 
     try {
       dom.videoPlayer.src = proxyUrl;
@@ -762,7 +759,7 @@
       });
 
       await dom.videoPlayer.play();
-      dom.playerOverlay.classList.add('hidden');
+      openCurtains();
       enterPlayerFullscreen();
     } catch (e) {
       showPlayerError('Channel unavailable', escapeHTML(e.message));
@@ -1530,6 +1527,36 @@
 
   // ─── Playback ────────────────────────────────────
 
+  function showCurtainOverlay(opts = {}) {
+    const { poster = '', title = '', status = 'Loading...', subtitle = '' } = opts;
+    dom.playerOverlay.classList.remove('hidden');
+    dom.playerOverlay.innerHTML = `
+      <div class="curtain-stage dropping">
+        <div class="curtain-valance"></div>
+        <div class="curtain-lights"></div>
+        <div class="curtain-poster-wrap">
+          ${poster ? `<img src="${poster}" alt="">` : ''}
+          ${title ? `<div class="curtain-poster-title">${escapeHTML(title)}</div>` : ''}
+          <div class="curtain-loading-bar"><div class="loading-bar"></div></div>
+          <div class="curtain-poster-status loading-status">${status}</div>
+          ${subtitle ? `<div class="curtain-poster-status" style="opacity:0.5">${subtitle}</div>` : ''}
+        </div>
+        <div class="curtain-panel curtain-panel-left"></div>
+        <div class="curtain-panel curtain-panel-right"></div>
+      </div>
+    `;
+  }
+
+  function openCurtains() {
+    const curtainStage = dom.playerOverlay.querySelector('.curtain-stage');
+    if (curtainStage) {
+      curtainStage.classList.add('opening');
+      setTimeout(() => { dom.playerOverlay.classList.add('hidden'); }, 1400);
+    } else {
+      dom.playerOverlay.classList.add('hidden');
+    }
+  }
+
   function showPlayerError(title, hint) {
     dom.playerOverlay.innerHTML = `
       <p style="color:var(--danger)">${escapeHTML(title)}</p>
@@ -1556,7 +1583,6 @@
     }
 
     navigateTo('player');
-    dom.playerOverlay.classList.remove('hidden');
 
     const alreadyWarmed = preload.isWarmed(stream);
     preload.cancel(); // stop background fetch — playback takes over now
@@ -1567,21 +1593,12 @@
     const statusLabel = alreadyWarmed
       ? 'Starting playback...'
       : (stream.infoHash ? 'Connecting to torrent peers...' : 'Loading stream...');
-    dom.playerOverlay.innerHTML = `
-      <div class="curtain-stage dropping">
-        <div class="curtain-valance"></div>
-        <div class="curtain-lights"></div>
-        <div class="curtain-poster-wrap">
-          ${poster ? `<img src="${poster}" alt="">` : ''}
-          ${title ? `<div class="curtain-poster-title">${escapeHTML(title)}</div>` : ''}
-          <div class="curtain-loading-bar"><div class="loading-bar"></div></div>
-          <div class="curtain-poster-status loading-status">${statusLabel}</div>
-          ${stream.infoHash && !alreadyWarmed ? '<div class="curtain-poster-status" style="opacity:0.5">This may take 30-60 seconds</div>' : ''}
-        </div>
-        <div class="curtain-panel curtain-panel-left"></div>
-        <div class="curtain-panel curtain-panel-right"></div>
-      </div>
-    `;
+    showCurtainOverlay({
+      poster,
+      title,
+      status: statusLabel,
+      subtitle: stream.infoHash && !alreadyWarmed ? 'This may take 30-60 seconds' : '',
+    });
 
     // Poll torrent status for torrent streams
     let statusInterval = null;
@@ -1632,18 +1649,7 @@
 
       if (statusInterval) clearInterval(statusInterval);
       await dom.videoPlayer.play();
-
-      // Open the curtains to reveal the video
-      const curtainStage = dom.playerOverlay.querySelector('.curtain-stage');
-      if (curtainStage) {
-        curtainStage.classList.add('opening');
-        // Remove overlay after curtain animation completes
-        setTimeout(() => {
-          dom.playerOverlay.classList.add('hidden');
-        }, 1400);
-      } else {
-        dom.playerOverlay.classList.add('hidden');
-      }
+      openCurtains();
 
       // Mid-playback stall detection — re-show overlay during rebuffering
       const onStalled = () => {
@@ -1945,12 +1951,13 @@
   }
 
   async function playLibraryItem(id) {
+    // Grab poster/title from DOM before navigating away
+    const itemEl = dom.libraryContent.querySelector(`.library-item[data-id="${CSS.escape(id)}"]`);
+    const libPoster = itemEl?.querySelector('.library-item-poster img')?.src || '';
+    const libTitle = itemEl?.querySelector('.library-item-title')?.textContent || '';
+
     navigateTo('player');
-    dom.playerOverlay.classList.remove('hidden');
-    dom.playerOverlay.innerHTML = `
-      <div class="spinner"></div>
-      <p>Loading from library...</p>
-    `;
+    showCurtainOverlay({ poster: libPoster, title: libTitle, status: 'Loading from library...' });
 
     try {
       // Probe the file to decide the best playback strategy.
@@ -1975,10 +1982,8 @@
 
       if (useRemux) {
         url = `/api/library/${encodedId}/stream/remux`;
-        dom.playerOverlay.innerHTML = `
-          <div class="spinner"></div>
-          <p>Preparing for playback...</p>
-        `;
+        const statusEl = dom.playerOverlay.querySelector('.loading-status');
+        if (statusEl) statusEl.textContent = 'Preparing for playback...';
       } else {
         url = `/api/library/${encodedId}/stream`;
       }
@@ -2008,7 +2013,7 @@
       });
 
       await dom.videoPlayer.play();
-      dom.playerOverlay.classList.add('hidden');
+      openCurtains();
       enterPlayerFullscreen();
     } catch (e) {
       let hint = escapeHTML(e.message);
@@ -2017,10 +2022,8 @@
         console.warn('[Library] Direct stream failed, retrying with remux');
         try {
           const encodedId = encodeURIComponent(id);
-          dom.playerOverlay.innerHTML = `
-            <div class="spinner"></div>
-            <p>Retrying with audio transcode...</p>
-          `;
+          const statusEl = dom.playerOverlay.querySelector('.loading-status');
+          if (statusEl) statusEl.textContent = 'Retrying with audio transcode...';
           dom.videoPlayer.src = `/api/library/${encodedId}/stream/remux`;
           dom.videoPlayer.load();
           await new Promise((resolve, reject) => {
@@ -2030,7 +2033,7 @@
             dom.videoPlayer.addEventListener('error', onErr, { once: true });
           });
           await dom.videoPlayer.play();
-          dom.playerOverlay.classList.add('hidden');
+          openCurtains();
           enterPlayerFullscreen();
           return;
         } catch (retryErr) {

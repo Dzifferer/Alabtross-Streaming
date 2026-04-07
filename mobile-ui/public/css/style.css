@@ -1334,7 +1334,7 @@ html, body {
 
 .curtain-loading-bar .loading-bar {
   height: 100%;
-  background: #ffd700;
+  background: #b8860b;
   border-radius: 3px;
   animation: loading-slide 2s ease-in-out infinite;
 }
@@ -1353,30 +1353,30 @@ html, body {
   left: 0;
   background: linear-gradient(
     to right,
-    #6b0000 0%,
-    #a01020 8%,
-    #7a0808 20%,
-    #a01020 40%,
-    #6b0000 60%,
-    #a01020 80%,
-    #7a0808 100%
+    #2a0000 0%,
+    #4a0a0a 8%,
+    #350505 20%,
+    #4a0a0a 40%,
+    #2a0000 60%,
+    #4a0a0a 80%,
+    #350505 100%
   );
-  box-shadow: inset 0 0 60px rgba(0,0,0,0.7), 4px 0 20px rgba(0,0,0,0.5);
+  box-shadow: inset 0 0 80px rgba(0,0,0,0.8), 4px 0 20px rgba(0,0,0,0.6);
 }
 
 .curtain-panel-right {
   right: 0;
   background: linear-gradient(
     to left,
-    #6b0000 0%,
-    #a01020 8%,
-    #7a0808 20%,
-    #a01020 40%,
-    #6b0000 60%,
-    #a01020 80%,
-    #7a0808 100%
+    #2a0000 0%,
+    #4a0a0a 8%,
+    #350505 20%,
+    #4a0a0a 40%,
+    #2a0000 60%,
+    #4a0a0a 80%,
+    #350505 100%
   );
-  box-shadow: inset 0 0 60px rgba(0,0,0,0.7), -4px 0 20px rgba(0,0,0,0.5);
+  box-shadow: inset 0 0 80px rgba(0,0,0,0.8), -4px 0 20px rgba(0,0,0,0.6);
 }
 
 /* Fabric texture overlay */
@@ -1400,15 +1400,15 @@ html, body {
   bottom: 0;
   left: 0;
   right: 0;
-  height: 24px;
+  height: 20px;
   background: repeating-linear-gradient(
     90deg,
-    #ffd700,
-    #ffd700 8px,
+    #b8860b,
     #b8860b 8px,
-    #b8860b 16px
+    #8b6914 8px,
+    #8b6914 16px
   );
-  box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+  box-shadow: 0 4px 10px rgba(0,0,0,0.6);
 }
 
 /* Stage lights glow at top */
@@ -1418,7 +1418,7 @@ html, body {
   left: 0;
   right: 0;
   height: 80px;
-  background: linear-gradient(rgba(255,215,0,0.15), transparent);
+  background: linear-gradient(rgba(255,215,0,0.08), transparent);
   z-index: 4;
   pointer-events: none;
 }
@@ -1433,10 +1433,10 @@ html, body {
   z-index: 5;
   background: linear-gradient(
     to bottom,
-    #7a0808,
-    #6b0000
+    #350505,
+    #2a0000
   );
-  box-shadow: 0 4px 16px rgba(0,0,0,0.6);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.7);
 }
 
 .curtain-valance::after {
@@ -1446,7 +1446,7 @@ html, body {
   left: 0;
   right: 0;
   height: 12px;
-  background: repeating-conic-gradient(#7a0808 0% 25%, transparent 0% 50%) 0 0 / 24px 12px;
+  background: repeating-conic-gradient(#350505 0% 25%, transparent 0% 50%) 0 0 / 24px 12px;
 }
 
 /* Drop animation — curtain falls from top */

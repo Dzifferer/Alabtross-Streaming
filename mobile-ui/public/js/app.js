@@ -2635,6 +2635,18 @@
           </div>
         </div>`;
       metaHtml = `<div class="library-card-meta converting">Converting to MP4...${item.convertError ? ' (retry failed)' : ''}</div>`;
+    } else if (item.status === 'paused') {
+      overlayHtml = `
+        <div class="library-card-overlay paused">Paused ${item.progress || 0}%</div>
+        <div class="library-card-progress">
+          <div class="library-card-progress-bar paused" style="width:${item.progress || 0}%"></div>
+        </div>
+        <div class="library-card-play library-card-resume" data-id="${escapeHTML(item.id)}">
+          <div class="library-card-play-circle">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          </div>
+        </div>`;
+      metaHtml = `<div class="library-card-meta paused">Paused</div>`;
     } else if (item.status === 'queued') {
       const posText = item._queuePosition ? `#${item._queuePosition} in queue` : 'Waiting...';
       overlayHtml = `<div class="library-card-overlay queued">Queued</div>`;
@@ -2649,8 +2661,14 @@
         </div>`;
       metaHtml = `<div class="library-card-meta complete">${size ? size : 'Ready'}</div>`;
     } else if (item.status === 'failed') {
-      overlayHtml = `<div class="library-card-overlay failed">${escapeHTML(item.error || 'Failed')}</div>`;
-      metaHtml = `<div class="library-card-meta failed">Failed</div>`;
+      overlayHtml = `
+        <div class="library-card-overlay failed">${escapeHTML(item.error || 'Failed')}</div>
+        <div class="library-card-play library-card-retry" data-id="${escapeHTML(item.id)}">
+          <div class="library-card-play-circle">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          </div>
+        </div>`;
+      metaHtml = `<div class="library-card-meta failed">Failed &middot; tap to retry</div>`;
     }
 
     return `
@@ -2995,6 +3013,32 @@
         const itemId = card.dataset.id;
         const itemName = card.dataset.itemName || '';
         showRelinkModal(itemId, itemName);
+      });
+    });
+
+    // Resume buttons on paused library cards
+    container.querySelectorAll('.library-card-resume').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = btn.dataset.id;
+        try {
+          await fetch(`/api/library/${encodeURIComponent(id)}/resume`, { method: 'POST' });
+          showToast('Resuming download...');
+          loadLibrary();
+        } catch { showToast('Failed to resume'); }
+      });
+    });
+
+    // Retry buttons on failed library cards
+    container.querySelectorAll('.library-card-retry').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = btn.dataset.id;
+        try {
+          await fetch(`/api/library/${encodeURIComponent(id)}/retry`, { method: 'POST' });
+          showToast('Retrying download...');
+          loadLibrary();
+        } catch { showToast('Failed to retry'); }
       });
     });
 
@@ -3585,6 +3629,9 @@
         </button>`;
     } else if (pack.status === 'failed') {
       actions = `
+        <button class="download-action-btn resume" data-pack-id="${escapeHTML(pack.packId)}" data-action="retry-pack" title="Retry All">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        </button>
         <button class="download-action-btn cancel" data-pack-id="${escapeHTML(pack.packId)}" data-action="remove-pack" title="Remove All">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
         </button>`;
@@ -3672,6 +3719,9 @@
         </button>`;
     } else if (item.status === 'failed') {
       actions = `
+        <button class="download-action-btn resume" data-id="${escapeHTML(item.id)}" data-action="retry" title="Retry">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        </button>
         <button class="download-action-btn cancel" data-id="${escapeHTML(item.id)}" data-action="remove" title="Remove">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
         </button>`;
@@ -3731,12 +3781,31 @@
           return;
         }
 
+        if (action === 'retry-pack' && packId) {
+          // Retry all failed episodes in this pack
+          try {
+            const resp = await fetch('/api/library');
+            const data = await resp.json();
+            const packItems = (data.items || []).filter(i => i.packId === packId && i.status === 'failed');
+            await Promise.all(packItems.map(i =>
+              fetch(`/api/library/${encodeURIComponent(i.id)}/retry`, { method: 'POST' })
+            ));
+            showToast('Retrying failed episodes...');
+          } catch { showToast('Failed to retry pack'); }
+          renderDownloads();
+          return;
+        }
+
         if (action === 'pause') {
           await fetch(`/api/library/${encodeURIComponent(id)}/pause`, { method: 'POST' });
           renderDownloads();
         } else if (action === 'resume') {
           await fetch(`/api/library/${encodeURIComponent(id)}/resume`, { method: 'POST' });
           renderDownloads();
+        } else if (action === 'retry') {
+          await fetch(`/api/library/${encodeURIComponent(id)}/retry`, { method: 'POST' });
+          renderDownloads();
+          showToast('Retrying download...');
         } else if (action === 'remove') {
           await fetch(`/api/library/${encodeURIComponent(id)}`, { method: 'DELETE' });
           renderDownloads();

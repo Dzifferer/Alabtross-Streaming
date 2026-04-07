@@ -27,6 +27,8 @@ sudo docker start alabtross-mobile
 
 ## Git / Updating Code
 
+> **Note:** This is a private repo. SSH key or PAT auth must be configured first — see README.md "Private Repo Access".
+
 ```bash
 cd ~/Alabtross-Streaming
 git pull origin main

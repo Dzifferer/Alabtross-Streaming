@@ -4,6 +4,14 @@ set -e
 
 cd "$(dirname "$0")"
 
+echo "==> Checking repo access..."
+if ! git ls-remote --exit-code origin &>/dev/null; then
+  echo "ERROR: Cannot reach the remote repository."
+  echo "This is a private repo — SSH key or PAT auth must be configured."
+  echo "See README.md 'Private Repo Access' for setup instructions."
+  exit 1
+fi
+
 echo "==> Pulling latest from main..."
 git pull origin main
 

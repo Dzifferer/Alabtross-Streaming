@@ -69,6 +69,54 @@ On your laptop:
     ssh jetson@192.168.1.XX
     ```
 
+### Private Repo Access
+
+This is a private repository. You need authentication configured before cloning or pulling.
+
+**Option A — SSH Deploy Key (recommended for Jetson)**
+
+1. On the Jetson, generate a key:
+   ```bash
+   ssh-keygen -t ed25519 -f ~/.ssh/alabtross_deploy -N ""
+   ```
+2. Print the public key:
+   ```bash
+   cat ~/.ssh/alabtross_deploy.pub
+   ```
+3. Go to **github.com/Dzifferer/Alabtross-Streaming → Settings → Deploy keys → Add deploy key**, paste the public key.
+4. Configure SSH to use this key for GitHub:
+   ```bash
+   cat >> ~/.ssh/config << 'EOF'
+   Host github.com
+     IdentityFile ~/.ssh/alabtross_deploy
+   EOF
+   chmod 600 ~/.ssh/config
+   ```
+5. Clone with SSH:
+   ```bash
+   git clone git@github.com:Dzifferer/Alabtross-Streaming.git
+   ```
+
+**Option B — Personal Access Token (HTTPS)**
+
+1. Go to **github.com → Settings → Developer settings → Personal access tokens → Fine-grained tokens**, create a token with `Contents: Read` for this repo.
+2. Clone using the token:
+   ```bash
+   git clone https://<YOUR_TOKEN>@github.com/Dzifferer/Alabtross-Streaming.git
+   ```
+   Or configure the credential helper so you only enter it once:
+   ```bash
+   git config --global credential.helper store
+   git clone git@github.com:Dzifferer/Alabtross-Streaming.git  # See 'Private Repo Access' above
+   # enter username + token when prompted
+   ```
+
+**Already cloned via HTTPS?** Switch to SSH:
+```bash
+cd ~/Alabtross-Streaming
+git remote set-url origin git@github.com:Dzifferer/Alabtross-Streaming.git
+```
+
 ### Step 4 — Run the Setup (headless)
 
 11. Plug in your **external USB drive** if using one. Then find the partition name:
@@ -80,7 +128,7 @@ On your laptop:
 12. Run the setup in fully headless mode:
     ```bash
     sudo apt-get update && sudo apt-get install -y git
-    git clone https://github.com/Dzifferer/Alabtross-Streaming.git
+    git clone git@github.com:Dzifferer/Alabtross-Streaming.git  # See 'Private Repo Access' above
     cd Alabtross-Streaming
 
     # Full setup with external drive, DuckDNS, auto VPN profiles, and UPnP:
@@ -131,7 +179,7 @@ If you prefer using a monitor and keyboard on the Jetson:
 
 ```bash
 sudo apt-get update && sudo apt-get install -y git
-git clone https://github.com/Dzifferer/Alabtross-Streaming.git
+git clone git@github.com:Dzifferer/Alabtross-Streaming.git  # See 'Private Repo Access' above
 cd Alabtross-Streaming
 sudo bash jetson_setup.sh
 ```

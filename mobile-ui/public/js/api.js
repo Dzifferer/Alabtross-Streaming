@@ -855,6 +855,148 @@ class StremioAPI {
     }
     return flat;
   }
+
+  // ─── Live TV Search ────────────────────────────────
+
+  /**
+   * Search Live TV channels across all enabled sources.
+   * Queries M3U playlists (server-side filter) and Stremio TV addon search extras in parallel.
+   * Returns flat array of channel objects, max 50 results.
+   */
+  async searchLiveTVChannels(query) {
+    if (!query || query.length < 2) return [];
+    const sources = this._loadLiveTVSources().filter(s => s.enabled);
+    if (sources.length === 0) return [];
+
+    const results = await Promise.allSettled(sources.map(async (source) => {
+      if (source.type === 'playlist') {
+        return this._searchPlaylistChannels(source.url, query);
+      } else if (source.type === 'stremio-tv') {
+        return this._searchStremioTVChannels(source.url, query);
+      }
+      return [];
+    }));
+
+    const all = [];
+    for (const r of results) {
+      if (r.status === 'fulfilled' && r.value) {
+        all.push(...r.value);
+      }
+    }
+    return all.slice(0, 50);
+  }
+
+  async _searchPlaylistChannels(playlistUrl, query) {
+    try {
+      const resp = await fetch(
+        '/api/iptv/channels?url=' + encodeURIComponent(playlistUrl) +
+        '&search=' + encodeURIComponent(query) + '&limit=30',
+        { signal: AbortSignal.timeout(6000) }
+      );
+      if (!resp.ok) return [];
+      const data = await resp.json();
+      return (data.channels || []).map(ch => ({ ...ch, _sourceType: 'playlist' }));
+    } catch {
+      return [];
+    }
+  }
+
+  async _searchStremioTVChannels(addonUrl, query) {
+    try {
+      const manifest = await this._fetchManifest(addonUrl);
+      if (!manifest.catalogs) return [];
+
+      const tvCatalogs = manifest.catalogs.filter(c => c.type === 'tv');
+      const searchable = tvCatalogs.filter(c =>
+        c.extra && c.extra.some(e => e.name === 'search')
+      );
+
+      if (searchable.length === 0) {
+        // Addon doesn't support search — fall back to client-side filter of cached channels
+        return this._filterCachedStremioChannels(addonUrl, query);
+      }
+
+      // Query search-capable catalogs
+      const channelResults = [];
+      for (const catalog of searchable.slice(0, 3)) {
+        try {
+          const searchPath = `${addonUrl}/catalog/tv/${catalog.id}/search=${encodeURIComponent(query)}.json`;
+          const resp = await fetch('/api/addon-proxy?url=' + encodeURIComponent(searchPath), {
+            signal: AbortSignal.timeout(6000),
+          });
+          if (!resp.ok) continue;
+          const data = await resp.json();
+          for (const meta of (data.metas || [])) {
+            channelResults.push({
+              id: meta.id || '',
+              name: meta.name || 'Channel',
+              logo: meta.logo || meta.poster || '',
+              group: catalog.name || '',
+              _sourceType: 'stremio-tv',
+              _addonUrl: addonUrl,
+              _stremioId: meta.id,
+            });
+          }
+        } catch { /* skip failed catalog */ }
+      }
+      return channelResults;
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Client-side filter of previously-fetched Stremio TV channels (for addons without search extra).
+   * Uses the last fetched channel list from getAllLiveTVChannels if available.
+   */
+  async _filterCachedStremioChannels(addonUrl, query) {
+    try {
+      // Re-fetch channels (they're manifest-cached so this is fast)
+      const channels = await this._fetchStremioTVChannels(addonUrl);
+      const lc = query.toLowerCase();
+      return channels.filter(ch =>
+        ch.name.toLowerCase().includes(lc) ||
+        ch.group.toLowerCase().includes(lc)
+      ).slice(0, 30);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Get available channel groups from a playlist source.
+   */
+  async getPlaylistGroups(playlistUrl) {
+    try {
+      const resp = await fetch(
+        '/api/iptv/channels?url=' + encodeURIComponent(playlistUrl) + '&groups=1&limit=1',
+        { signal: AbortSignal.timeout(6000) }
+      );
+      if (!resp.ok) return [];
+      const data = await resp.json();
+      return data.groups || [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Get channels from a playlist filtered by group.
+   */
+  async getPlaylistChannelsByGroup(playlistUrl, group) {
+    try {
+      const resp = await fetch(
+        '/api/iptv/channels?url=' + encodeURIComponent(playlistUrl) +
+        '&group=' + encodeURIComponent(group) + '&limit=100',
+        { signal: AbortSignal.timeout(6000) }
+      );
+      if (!resp.ok) return [];
+      const data = await resp.json();
+      return (data.channels || []).map(ch => ({ ...ch, _sourceType: 'playlist' }));
+    } catch {
+      return [];
+    }
+  }
 }
 
 window.api = new StremioAPI();

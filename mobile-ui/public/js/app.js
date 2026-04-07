@@ -344,11 +344,15 @@
             <div class="catalog-row-header">
               <h3 class="catalog-row-title">${escapeHTML(group.sourceName)}</h3>
               <span class="catalog-row-badge">LIVE</span>
+              <button class="catalog-row-more livetv-browse-btn">Browse All</button>
             </div>
             <div class="catalog-scroll">${group.channels.slice(0, 30).map(ch => channelCardHTML(ch)).join('')}</div>
           `;
           dom.homeCatalogs.appendChild(tvRow);
           attachChannelListeners(tvRow);
+          tvRow.querySelector('.livetv-browse-btn')?.addEventListener('click', () => {
+            openChannelBrowser(group);
+          });
         }
       } else {
         const sources = api.getLiveTVSources();
@@ -493,10 +497,14 @@
           <div class="catalog-row-header">
             <h3 class="catalog-row-title">${escapeHTML(firstGroup.sourceName)}</h3>
             <span class="catalog-row-badge">LIVE</span>
+            <button class="catalog-row-more livetv-browse-btn">Browse All</button>
           </div>
           <div class="catalog-scroll">${firstGroup.channels.slice(0, 30).map(ch => channelCardHTML(ch)).join('')}</div>
         `;
         attachChannelListeners(tvContainer);
+        tvContainer.querySelector('.livetv-browse-btn')?.addEventListener('click', () => {
+          openChannelBrowser(firstGroup);
+        });
 
         // Append additional groups as separate rows after tvContainer
         for (let i = 1; i < tvGroups.length; i++) {
@@ -506,11 +514,16 @@
             <div class="catalog-row-header">
               <h3 class="catalog-row-title">${escapeHTML(tvGroups[i].sourceName)}</h3>
               <span class="catalog-row-badge">LIVE</span>
+              <button class="catalog-row-more livetv-browse-btn">Browse All</button>
             </div>
             <div class="catalog-scroll">${tvGroups[i].channels.slice(0, 30).map(ch => channelCardHTML(ch)).join('')}</div>
           `;
           tvContainer.insertAdjacentElement('afterend', extraRow);
           attachChannelListeners(extraRow);
+          const groupRef = tvGroups[i];
+          extraRow.querySelector('.livetv-browse-btn')?.addEventListener('click', () => {
+            openChannelBrowser(groupRef);
+          });
         }
       } else {
         // Show error/config state — always keep the section visible
@@ -740,6 +753,103 @@
     }
   }
 
+  // ─── Channel Browser (Browse All Live TV) ───────
+
+  function openChannelBrowser(group) {
+    navigateTo('search');
+    dom.searchEmpty.classList.add('hidden');
+    dom.searchInput.value = '';
+    dom.searchClear.classList.add('hidden');
+
+    const channels = group.channels || [];
+    // Extract unique groups for filter chips
+    const groups = [...new Set(channels.map(ch => ch.group).filter(Boolean))].sort();
+
+    let html = `<div class="channel-browser" style="grid-column:1/-1">
+      <div class="channel-browser-header">
+        <h3>${escapeHTML(group.sourceName)} — ${channels.length} channels</h3>
+      </div>`;
+
+    // Group filter chips
+    if (groups.length > 1) {
+      html += `<div class="channel-browser-filters">
+        <button class="filter-chip active channel-group-chip" data-group="">All</button>
+        ${groups.slice(0, 30).map(g => `<button class="filter-chip channel-group-chip" data-group="${escapeHTML(g)}">${escapeHTML(g)}</button>`).join('')}
+      </div>`;
+    }
+
+    // Search within channels
+    html += `<div class="channel-browser-search">
+      <input type="search" class="channel-search-input" placeholder="Search channels..." autocomplete="off">
+    </div>`;
+
+    // Channel grid
+    html += `<div class="channel-browser-grid" id="channel-browser-grid">
+      ${channels.slice(0, 100).map(ch => channelCardHTML(ch)).join('')}
+    </div>`;
+
+    if (channels.length > 100) {
+      html += `<div class="channel-browser-more" style="text-align:center;padding:16px;">
+        <button class="btn-sm" id="channel-load-more">Show More (${channels.length - 100} remaining)</button>
+      </div>`;
+    }
+
+    html += `</div>`;
+
+    dom.searchResults.innerHTML = html;
+    attachChannelListeners(dom.searchResults);
+
+    // Local search within this group's channels
+    const searchInput = dom.searchResults.querySelector('.channel-search-input');
+    const grid = document.getElementById('channel-browser-grid');
+    let activeGroup = '';
+    let searchTimer;
+
+    function filterChannels() {
+      const q = (searchInput?.value || '').trim().toLowerCase();
+      let filtered = channels;
+      if (activeGroup) {
+        filtered = filtered.filter(ch => ch.group === activeGroup);
+      }
+      if (q.length >= 2) {
+        filtered = filtered.filter(ch =>
+          ch.name.toLowerCase().includes(q) ||
+          (ch.group || '').toLowerCase().includes(q) ||
+          (ch.country || '').toLowerCase().includes(q)
+        );
+      }
+      grid.innerHTML = filtered.slice(0, 100).map(ch => channelCardHTML(ch)).join('');
+      attachChannelListeners(grid);
+    }
+
+    if (searchInput) {
+      searchInput.addEventListener('input', () => {
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(filterChannels, 250);
+      });
+    }
+
+    // Group filter chip handlers
+    dom.searchResults.querySelectorAll('.channel-group-chip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        dom.searchResults.querySelectorAll('.channel-group-chip').forEach(c => c.classList.remove('active'));
+        chip.classList.add('active');
+        activeGroup = chip.dataset.group;
+        filterChannels();
+      });
+    });
+
+    // Load more button
+    const loadMoreBtn = document.getElementById('channel-load-more');
+    if (loadMoreBtn) {
+      loadMoreBtn.addEventListener('click', () => {
+        grid.innerHTML = channels.map(ch => channelCardHTML(ch)).join('');
+        attachChannelListeners(grid);
+        loadMoreBtn.parentElement.remove();
+      });
+    }
+  }
+
   // ─── Search ──────────────────────────────────────
 
   function initSearch() {
@@ -857,9 +967,14 @@
     `;
 
     const typeFilter = state.currentType || null;
-    const results = await api.search(query, typeFilter);
 
-    if (results.length === 0) {
+    // Search movies/series and Live TV in parallel
+    const [results, tvChannels] = await Promise.all([
+      api.search(query, typeFilter),
+      api.searchLiveTVChannels(query),
+    ]);
+
+    if (results.length === 0 && tvChannels.length === 0) {
       dom.searchResults.innerHTML = `
         <div class="empty-state" style="grid-column:1/-1">
           <p>No results for "${escapeHTML(query)}"</p>
@@ -868,12 +983,36 @@
       return;
     }
 
-    dom.searchResults.innerHTML = results.map(item => {
-      const type = item.type || 'movie';
-      return cardHTML(item, type);
-    }).join('');
+    let html = '';
 
+    // Live TV results first (if any)
+    if (tvChannels.length > 0) {
+      html += `<div class="search-section-header" style="grid-column:1/-1">
+        <h3>Live TV Channels</h3>
+      </div>`;
+      html += `<div class="search-tv-row" style="grid-column:1/-1">
+        <div class="catalog-scroll">${tvChannels.map(ch => channelCardHTML(ch)).join('')}</div>
+      </div>`;
+    }
+
+    // Movie/series results
+    if (results.length > 0) {
+      if (tvChannels.length > 0) {
+        html += `<div class="search-section-header" style="grid-column:1/-1">
+          <h3>Movies & Shows</h3>
+        </div>`;
+      }
+      html += results.map(item => {
+        const type = item.type || 'movie';
+        return cardHTML(item, type);
+      }).join('');
+    }
+
+    dom.searchResults.innerHTML = html;
+
+    // Attach listeners for both card types
     attachCardListeners(dom.searchResults);
+    attachChannelListeners(dom.searchResults);
   }
 
   // ─── Detail View ─────────────────────────────────

@@ -1957,154 +1957,177 @@ html, body {
 }
 
 /* ===== Library View ===== */
+/* ===== Library Tile Grid ===== */
 .library-grid {
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
   gap: 12px;
+  padding: 16px;
 }
 
-.library-item {
+@media (min-width: 480px) {
+  .library-grid { grid-template-columns: repeat(4, 1fr); }
+}
+
+@media (min-width: 768px) {
+  .library-grid { grid-template-columns: repeat(5, 1fr); }
+}
+
+/* Library cards reuse .card/.card-poster/.card-info base styles */
+.library-grid .card {
+  width: 100%;
+}
+
+.library-grid .card-poster {
+  width: 100%;
+  height: 0;
+  padding-bottom: 150%;
+}
+
+.library-grid .card-poster img {
+  position: absolute;
+  inset: 0;
+}
+
+.library-grid .card-poster .poster-placeholder {
+  position: absolute;
+}
+
+/* Progress bar overlay on poster */
+.library-card-progress {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 4px;
+  background: rgba(0,0,0,0.5);
+  z-index: 2;
+}
+
+.library-card-progress-bar {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 0 2px 0 0;
+  transition: width 0.5s ease;
+}
+
+/* Status overlay centered on poster */
+.library-card-overlay {
+  position: absolute;
+  inset: 0;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 12px;
-  background: var(--bg-card);
+  justify-content: center;
+  background: rgba(0,0,0,0.45);
+  z-index: 1;
   border-radius: var(--radius-sm);
-  border: 1px solid rgba(255,255,255,0.04);
-  cursor: pointer;
-  transition: background 0.2s;
 }
 
-.library-item:active {
-  background: var(--bg-elevated);
+.library-card-overlay.downloading {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--accent);
 }
 
-.library-item-poster {
-  width: 60px;
-  height: 90px;
-  border-radius: 6px;
-  overflow: hidden;
-  background: var(--bg-elevated);
-  flex-shrink: 0;
-}
-
-.library-item-poster img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.library-item-info {
-  flex: 1;
-  min-width: 0;
-}
-
-.library-item-title {
-  font-size: 15px;
+.library-card-overlay.failed {
+  font-size: 12px;
   font-weight: 600;
+  color: var(--danger);
+}
+
+/* Play button overlay on poster */
+.library-card-play {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1;
+  border-radius: var(--radius-sm);
+  opacity: 1;
+}
+
+.library-card-play-circle {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: rgba(0,0,0,0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  transition: transform 0.2s, background 0.2s;
+}
+
+.card:active .library-card-play-circle {
+  transform: scale(0.9);
+  background: var(--accent);
+}
+
+/* Remove button on poster */
+.library-card-remove {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: rgba(0,0,0,0.6);
+  border: none;
+  color: rgba(255,255,255,0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 3;
+  opacity: 0;
+  transition: opacity 0.2s, color 0.2s;
+}
+
+.library-card-remove:active {
+  color: var(--danger);
+}
+
+/* Always show overlays on touch devices */
+@media (hover: none) {
+  .library-card-remove { opacity: 1; }
+}
+
+@media (hover: hover) {
+  .card:hover .library-card-remove { opacity: 1; }
+}
+
+/* Status text below card */
+.library-card-meta {
+  font-size: 11px;
+  margin-top: 2px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.library-item-meta {
-  font-size: 12px;
-  color: var(--text-muted);
-  margin-top: 2px;
-}
+.library-card-meta.downloading { color: var(--accent); }
+.library-card-meta.complete { color: var(--success); }
+.library-card-meta.failed { color: var(--danger); }
 
-.library-quality {
-  font-weight: 600;
-  color: var(--text-dim);
-}
-
-.library-progress {
-  height: 4px;
-  background: rgba(255,255,255,0.08);
-  border-radius: 2px;
-  margin-top: 8px;
-  overflow: hidden;
-}
-
-.library-progress-bar {
-  height: 100%;
-  background: var(--accent);
-  border-radius: 2px;
-  transition: width 0.5s ease;
-}
-
-.library-status {
-  font-size: 11px;
-  margin-top: 4px;
-}
-
-.library-status.downloading {
-  color: var(--accent);
-}
-
-.library-status.complete {
-  color: var(--success);
-}
-
-.library-status.failed {
-  color: var(--danger);
-}
-
-.library-item-actions {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  flex-shrink: 0;
-}
-
-.library-play-btn, .library-remove-btn {
-  width: 36px;
-  height: 36px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  border-radius: 50%;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.library-play-btn {
-  background: var(--accent);
-  color: white;
-}
-
-.library-play-btn:active {
-  opacity: 0.8;
-  transform: scale(0.92);
-}
-
-.library-remove-btn {
-  background: none;
-  color: var(--text-muted);
-}
-
-.library-remove-btn:active {
-  color: var(--danger);
-  background: rgba(255, 107, 107, 0.1);
-}
-
-/* Library section headers and grouping */
+/* Section headers span full grid width */
 .library-section-header {
+  grid-column: 1 / -1;
   font-size: 18px;
   font-weight: 700;
   color: var(--text-primary);
   padding: 8px 0 4px;
   border-bottom: 1px solid var(--border);
-  margin-bottom: 4px;
+  margin-bottom: 0;
 }
 
 .library-section-header:not(:first-child) {
-  margin-top: 16px;
+  margin-top: 8px;
 }
 
+/* TV show groups span full width */
 .library-show-group {
+  grid-column: 1 / -1;
   margin-bottom: 12px;
 }
 
@@ -2115,19 +2138,27 @@ html, body {
   padding: 8px 0 2px;
 }
 
+.library-show-episodes {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-top: 8px;
+}
+
+@media (min-width: 480px) {
+  .library-show-episodes { grid-template-columns: repeat(4, 1fr); }
+}
+
+@media (min-width: 768px) {
+  .library-show-episodes { grid-template-columns: repeat(5, 1fr); }
+}
+
 .library-season-header {
+  grid-column: 1 / -1;
   font-size: 13px;
   font-weight: 500;
   color: var(--text-muted);
-  padding: 4px 0 2px 8px;
-}
-
-.library-episode {
-  padding-left: 16px;
-}
-
-.library-episode .library-item-title {
-  font-size: 14px;
+  padding: 4px 0 2px;
 }
 
 /* Add to Library button on detail page */
@@ -2167,15 +2198,16 @@ html, body {
 }
 
 /* Custom theme overrides for library */
-.theme-custom .library-play-btn {
+.theme-custom .library-card-play-circle {
+  background: rgba(0,66,37,0.8);
+}
+
+.theme-custom .library-card-progress-bar {
   background: #004225;
 }
 
-.theme-custom .library-progress-bar {
-  background: #004225;
-}
-
-.theme-custom .library-status.downloading {
+.theme-custom .library-card-overlay.downloading,
+.theme-custom .library-card-meta.downloading {
   color: #4caf6a;
 }
 

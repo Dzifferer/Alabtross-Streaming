@@ -17,7 +17,20 @@ const PORT = process.env.PORT || 8080;
 const STREMIO_SERVER = process.env.STREMIO_SERVER || 'http://localhost:11470';
 const TORRENT_CACHE_PATH = process.env.TORRENT_CACHE || path.join(__dirname, '.torrent-cache');
 const LIBRARY_PATH = process.env.LIBRARY_PATH || path.join(TORRENT_CACHE_PATH, 'library');
+const SETTINGS_PATH = path.join(TORRENT_CACHE_PATH, 'settings.json');
 let MAX_CONCURRENT_STREAMS = parseInt(process.env.MAX_CONCURRENT_STREAMS, 10) || 5;
+
+// Load persisted settings from disk
+try {
+  if (fs.existsSync(SETTINGS_PATH)) {
+    const saved = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8'));
+    if (saved.maxConcurrentStreams >= 1 && saved.maxConcurrentStreams <= 20) {
+      MAX_CONCURRENT_STREAMS = saved.maxConcurrentStreams;
+    }
+  }
+} catch (e) {
+  console.warn('[Settings] Failed to load saved settings:', e.message);
+}
 
 // JSON body parsing for library POST/DELETE requests
 app.use(express.json({ limit: '10kb' }));
@@ -571,8 +584,9 @@ app.get('/api/addon-proxy', rateLimit, async (req, res) => {
 
 // ─── IPTV / Live TV Endpoints ─────────────────────────────────────────
 
-// In-memory playlist cache: { url, channels, fetchedAt }
-let playlistCache = null;
+// In-memory playlist cache: Map<url, { channels, fetchedAt }>
+const playlistCache = new Map();
+const PLAYLIST_CACHE_MAX = 20;
 const PLAYLIST_CACHE_TTL = 60 * 60 * 1000; // 1 hour
 
 // ─── SSRF Protection ──────────────────────────────────────────────────
@@ -667,15 +681,20 @@ app.get('/api/iptv/channels', rateLimit, async (req, res) => {
   }
 
   // Return cached if same URL and fresh
-  if (playlistCache && playlistCache.url === playlistUrl &&
-      Date.now() - playlistCache.fetchedAt < PLAYLIST_CACHE_TTL) {
-    return res.json({ channels: playlistCache.channels });
+  const cached = playlistCache.get(playlistUrl);
+  if (cached && Date.now() - cached.fetchedAt < PLAYLIST_CACHE_TTL) {
+    return res.json({ channels: cached.channels });
   }
 
   try {
     const body = await fetchUrl(playlistUrl);
     const channels = parseM3U(body);
-    playlistCache = { url: playlistUrl, channels, fetchedAt: Date.now() };
+    // Evict oldest entry if cache is full
+    if (playlistCache.size >= PLAYLIST_CACHE_MAX) {
+      const oldest = playlistCache.keys().next().value;
+      playlistCache.delete(oldest);
+    }
+    playlistCache.set(playlistUrl, { channels, fetchedAt: Date.now() });
     res.json({ channels });
   } catch (err) {
     console.error('[IPTV] Playlist fetch error:', err.message);
@@ -840,6 +859,13 @@ app.post('/api/settings/max-streams', (req, res) => {
   // Update running engines
   if (engine) engine._maxConcurrent = value;
   library._maxConcurrentDownloads = value;
+  // Persist to disk
+  try {
+    fs.mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true });
+    fs.writeFileSync(SETTINGS_PATH, JSON.stringify({ maxConcurrentStreams: value }), 'utf8');
+  } catch (e) {
+    console.warn('[Settings] Failed to persist settings:', e.message);
+  }
   console.log(`[Settings] Max concurrent streams updated to ${value}`);
   res.json({ maxConcurrentStreams: value });
 });

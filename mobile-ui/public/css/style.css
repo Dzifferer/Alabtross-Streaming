@@ -654,6 +654,55 @@ html, body {
   background: rgba(255, 107, 107, 0.1);
 }
 
+.source-item--disabled {
+  opacity: 0.45;
+}
+
+.livetv-source-toggle {
+  position: relative;
+  display: inline-block;
+  width: 36px;
+  height: 20px;
+  flex-shrink: 0;
+  margin-right: 4px;
+}
+
+.livetv-source-toggle-input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  position: absolute;
+}
+
+.livetv-source-toggle-slider {
+  position: absolute;
+  cursor: pointer;
+  inset: 0;
+  background: var(--surface, #333);
+  border-radius: 20px;
+  transition: background 0.2s;
+}
+
+.livetv-source-toggle-slider::before {
+  content: '';
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  left: 3px;
+  bottom: 3px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.2s;
+}
+
+.livetv-source-toggle-input:checked + .livetv-source-toggle-slider {
+  background: var(--accent, #4a9eff);
+}
+
+.livetv-source-toggle-input:checked + .livetv-source-toggle-slider::before {
+  transform: translateX(16px);
+}
+
 /* ===== Grid View (Search, Browse) ===== */
 .grid-view {
   display: grid;

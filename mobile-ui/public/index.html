@@ -182,43 +182,44 @@
             </div>
 
             <div class="setting-group">
-              <label>Live TV Sources</label>
-              <div id="livetv-source-list" class="source-list">
-                <p class="setting-hint">No live TV sources configured</p>
-              </div>
-            </div>
-
-            <div class="setting-group">
-              <label>Add M3U Playlist</label>
-              <div class="setting-row">
-                <input type="text" id="setting-iptv-url" placeholder="M3U playlist URL...">
-                <button id="setting-iptv-save" class="btn-sm">Add</button>
-              </div>
-              <span id="iptv-status" class="setting-hint">Paste an M3U/M3U8 playlist URL for live TV channels</span>
-            </div>
-
-            <div class="setting-group">
-              <label>Add Stremio TV Addon</label>
-              <div class="setting-row">
-                <input type="text" id="setting-livetv-addon-url" placeholder="Addon URL (e.g. https://usatv.click)...">
-                <button id="setting-livetv-addon-add" class="btn-sm">Add</button>
-              </div>
-              <span id="livetv-addon-status" class="setting-hint">Add a Stremio addon that provides live TV channels</span>
-            </div>
-
-            <div class="setting-group">
-              <label>Quick Add TV Sources</label>
-              <button class="btn-block livetv-quick-add" data-url="https://848b3516657c-usatv.baby-beamup.club" data-name="USA TV">Add USA TV (180+ US Channels)</button>
-              <button class="btn-block livetv-quick-add" data-url="https://7a82163c306e-livetv.baby-beamup.club" data-name="Live TV">Add Live TV (International)</button>
-              <button class="btn-block livetv-quick-add" data-url="https://stremio-iptv-org.vercel.app" data-name="IPTV-org">Add IPTV-org (8000+ Worldwide)</button>
-              <span class="setting-hint">Popular Stremio addons for live TV streams — sports, news, entertainment</span>
-            </div>
-
-            <div class="setting-group">
               <label>Metadata Provider</label>
               <button id="custom-add-cinemeta" class="btn-block">Add Cinemeta (Metadata)</button>
               <span class="setting-hint">Cinemeta provides movie/series info, posters, and search. Required for browsing.</span>
             </div>
+          </div>
+
+          <!-- Live TV Settings (visible in both modes) -->
+          <div class="setting-group">
+            <label>Live TV Sources</label>
+            <div id="livetv-source-list" class="source-list">
+              <p class="setting-hint">No live TV sources configured</p>
+            </div>
+          </div>
+
+          <div class="setting-group">
+            <label>Add M3U Playlist</label>
+            <div class="setting-row">
+              <input type="text" id="setting-iptv-url" placeholder="M3U playlist URL...">
+              <button id="setting-iptv-save" class="btn-sm">Add</button>
+            </div>
+            <span id="iptv-status" class="setting-hint">Paste an M3U/M3U8 playlist URL for live TV channels</span>
+          </div>
+
+          <div class="setting-group">
+            <label>Add Stremio TV Addon</label>
+            <div class="setting-row">
+              <input type="text" id="setting-livetv-addon-url" placeholder="Addon URL (e.g. https://usatv.click)...">
+              <button id="setting-livetv-addon-add" class="btn-sm">Add</button>
+            </div>
+            <span id="livetv-addon-status" class="setting-hint">Add a Stremio addon that provides live TV channels</span>
+          </div>
+
+          <div class="setting-group">
+            <label>Quick Add TV Sources</label>
+            <button class="btn-block livetv-quick-add" data-url="https://848b3516657c-usatv.baby-beamup.club" data-name="USA TV">Add USA TV (180+ US Channels)</button>
+            <button class="btn-block livetv-quick-add" data-url="https://7a82163c306e-livetv.baby-beamup.club" data-name="Live TV">Add Live TV (International)</button>
+            <button class="btn-block livetv-quick-add" data-url="https://stremio-iptv-org.vercel.app" data-name="IPTV-org">Add IPTV-org (8000+ Worldwide)</button>
+            <span class="setting-hint">Popular Stremio addons for live TV streams — sports, news, entertainment</span>
           </div>
 
           <div class="setting-group">

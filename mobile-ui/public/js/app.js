@@ -347,20 +347,36 @@
           }
         } else {
           const sources = api.getLiveTVSources();
+          const tvRow = document.createElement('div');
+          tvRow.className = 'catalog-row fade-in';
           if (sources.length > 0) {
-            const tvRow = document.createElement('div');
-            tvRow.className = 'catalog-row fade-in';
             tvRow.innerHTML = `
               <div class="catalog-row-header">
                 <h3 class="catalog-row-title">Live TV</h3>
                 <span class="catalog-row-badge">LIVE</span>
               </div>
               <div style="padding:16px;color:var(--text-muted);font-size:13px;">
-                Unable to load channels — sources may be offline. Check Live TV settings.
+                Unable to load channels — sources may be offline.
+                <br><a href="#" class="livetv-goto-settings" style="color:var(--accent);text-decoration:underline;">Go to Settings</a>
               </div>
             `;
-            dom.homeCatalogs.appendChild(tvRow);
+          } else {
+            tvRow.innerHTML = `
+              <div class="catalog-row-header">
+                <h3 class="catalog-row-title">Live TV</h3>
+                <span class="catalog-row-badge">LIVE</span>
+              </div>
+              <div style="padding:16px;color:var(--text-muted);font-size:13px;">
+                No live TV sources configured.
+                <br><a href="#" class="livetv-goto-settings" style="color:var(--accent);text-decoration:underline;">Add sources in Settings</a>
+              </div>
+            `;
           }
+          dom.homeCatalogs.appendChild(tvRow);
+          tvRow.querySelector('.livetv-goto-settings')?.addEventListener('click', (e) => {
+            e.preventDefault();
+            navigateTo('settings');
+          });
         }
       } catch (e) {
         console.warn('[LiveTV] Error loading channels for homepage:', e);
@@ -443,20 +459,36 @@
         }
       } else {
         const sources = api.getLiveTVSources();
+        const tvRow = document.createElement('div');
+        tvRow.className = 'catalog-row fade-in';
         if (sources.length > 0) {
-          const tvRow = document.createElement('div');
-          tvRow.className = 'catalog-row fade-in';
           tvRow.innerHTML = `
             <div class="catalog-row-header">
               <h3 class="catalog-row-title">Live TV</h3>
               <span class="catalog-row-badge">LIVE</span>
             </div>
             <div style="padding:16px;color:var(--text-muted);font-size:13px;">
-              Unable to load channels — sources may be offline. Check Live TV settings.
+              Unable to load channels — sources may be offline.
+              <br><a href="#" class="livetv-goto-settings" style="color:var(--accent);text-decoration:underline;">Go to Settings</a>
             </div>
           `;
-          dom.homeCatalogs.appendChild(tvRow);
+        } else {
+          tvRow.innerHTML = `
+            <div class="catalog-row-header">
+              <h3 class="catalog-row-title">Live TV</h3>
+              <span class="catalog-row-badge">LIVE</span>
+            </div>
+            <div style="padding:16px;color:var(--text-muted);font-size:13px;">
+              No live TV sources configured.
+              <br><a href="#" class="livetv-goto-settings" style="color:var(--accent);text-decoration:underline;">Add sources in Settings</a>
+            </div>
+          `;
         }
+        dom.homeCatalogs.appendChild(tvRow);
+        tvRow.querySelector('.livetv-goto-settings')?.addEventListener('click', (e) => {
+          e.preventDefault();
+          navigateTo('settings');
+        });
       }
     } catch (e) {
       console.warn('[LiveTV] Error loading channels for homepage:', e);
@@ -2145,7 +2177,7 @@
         dom.liveTvAddonStatus.textContent = 'Checking addon...';
         dom.liveTvAddonStatus.className = 'setting-hint';
         try {
-          const resp = await fetch(url + '/manifest.json', { signal: AbortSignal.timeout(10000) });
+          const resp = await fetch('/api/addon-proxy?url=' + encodeURIComponent(url + '/manifest.json'), { signal: AbortSignal.timeout(10000) });
           if (!resp.ok) throw new Error('HTTP ' + resp.status);
           const manifest = await resp.json();
           const hasTv = manifest.catalogs && manifest.catalogs.some(c => c.type === 'tv');
@@ -2254,13 +2286,18 @@
     container.innerHTML = sources.map(s => {
       const icon = s.type === 'playlist' ? 'M3U' : 'TV';
       const typeLabel = s.type === 'playlist' ? 'M3U Playlist' : 'Stremio TV Addon';
+      const enabled = s.enabled !== false;
       return `
-        <div class="source-item">
+        <div class="source-item${enabled ? '' : ' source-item--disabled'}">
           <div class="source-icon">${icon}</div>
           <div class="source-info">
             <div class="source-name">${escapeHTML(s.name || s.url)}</div>
             <div class="source-desc">${typeLabel}</div>
           </div>
+          <label class="livetv-source-toggle" title="${enabled ? 'Disable' : 'Enable'}">
+            <input type="checkbox" class="livetv-source-toggle-input" data-url="${escapeHTML(s.url)}" ${enabled ? 'checked' : ''}>
+            <span class="livetv-source-toggle-slider"></span>
+          </label>
           <button class="livetv-source-remove" data-url="${escapeHTML(s.url)}" title="Remove">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M18 6L6 18M6 6l12 12"/>
@@ -2269,6 +2306,14 @@
         </div>
       `;
     }).join('');
+
+    container.querySelectorAll('.livetv-source-toggle-input').forEach(toggle => {
+      toggle.addEventListener('change', () => {
+        api.toggleLiveTVSource(toggle.dataset.url, toggle.checked);
+        renderLiveTVSources();
+        showToast(toggle.checked ? 'Source enabled' : 'Source disabled');
+      });
+    });
 
     container.querySelectorAll('.livetv-source-remove').forEach(btn => {
       btn.addEventListener('click', () => {

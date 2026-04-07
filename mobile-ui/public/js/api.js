@@ -441,8 +441,11 @@ class StremioAPI {
         // Penalise very large files (slow to buffer)
         const sizeVal = parseFloat(s.size);
         const sizePenalty = (sizeVal > 5 && /GB/i.test(s.size || '')) ? -1 : 0;
+        // Strong bias for 1080p MP4 — ideal for browser playback
+        const is1080pMp4 = (q === 3) && (s.format === 'MP4');
+        const biasBonus = is1080pMp4 ? 5 : 0;
         const qualityKey = qMatch ? qMatch[1].toUpperCase() : 'unknown';
-        return { ...s, _score: q + f + seedScore + sizePenalty, _qualityKey: qualityKey };
+        return { ...s, _score: q + f + seedScore + sizePenalty + biasBonus, _qualityKey: qualityKey };
       })
       .sort((a, b) => b._score - a._score);
 
@@ -463,8 +466,8 @@ class StremioAPI {
     }
 
     const result = [...merged.values()].slice(0, 6);
-    // Clean up internal scoring fields
-    return result.map(({ _score, _qualityKey, ...rest }) => rest);
+    // Clean up internal scoring fields (keep _score for race heuristic)
+    return result.map(({ _qualityKey, ...rest }) => rest);
   }
 
   async _fetchBackendStreams(url) {
@@ -629,6 +632,71 @@ class StremioAPI {
     await Promise.all(workers);
     results.sort((a, b) => a.responseTime - b.responseTime);
     return results;
+  }
+
+  /**
+   * Race the top 3 streams with real HTTP probes to find a clear winner.
+   * Returns { winner, results, allStreams } where winner is null if no clear winner.
+   */
+  async raceTopStreams(streams, timeoutMs = 4000) {
+    const top3 = streams.slice(0, 3);
+    if (top3.length === 0) return { winner: null, results: [], allStreams: streams };
+
+    if (this._speedTestController) this._speedTestController.abort();
+    this._speedTestController = new AbortController();
+    const parentSignal = this._speedTestController.signal;
+
+    const raceResults = await Promise.allSettled(
+      top3.map(async (stream) => {
+        const url = this.getPlaybackUrl(stream);
+        if (!url) throw new Error('no url');
+
+        const start = performance.now();
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        parentSignal.addEventListener('abort', () => controller.abort(), { once: true });
+
+        try {
+          const resp = await fetch(url, {
+            method: 'GET',
+            headers: { 'Range': 'bytes=0-0' },
+            signal: controller.signal,
+          });
+          clearTimeout(timer);
+          // Read first byte then cancel to avoid keeping the connection
+          if (resp.body) {
+            const reader = resp.body.getReader();
+            await reader.read();
+            reader.cancel();
+          }
+          return { stream, responseTime: performance.now() - start };
+        } catch (e) {
+          clearTimeout(timer);
+          throw e;
+        }
+      })
+    );
+
+    const successful = raceResults
+      .filter(r => r.status === 'fulfilled')
+      .map(r => r.value)
+      .sort((a, b) => a.responseTime - b.responseTime);
+
+    if (successful.length === 0) return { winner: null, results: [], allStreams: streams };
+
+    const fastest = successful[0];
+    const second = successful[1];
+
+    // Clear winner: responded within 3s AND at least 40% faster than runner-up (or only responder)
+    const isClearWinner =
+      fastest.responseTime <= 3000 &&
+      (!second || fastest.responseTime <= second.responseTime * 0.6);
+
+    return {
+      winner: isClearWinner ? fastest.stream : null,
+      results: successful,
+      allStreams: streams,
+    };
   }
 
   async getStreamsRanked(type, id, onProgress, seasonEpisode) {

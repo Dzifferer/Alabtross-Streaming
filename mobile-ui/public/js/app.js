@@ -2994,8 +2994,12 @@
 
         const latency = r.ms ? `${r.ms}ms` : '';
         const httpLatency = httpInfo?.ms ? `${httpInfo.ms}ms` : '';
-        const configNote = key === 'torrentio' && results._torrentioConfig
-          ? ` (config: ${escapeHTML(results._torrentioConfig)})` : '';
+        let configNote = '';
+        if (key === 'torrentio' && results._torrentioMirror) {
+          configNote = ` (via ${escapeHTML(results._torrentioMirror.replace('https://', ''))})`;
+        } else if (key === 'eztv' && results._eztvMirror) {
+          configNote = ` (via ${escapeHTML(results._eztvMirror)})`;
+        }
 
         // HTTP connectivity sub-detail
         let httpDetail = '';

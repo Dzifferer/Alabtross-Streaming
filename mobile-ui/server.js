@@ -117,6 +117,23 @@ function tmdbFetch(endpoint, params = {}) {
   });
 }
 
+// Compute how relevant a title is to the search query (0.0 - 1.0)
+function relevanceScore(title, query) {
+  const t = title.toLowerCase();
+  const q = query.toLowerCase();
+  if (t === q) return 1.0;
+  let score = 0;
+  if (t.startsWith(q)) score = 0.75;
+  else if (t.includes(q)) score = 0.5;
+  const coverage = Math.min(q.length / t.length, 1.0);
+  score += coverage * 0.25;
+  const qWords = q.split(/\s+/);
+  const tWords = t.split(/\s+/);
+  const matched = qWords.filter(w => tWords.includes(w)).length;
+  score += (matched / tWords.length) * 0.15;
+  return Math.min(score, 1.0);
+}
+
 // GET /api/search?q=query&type=movie|series
 app.get('/api/search', rateLimit, async (req, res) => {
   const query = (req.query.q || '').trim();
@@ -162,8 +179,12 @@ app.get('/api/search', rateLimit, async (req, res) => {
       }
     }
 
-    // Sort by popularity descending
-    results.sort((a, b) => b.popularity - a.popularity);
+    // Sort by relevance to query, then popularity as tiebreaker
+    results.sort((a, b) => {
+      const relDiff = relevanceScore(b.name, query) - relevanceScore(a.name, query);
+      if (relDiff !== 0) return relDiff;
+      return b.popularity - a.popularity;
+    });
 
     // Fetch IMDB IDs for top results (concurrency-limited to avoid TMDB rate limits)
     const topResults = results.slice(0, 20);
@@ -183,11 +204,13 @@ app.get('/api/search', rateLimit, async (req, res) => {
       }));
     }
 
-    // Sort: results with IMDB IDs first (fully streamable), then by popularity
+    // Sort: IMDB availability first, then relevance, then popularity
     topResults.sort((a, b) => {
       const aHas = a.imdb_id ? 1 : 0;
       const bHas = b.imdb_id ? 1 : 0;
       if (aHas !== bHas) return bHas - aHas;
+      const relDiff = relevanceScore(b.name, query) - relevanceScore(a.name, query);
+      if (relDiff !== 0) return relDiff;
       return b.popularity - a.popularity;
     });
 

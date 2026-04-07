@@ -159,11 +159,6 @@
   box-shadow: 0 0 0 3px rgba(26, 92, 56, 0.12);
 }
 
-/* Mode toggle slider */
-.theme-custom .mode-slider {
-  background: #1a5c38;
-}
-
 /* Source icons */
 .theme-custom .source-icon {
   color: #5a9e70;
@@ -1357,47 +1352,7 @@ html, body {
   background: var(--bg-elevated);
 }
 
-/* ===== Mode Toggle ===== */
-.mode-toggle {
-  display: flex;
-  position: relative;
-  background: var(--bg-input);
-  border: 1px solid rgba(255,255,255,0.08);
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-}
-
-.mode-btn {
-  flex: 1;
-  padding: 12px 16px;
-  border: none;
-  background: none;
-  color: var(--text-muted);
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  position: relative;
-  z-index: 2;
-  transition: color 0.3s;
-}
-
-.mode-btn.active {
-  color: white;
-}
-
-.mode-slider {
-  position: absolute;
-  top: 3px;
-  left: 3px;
-  width: calc(50% - 3px);
-  height: calc(100% - 6px);
-  background: var(--accent);
-  border-radius: 6px;
-  transition: transform 0.3s ease;
-  z-index: 1;
-}
-
-/* ===== Source List (Custom Mode) ===== */
+/* ===== Source List ===== */
 .source-list {
   display: flex;
   flex-direction: column;

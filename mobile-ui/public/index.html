@@ -90,17 +90,6 @@
         <div class="settings-panel">
           <h2>Settings</h2>
 
-          <!-- Mode Selector -->
-          <div class="setting-group">
-            <label>Streaming Mode</label>
-            <div class="mode-toggle" id="mode-toggle">
-              <button class="mode-btn" data-mode="stremio">Stremio</button>
-              <button class="mode-btn active" data-mode="custom">Custom</button>
-              <div class="mode-slider"></div>
-            </div>
-            <span id="mode-hint" class="setting-hint">Uses YTS, EZTV, 1337x directly — no Stremio needed</span>
-          </div>
-
           <!-- Concurrent Streams -->
           <div class="setting-group">
             <label>Max Concurrent Streams</label>
@@ -111,81 +100,64 @@
             <span id="max-streams-status" class="setting-hint">Max simultaneous torrent streams and downloads (1–20)</span>
           </div>
 
-          <!-- Stremio Mode Settings -->
-          <div id="stremio-settings" class="hidden">
-            <div class="setting-group">
-              <label>Stremio Server</label>
-              <div class="setting-row">
-                <input type="text" id="setting-server" placeholder="http://192.168.1.x:11470">
-                <button id="setting-server-test" class="btn-sm">Test</button>
+          <!-- Stream Sources -->
+          <div class="setting-group">
+            <label>Stream Sources (Scrapers)</label>
+            <div class="source-list">
+              <div class="source-item">
+                <div class="source-icon">P</div>
+                <div class="source-info">
+                  <div class="source-name">The Pirate Bay</div>
+                  <div class="source-desc">Primary — fast JSON API, movies &amp; series</div>
+                </div>
+                <span class="source-badge active">Active</span>
               </div>
-              <span id="server-status" class="setting-hint">Not tested</span>
+              <div class="source-item">
+                <div class="source-icon">Y</div>
+                <div class="source-info">
+                  <div class="source-name">YTS</div>
+                  <div class="source-desc">Movies — high quality, small files</div>
+                </div>
+                <span class="source-badge active">Active</span>
+              </div>
+              <div class="source-item">
+                <div class="source-icon">E</div>
+                <div class="source-info">
+                  <div class="source-name">EZTV</div>
+                  <div class="source-desc">TV series — episode-level results</div>
+                </div>
+                <span class="source-badge active">Active</span>
+              </div>
+              <div class="source-item">
+                <div class="source-icon">1</div>
+                <div class="source-info">
+                  <div class="source-name">1337x</div>
+                  <div class="source-desc">General fallback — movies &amp; series</div>
+                </div>
+                <span class="source-badge active">Active</span>
+              </div>
             </div>
+            <span class="setting-hint">Streams are fetched directly from torrent sources</span>
+          </div>
 
-            <div class="setting-group">
-              <label>Addons</label>
-              <div id="addon-list" class="addon-list">
-                <p class="setting-hint">Configure your Stremio addons below</p>
-              </div>
-              <div class="setting-row">
-                <input type="text" id="addon-url-input" placeholder="Addon manifest URL...">
-                <button id="addon-add-btn" class="btn-sm">Add</button>
-              </div>
+          <!-- Stremio Addons -->
+          <div class="setting-group">
+            <label>Stremio Addons</label>
+            <span class="setting-hint" style="margin-bottom:8px;display:block">Addon streams are shown alongside scraped results</span>
+            <div id="addon-list" class="addon-list">
+              <p class="setting-hint">No addons configured</p>
             </div>
-
-            <div class="setting-group">
-              <label>Default Addons</label>
-              <button id="addon-add-cinemeta" class="btn-block">Add Cinemeta (Metadata)</button>
-              <button id="addon-add-torrentio" class="btn-block">Add Torrentio (Streams)</button>
+            <div class="setting-row">
+              <input type="text" id="addon-url-input" placeholder="Addon manifest URL...">
+              <button id="addon-add-btn" class="btn-sm">Add</button>
             </div>
           </div>
 
-          <!-- Custom Mode Settings -->
-          <div id="custom-settings">
-            <div class="setting-group">
-              <label>Stream Sources</label>
-              <div class="source-list">
-                <div class="source-item">
-                  <div class="source-icon">P</div>
-                  <div class="source-info">
-                    <div class="source-name">The Pirate Bay</div>
-                    <div class="source-desc">Primary — fast JSON API, movies &amp; series</div>
-                  </div>
-                  <span class="source-badge active">Active</span>
-                </div>
-                <div class="source-item">
-                  <div class="source-icon">Y</div>
-                  <div class="source-info">
-                    <div class="source-name">YTS</div>
-                    <div class="source-desc">Movies — high quality, small files</div>
-                  </div>
-                  <span class="source-badge active">Active</span>
-                </div>
-                <div class="source-item">
-                  <div class="source-icon">E</div>
-                  <div class="source-info">
-                    <div class="source-name">EZTV</div>
-                    <div class="source-desc">TV series — episode-level results</div>
-                  </div>
-                  <span class="source-badge active">Active</span>
-                </div>
-                <div class="source-item">
-                  <div class="source-icon">1</div>
-                  <div class="source-info">
-                    <div class="source-name">1337x</div>
-                    <div class="source-desc">General fallback — movies &amp; series</div>
-                  </div>
-                  <span class="source-badge active">Active</span>
-                </div>
-              </div>
-              <span class="setting-hint">Streams are fetched directly — no Stremio or Torrentio needed</span>
-            </div>
-
-            <div class="setting-group">
-              <label>Metadata Provider</label>
-              <button id="custom-add-cinemeta" class="btn-block">Add Cinemeta (Metadata)</button>
-              <span class="setting-hint">Cinemeta provides movie/series info, posters, and search. Required for browsing.</span>
-            </div>
+          <div class="setting-group">
+            <label>Quick Add</label>
+            <button id="addon-add-cinemeta" class="btn-block">Add Cinemeta (Metadata)</button>
+            <button id="addon-add-torrentio" class="btn-block">Add Torrentio (Streams)</button>
+            <span class="setting-hint">Cinemeta provides movie/series info, posters, and search. Required for browsing.</span>
           </div>
 
           <!-- Live TV Settings (visible in both modes) -->

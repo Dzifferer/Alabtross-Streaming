@@ -5,7 +5,7 @@ const http = require('http');
 const https = require('https');
 const { URL } = require('url');
 const dns = require('dns');
-const { createProxyMiddleware } = require('http-proxy-middleware');
+// http-proxy-middleware removed — Stremio server proxy no longer needed
 const { getMovieStreams, getSeriesStreams, diagnoseProviders } = require('./lib/stream-providers');
 const TorrentEngine = require('./lib/torrent-engine');
 const LibraryManager = require('./lib/library-manager');
@@ -14,7 +14,6 @@ const castManager = require('./lib/cast-manager');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
-const STREMIO_SERVER = process.env.STREMIO_SERVER || 'http://localhost:11470';
 const TORRENT_CACHE_PATH = process.env.TORRENT_CACHE || path.join(__dirname, '.torrent-cache');
 const LIBRARY_PATH = process.env.LIBRARY_PATH || path.join(TORRENT_CACHE_PATH, 'library');
 const SETTINGS_PATH = path.join(TORRENT_CACHE_PATH, 'settings.json');
@@ -92,20 +91,6 @@ app.use((req, res, next) => {
   ].join('; '));
   next();
 });
-
-// ─── Stremio Proxy (for Stremio mode) ─────────────────────────────────
-const ALLOWED_PROXY_PREFIXES = ['/stats.json', '/hlsv2/'];
-app.use('/stremio-api', (req, res, next) => {
-  const proxyPath = req.path || '/';
-  if (!ALLOWED_PROXY_PREFIXES.some(p => proxyPath.startsWith(p))) {
-    return res.status(403).json({ error: 'Path not allowed through proxy' });
-  }
-  next();
-}, createProxyMiddleware({
-  target: STREMIO_SERVER,
-  changeOrigin: true,
-  pathRewrite: { '^/stremio-api': '' },
-}));
 
 // ─── TMDB Search API ─────────────────────────────────────────────────
 
@@ -996,8 +981,7 @@ app.get('*', (req, res) => {
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Alabtross Mobile UI running on http://0.0.0.0:${PORT}`);
-  console.log(`Stremio proxy target: ${STREMIO_SERVER}`);
-  console.log(`Custom mode available at /api/streams/* and /api/play/*`);
+  console.log(`Stream endpoints: /api/streams/* and /api/play/*`);
 });
 
 // Graceful shutdown with timeout to ensure metadata is saved even if engines hang

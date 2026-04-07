@@ -74,19 +74,11 @@
     libraryContent: $('#library-content'),
     libraryEmpty: $('#library-empty'),
     // Settings
-    modeToggle: $('#mode-toggle'),
-    modeHint: $('#mode-hint'),
-    stremioSettings: $('#stremio-settings'),
-    customSettings: $('#custom-settings'),
-    settingServer: $('#setting-server'),
-    settingServerTest: $('#setting-server-test'),
-    serverStatus: $('#server-status'),
     addonList: $('#addon-list'),
     addonUrlInput: $('#addon-url-input'),
     addonAddBtn: $('#addon-add-btn'),
     addonAddCinemeta: $('#addon-add-cinemeta'),
     addonAddTorrentio: $('#addon-add-torrentio'),
-    customAddCinemeta: $('#custom-add-cinemeta'),
     // IPTV / Live TV
     iptvUrlInput: $('#setting-iptv-url'),
     iptvSaveBtn: $('#setting-iptv-save'),
@@ -292,8 +284,8 @@
     dom.homeCatalogs.innerHTML = '';
     dom.homeLoading.classList.remove('hidden');
 
-    // Custom mode: simple 3-row layout
-    if (api.getMode() === 'custom' && !type) {
+    // Simple layout: Recently Played, Movies, Shows, Live TV
+    if (!type) {
       await loadHomeCustom();
       return;
     }
@@ -886,10 +878,8 @@
       <div class="loading-state"><div class="spinner"></div><p>Loading details...</p></div>
     `;
 
-    // For movies in custom mode, start fetching streams in parallel with metadata
-    const streamsPromise = (type === 'movie' && api.getMode() === 'custom')
-      ? api.getStreams(type, id)
-      : null;
+    // For movies, start fetching streams in parallel with metadata
+    const streamsPromise = type === 'movie' ? api.getStreams(type, id) : null;
 
     const meta = await api.getMeta(type, id);
     if (!meta) {
@@ -939,8 +929,8 @@
       `;
     }
 
-    // Add to Library button (only for custom mode where we have torrent data)
-    if (api.getMode() === 'custom') {
+    // Add to Library button (torrent data available for download)
+    {
       html += `
         <div id="library-add-section" class="library-add-section" style="margin-top:20px">
           <h3 class="detail-section-title">Download</h3>
@@ -1058,37 +1048,25 @@
     const container = document.getElementById('stream-container');
     if (!container) return;
 
-    // First, check VPN status (Stremio mode only)
-    if (api.getMode() === 'stremio' && !state.vpnVerified) {
-      const vpn = await checkVPNStatus();
-      if (!vpn.connected) {
-        showVPNWarning();
-      }
-    }
-
     // Use pre-fetched streams if available (from parallel fetch in openDetail)
     const streams = prefetchedStreamsPromise
       ? await prefetchedStreamsPromise
       : await api.getStreams(type, id, seasonEpisode);
 
     if (streams.length === 0) {
-      const isCustom = api.getMode() === 'custom';
-      const hint = isCustom
-        ? 'All providers returned empty — this usually means a network issue on the server'
-        : 'Try adding more stream addons in Settings';
       container.innerHTML = `
         <div class="empty-state" style="padding:32px 0">
           <p>No streams found</p>
-          <p style="font-size:12px;color:var(--text-muted)">${hint}</p>
-          ${isCustom ? `<button id="diagnose-btn" style="
+          <p style="font-size:12px;color:var(--text-muted)">All providers returned empty — this usually means a network issue on the server</p>
+          <button id="diagnose-btn" style="
             margin-top:12px; padding:8px 16px; border:1px solid var(--text-muted);
             border-radius:var(--radius-sm); background:transparent; color:var(--text);
             font-size:13px; cursor:pointer;
           ">Run Provider Diagnostics</button>
-          <div id="diagnose-results" style="margin-top:12px;font-size:12px;text-align:left;display:none"></div>` : ''}
+          <div id="diagnose-results" style="margin-top:12px;font-size:12px;text-align:left;display:none"></div>
         </div>
       `;
-      if (isCustom) {
+      {
         const diagBtn = document.getElementById('diagnose-btn');
         if (diagBtn) {
           diagBtn.addEventListener('click', async () => {
@@ -1136,8 +1114,7 @@
     }
 
     // Show streams with a "testing" state
-    const isCustom = api.getMode() === 'custom';
-    const statusLabel = isCustom ? 'Ranking by seeds...' : 'Testing stream speeds...';
+    const statusLabel = 'Ranking streams...';
     container.innerHTML = `
       <div class="stream-speed-status" style="
         text-align:center; padding:12px; margin-bottom:8px;
@@ -1172,20 +1149,13 @@
     if (statusEl) {
       const fastest = ranked.find(r => r.responseTime < Infinity);
       if (fastest) {
-        if (isCustom) {
-          const seeds = fastest.stream.seeds || 0;
-          statusEl.innerHTML = `
-            <span style="color:var(--success)">&#9889;</span>
-            Best stream: <strong>${seeds} seeds</strong>
-            <span style="color:var(--success)"> &mdash; ${fastest.stream.source || 'Custom'}</span>
-          `;
-        } else {
-          statusEl.innerHTML = `
-            <span style="color:var(--success)">&#9889;</span>
-            Best stream: <strong>${Math.round(fastest.responseTime)}ms</strong> response time
-            <span style="color:var(--success)"> &mdash; Auto-selected</span>
-          `;
-        }
+        const seeds = fastest.stream.seeds || 0;
+        const sourceLabel = fastest.stream.source || fastest.stream.addonName || 'Scraped';
+        statusEl.innerHTML = `
+          <span style="color:var(--success)">&#9889;</span>
+          Best stream: <strong>${seeds} seeds</strong>
+          <span style="color:var(--success)"> &mdash; ${sourceLabel}</span>
+        `;
       } else {
         statusEl.innerHTML = `
           <span style="color:var(--warning)">&#9888;</span>
@@ -1217,8 +1187,7 @@
     const addon = stream.addonName ? escapeHTML(stream.addonName) : '';
 
     let speedBadge = '';
-    if (stream._customMode && status === 'done') {
-      // Custom mode: show seed count
+    if (status === 'done') {
       const seeds = stream.seeds || 0;
       let color = 'var(--success)';
       let bg = 'rgba(0, 206, 201, 0.15)';
@@ -1227,13 +1196,6 @@
       speedBadge = `<span class="stream-quality" style="background:${bg};color:${color}">${seeds} seeds</span>`;
     } else if (status === 'testing') {
       speedBadge = '<span class="stream-quality" style="background:rgba(255,255,255,0.05);color:var(--text-muted)">Testing...</span>';
-    } else if (responseTime < Infinity) {
-      const ms = Math.round(responseTime);
-      let color = 'var(--success)';
-      let bg = 'rgba(0, 206, 201, 0.15)';
-      if (ms > 3000) { color = 'var(--danger)'; bg = 'rgba(255, 107, 107, 0.15)'; }
-      else if (ms > 1000) { color = 'var(--warning)'; bg = 'rgba(253, 203, 110, 0.15)'; }
-      speedBadge = `<span class="stream-quality" style="background:${bg};color:${color}">${ms}ms</span>`;
     } else {
       speedBadge = '<span class="stream-quality" style="background:rgba(255,107,107,0.1);color:var(--danger)">Timeout</span>';
     }
@@ -1243,9 +1205,9 @@
     const qualityMatch = title.match(/\b(4K|2160p|1080p|720p|480p|HDR|HEVC|H\.265|H\.264)\b/i);
     if (qualityMatch) quality = qualityMatch[1].toUpperCase();
 
-    // Format badge for custom mode
+    // Format badge
     let formatBadge = '';
-    if (stream._customMode && stream.format) {
+    if (stream.format) {
       const playable = stream.browserPlayable;
       const remuxable = stream.needsRemux || stream.remuxPlayable;
       const fColor = playable ? 'var(--success)' : (remuxable ? 'var(--accent)' : 'var(--warning)');
@@ -1260,7 +1222,7 @@
     }
 
     return `
-      <div class="stream-item${stream._customMode && !stream.browserPlayable && !stream.remuxPlayable ? ' stream-non-playable' : ''}" data-index="${index}" id="stream-${index}">
+      <div class="stream-item${stream.format && !stream.browserPlayable && !stream.remuxPlayable ? ' stream-non-playable' : ''}" data-index="${index}" id="stream-${index}">
         <div class="stream-icon">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polygon points="5 3 19 12 5 21 5 3"/>
@@ -1281,30 +1243,14 @@
     const badge = item.querySelector('.stream-quality');
     if (!badge || badge.textContent !== 'Testing...') return;
 
-    if (result.stream._customMode) {
-      // Custom mode: show seed count instead of fake ms
-      const seeds = result.stream.seeds || 0;
-      let color = 'var(--success)';
-      let bg = 'rgba(0, 206, 201, 0.15)';
-      if (seeds < 5) { color = 'var(--danger)'; bg = 'rgba(255, 107, 107, 0.15)'; }
-      else if (seeds < 20) { color = 'var(--warning)'; bg = 'rgba(253, 203, 110, 0.15)'; }
-      badge.style.background = bg;
-      badge.style.color = color;
-      badge.textContent = seeds + ' seeds';
-    } else if (result.responseTime < Infinity) {
-      const ms = Math.round(result.responseTime);
-      let color = 'var(--success)';
-      let bg = 'rgba(0, 206, 201, 0.15)';
-      if (ms > 3000) { color = 'var(--danger)'; bg = 'rgba(255, 107, 107, 0.15)'; }
-      else if (ms > 1000) { color = 'var(--warning)'; bg = 'rgba(253, 203, 110, 0.15)'; }
-      badge.style.background = bg;
-      badge.style.color = color;
-      badge.textContent = ms + 'ms';
-    } else {
-      badge.style.background = 'rgba(255,107,107,0.1)';
-      badge.style.color = 'var(--danger)';
-      badge.textContent = 'Timeout';
-    }
+    const seeds = result.stream.seeds || 0;
+    let color = 'var(--success)';
+    let bg = 'rgba(0, 206, 201, 0.15)';
+    if (seeds < 5) { color = 'var(--danger)'; bg = 'rgba(255, 107, 107, 0.15)'; }
+    else if (seeds < 20) { color = 'var(--warning)'; bg = 'rgba(253, 203, 110, 0.15)'; }
+    badge.style.background = bg;
+    badge.style.color = color;
+    badge.textContent = seeds + ' seeds';
   }
 
   // ─── Preload Manager ───────────────────────────────────────────────
@@ -1323,7 +1269,7 @@
     }
 
     async function warmStream(stream) {
-      if (!stream || !stream.infoHash || !stream._customMode) return;
+      if (!stream || !stream.infoHash) return;
       if (_preloadedHash === stream.infoHash) return; // already warming
 
       cancel();
@@ -1457,20 +1403,20 @@
     const title = state.currentMeta?.name || '';
     const statusLabel = alreadyWarmed
       ? 'Starting playback...'
-      : (stream._customMode ? 'Connecting to torrent peers...' : 'Loading stream...');
+      : (stream.infoHash ? 'Connecting to torrent peers...' : 'Loading stream...');
     dom.playerOverlay.innerHTML = `
       ${poster ? `<img class="loading-poster" src="${poster}" alt="">` : ''}
       <div class="loading-info">
         ${title ? `<div class="loading-title">${escapeHTML(title)}</div>` : ''}
         <div class="loading-bar-container"><div class="loading-bar"></div></div>
         <div class="loading-status">${statusLabel}</div>
-        ${stream._customMode && !alreadyWarmed ? '<div class="loading-sub">This may take 30-60 seconds</div>' : ''}
+        ${stream.infoHash && !alreadyWarmed ? '<div class="loading-sub">This may take 30-60 seconds</div>' : ''}
       </div>
     `;
 
-    // Poll torrent status for custom mode streams
+    // Poll torrent status for torrent streams
     let statusInterval = null;
-    if (stream._customMode && stream.infoHash) {
+    if (stream.infoHash) {
       statusInterval = setInterval(async () => {
         try {
           const res = await fetch(`/api/torrent-status/${stream.infoHash}`);
@@ -2068,39 +2014,6 @@
   // ─── Settings ────────────────────────────────────
 
   function initSettings() {
-    // ─── Mode Toggle ────────────────────────────────
-    const modeHints = {
-      stremio: 'Uses Stremio server + addons for streams',
-      custom: 'Uses YTS, EZTV, 1337x directly — no Stremio needed',
-    };
-
-    function updateModeUI(mode) {
-      const btns = dom.modeToggle.querySelectorAll('.mode-btn');
-      btns.forEach(btn => btn.classList.toggle('active', btn.dataset.mode === mode));
-
-      // Move slider
-      const slider = dom.modeToggle.querySelector('.mode-slider');
-      slider.style.transform = mode === 'custom' ? 'translateX(100%)' : 'translateX(0)';
-
-      // Show/hide mode-specific settings
-      dom.stremioSettings.classList.toggle('hidden', mode !== 'stremio');
-      dom.customSettings.classList.toggle('hidden', mode !== 'custom');
-      dom.modeHint.textContent = modeHints[mode];
-    }
-
-    // Init mode from saved state
-    updateModeUI(api.getMode());
-
-    dom.modeToggle.querySelectorAll('.mode-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const mode = btn.dataset.mode;
-        api.setMode(mode);
-        updateModeUI(mode);
-        applyTheme(mode);
-        showToast(mode === 'custom' ? 'Custom mode — direct sources' : 'Stremio mode');
-      });
-    });
-
     // ─── Max Concurrent Streams ─────────────────────
     const maxStreamsInput = $('#setting-max-streams');
     const maxStreamsSave = $('#setting-max-streams-save');
@@ -2139,34 +2052,7 @@
       }
     });
 
-    // ─── Stremio Mode Settings ──────────────────────
-
-    // Load saved server URL
-    dom.settingServer.value = api.getServerUrl();
-
-    // Test server
-    dom.settingServerTest.addEventListener('click', async () => {
-      const url = dom.settingServer.value.trim();
-      if (url) api.setServerUrl(url);
-      dom.serverStatus.textContent = 'Testing...';
-      dom.serverStatus.className = 'setting-hint';
-
-      const result = await api.testServer();
-      if (result.ok) {
-        dom.serverStatus.textContent = 'Connected!';
-        dom.serverStatus.className = 'setting-hint success';
-        state.vpnVerified = true;
-      } else {
-        dom.serverStatus.textContent = 'Failed: ' + result.error;
-        dom.serverStatus.className = 'setting-hint error';
-      }
-    });
-
-    // Save server URL on blur
-    dom.settingServer.addEventListener('change', () => {
-      const url = dom.settingServer.value.trim();
-      if (url) api.setServerUrl(url);
-    });
+    // ─── Stremio Addons ──────────────────────────────
 
     // Add addon
     dom.addonAddBtn.addEventListener('click', async () => {
@@ -2296,15 +2182,8 @@
       });
     });
 
-    dom.customAddCinemeta.addEventListener('click', async () => {
-      const result = await api.addAddon('https://v3-cinemeta.strem.io');
-      if (result.error) showToast(result.error);
-      else { renderAddonList(); showToast('Added Cinemeta'); }
-    });
-
     dom.settingsToggle.addEventListener('click', () => {
       navigateTo('settings');
-      updateModeUI(api.getMode());
       renderAddonList();
       renderLiveTVSources();
     });
@@ -2409,9 +2288,9 @@
 
   // ─── Theme ───────────────────────────────────────
 
-  function applyTheme(mode) {
+  function applyTheme() {
     const app = document.getElementById('app');
-    app.classList.toggle('theme-custom', mode === 'custom');
+    app.classList.add('theme-custom');
   }
 
   // ─── Player Error Helper ──────────────────────────
@@ -2845,7 +2724,7 @@
     initCasting();
 
     // Apply theme based on current mode
-    applyTheme(api.getMode());
+    applyTheme();
 
     // Initial load
     loadHome();

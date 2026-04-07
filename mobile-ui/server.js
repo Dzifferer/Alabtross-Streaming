@@ -1114,6 +1114,13 @@ app.post('/api/library/:id/resume', rateLimit, (req, res) => {
   res.json({ success: true });
 });
 
+// POST /api/library/:id/retry — retry a failed download
+app.post('/api/library/:id/retry', rateLimit, (req, res) => {
+  const retried = library.retryItem(req.params.id);
+  if (!retried) return res.status(400).json({ error: 'Cannot retry this item' });
+  res.json({ success: true });
+});
+
 // POST /api/library/:id/reorder — reorder a queued item
 app.post('/api/library/:id/reorder', rateLimit, (req, res) => {
   const position = parseInt(req.body.position, 10);

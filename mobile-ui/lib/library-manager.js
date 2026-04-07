@@ -450,6 +450,34 @@ class LibraryManager {
   }
 
   /**
+   * Retry a failed download. Resets status and re-starts the torrent engine.
+   */
+  retryItem(id) {
+    const item = this._items.get(id);
+    if (!item) return false;
+    if (item.status !== 'failed') return false;
+
+    const activeDownloads = [...this._items.values()].filter(i => i.status === 'downloading').length;
+    if (activeDownloads >= this._maxConcurrentDownloads) {
+      item.status = 'queued';
+      item.error = null;
+      this._saveMetadata();
+      console.log(`[Library] Retry queued (at capacity): "${item.name}"`);
+      return true;
+    }
+
+    item.status = 'downloading';
+    item.error = null;
+    item.progress = 0;
+    item.downloadSpeed = 0;
+    item.numPeers = 0;
+    this._startDownload(id);
+    this._saveMetadata();
+    console.log(`[Library] Retrying: "${item.name}"`);
+    return true;
+  }
+
+  /**
    * Reorder an item in the queue. newPosition is 0-based index within queued items.
    */
   reorderQueue(id, newPosition) {

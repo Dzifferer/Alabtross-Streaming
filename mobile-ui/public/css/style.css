@@ -2662,6 +2662,16 @@ html, body {
   color: #f59e0b;
 }
 
+.library-card-overlay.paused {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--warning, #f59e0b);
+}
+
+.library-card-progress-bar.paused {
+  background: var(--warning, #f59e0b);
+}
+
 .library-card-overlay.queued {
   font-size: 13px;
   font-weight: 600;
@@ -2779,6 +2789,7 @@ html, body {
 
 .library-card-meta.downloading { color: var(--accent); }
 .library-card-meta.converting { color: #f59e0b; }
+.library-card-meta.paused { color: var(--warning, #f59e0b); }
 .library-card-meta.complete { color: var(--success); }
 .library-card-meta.queued { color: var(--text-muted); }
 .library-card-meta.failed { color: var(--danger); }

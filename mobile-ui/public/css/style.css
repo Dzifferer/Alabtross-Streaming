@@ -470,6 +470,73 @@ html, body {
   font-size: 13px;
 }
 
+/* ===== Search Section Headers ===== */
+.search-section-header {
+  padding: 8px 4px 4px;
+}
+
+.search-section-header h3 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.search-tv-row {
+  margin-bottom: 12px;
+}
+
+/* ===== Channel Browser ===== */
+.channel-browser-header h3 {
+  font-size: 17px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
+.channel-browser-filters {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 12px;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.channel-browser-filters::-webkit-scrollbar {
+  display: none;
+}
+
+.channel-browser-search {
+  margin-bottom: 16px;
+}
+
+.channel-search-input {
+  width: 100%;
+  padding: 10px 14px;
+  background: var(--bg-input);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 14px;
+  outline: none;
+}
+
+.channel-search-input:focus {
+  border-color: var(--accent);
+}
+
+.channel-browser-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.channel-browser-grid .channel-card {
+  width: 110px;
+  flex-shrink: 0;
+}
+
 /* ===== Catalog Rows (Home) ===== */
 .catalog-row {
   margin-bottom: 28px;

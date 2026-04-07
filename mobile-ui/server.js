@@ -642,19 +642,32 @@ function parseM3U(text) {
     const logoMatch = info.match(/tvg-logo="([^"]*)"/);
     const groupMatch = info.match(/group-title="([^"]*)"/);
     const idMatch = info.match(/tvg-id="([^"]*)"/);
+    const tvgNameMatch = info.match(/tvg-name="([^"]*)"/);
+    const countryMatch = info.match(/tvg-country="([^"]*)"/);
+    const languageMatch = info.match(/tvg-language="([^"]*)"/);
+
+    const name = (nameMatch ? nameMatch[1].trim() : 'Unknown');
+    const group = groupMatch ? groupMatch[1] : '';
+    const country = countryMatch ? countryMatch[1] : '';
+    const language = languageMatch ? languageMatch[1] : '';
 
     channels.push({
       id: idMatch ? idMatch[1] : String(channels.length),
-      name: nameMatch ? nameMatch[1].trim() : 'Unknown',
+      name,
+      tvgName: tvgNameMatch ? tvgNameMatch[1] : '',
       logo: logoMatch ? logoMatch[1] : '',
-      group: groupMatch ? groupMatch[1] : '',
+      group,
+      country,
+      language,
       url: urlLine,
+      // Pre-computed lowercase search text for fast filtering
+      _search: `${name} ${group} ${country} ${language}`.toLowerCase(),
     });
   }
   return channels;
 }
 
-// GET /api/iptv/channels?url=<m3u-playlist-url>
+// GET /api/iptv/channels?url=<m3u-playlist-url>[&search=X&group=X&country=X&limit=N&offset=N]
 app.get('/api/iptv/channels', rateLimit, async (req, res) => {
   const playlistUrl = req.query.url;
   if (!playlistUrl) return res.status(400).json({ error: 'Missing url parameter' });
@@ -665,26 +678,57 @@ app.get('/api/iptv/channels', rateLimit, async (req, res) => {
     return res.status(400).json({ error: 'Invalid or blocked URL' });
   }
 
-  // Return cached if same URL and fresh
+  // Fetch and cache playlist
+  let channels;
   const cached = playlistCache.get(playlistUrl);
   if (cached && Date.now() - cached.fetchedAt < PLAYLIST_CACHE_TTL) {
-    return res.json({ channels: cached.channels });
+    channels = cached.channels;
+  } else {
+    try {
+      const body = await fetchUrl(playlistUrl);
+      channels = parseM3U(body);
+      if (playlistCache.size >= PLAYLIST_CACHE_MAX) {
+        const oldest = playlistCache.keys().next().value;
+        playlistCache.delete(oldest);
+      }
+      playlistCache.set(playlistUrl, { channels, fetchedAt: Date.now() });
+    } catch (err) {
+      console.error('[IPTV] Playlist fetch error:', err.message);
+      return res.status(502).json({ error: 'Failed to fetch playlist' });
+    }
   }
 
-  try {
-    const body = await fetchUrl(playlistUrl);
-    const channels = parseM3U(body);
-    // Evict oldest entry if cache is full
-    if (playlistCache.size >= PLAYLIST_CACHE_MAX) {
-      const oldest = playlistCache.keys().next().value;
-      playlistCache.delete(oldest);
-    }
-    playlistCache.set(playlistUrl, { channels, fetchedAt: Date.now() });
-    res.json({ channels });
-  } catch (err) {
-    console.error('[IPTV] Playlist fetch error:', err.message);
-    res.status(502).json({ error: 'Failed to fetch playlist' });
+  // Apply optional search/filter params (no-op if none provided)
+  let filtered = channels;
+  const search = (req.query.search || '').trim().toLowerCase();
+  const group = (req.query.group || '').trim();
+  const country = (req.query.country || '').trim();
+
+  if (search) {
+    filtered = filtered.filter(ch => ch._search.includes(search));
   }
+  if (group) {
+    filtered = filtered.filter(ch => ch.group === group);
+  }
+  if (country) {
+    const lc = country.toLowerCase();
+    filtered = filtered.filter(ch => ch.country.toLowerCase().includes(lc));
+  }
+
+  // Pagination
+  const limit = Math.min(parseInt(req.query.limit, 10) || 0, 500);
+  const offset = parseInt(req.query.offset, 10) || 0;
+  const total = filtered.length;
+  if (limit > 0) {
+    filtered = filtered.slice(offset, offset + limit);
+  }
+
+  // Build group list from full (unfiltered) channels for filter UI
+  const groups = req.query.groups === '1'
+    ? [...new Set(channels.map(ch => ch.group).filter(Boolean))].sort()
+    : undefined;
+
+  res.json({ channels: filtered, total, groups });
 });
 
 // GET /api/iptv/stream?url=<stream-url> — proxy HLS/stream to avoid CORS

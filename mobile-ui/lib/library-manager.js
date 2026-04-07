@@ -66,6 +66,9 @@ class LibraryManager {
       if (existing.status === 'complete') {
         return { id, status: 'already_exists' };
       }
+      if (existing.status === 'queued') {
+        return { id, status: 'already_queued' };
+      }
       // If failed or cancelled, allow re-download
       if (existing.status !== 'downloading') {
         this._items.delete(id);
@@ -74,11 +77,9 @@ class LibraryManager {
       }
     }
 
-    // Check concurrent download limit
+    // Check concurrent download limit — queue if at capacity
     const activeDownloads = [...this._items.values()].filter(i => i.status === 'downloading').length;
-    if (activeDownloads >= this._maxConcurrentDownloads) {
-      throw new Error(`Max ${this._maxConcurrentDownloads} concurrent downloads allowed`);
-    }
+    const shouldQueue = activeDownloads >= this._maxConcurrentDownloads;
 
     const item = {
       id,
@@ -93,7 +94,7 @@ class LibraryManager {
       episode: episode != null ? episode : null,
       infoHash,
       magnetUri,
-      status: 'downloading',   // downloading | complete | failed
+      status: shouldQueue ? 'queued' : 'downloading',   // downloading | complete | failed | queued
       progress: 0,
       downloadSpeed: 0,
       numPeers: 0,
@@ -107,8 +108,13 @@ class LibraryManager {
 
     this._items.set(id, item);
     this._saveMetadata();
-    this._startDownload(id);
 
+    if (shouldQueue) {
+      console.log(`[Library] Queued: "${item.name}" — ${activeDownloads}/${this._maxConcurrentDownloads} slots in use`);
+      return { id, status: 'queued' };
+    }
+
+    this._startDownload(id);
     return { id, status: 'started' };
   }
 
@@ -197,6 +203,7 @@ class LibraryManager {
 
     this._items.delete(id);
     this._saveMetadata();
+    this._processQueue();
     return true;
   }
 
@@ -249,6 +256,30 @@ class LibraryManager {
     console.log('[Library] State saved — downloads will resume on next start');
   }
 
+  // ─── Queue Processing ──────────────────────────
+
+  _processQueue() {
+    const activeDownloads = [...this._items.values()].filter(i => i.status === 'downloading').length;
+    const available = this._maxConcurrentDownloads - activeDownloads;
+    if (available <= 0) return;
+
+    const queued = [...this._items.values()]
+      .filter(i => i.status === 'queued')
+      .sort((a, b) => a.addedAt - b.addedAt);
+
+    const toStart = queued.slice(0, available);
+    for (const item of toStart) {
+      item.status = 'downloading';
+      item.progress = 0;
+      console.log(`[Library] Dequeuing: "${item.name}"`);
+      this._startDownload(item.id);
+    }
+
+    if (toStart.length > 0) {
+      this._saveMetadata();
+    }
+  }
+
   // ─── Download Management ────────────────────────
 
   _startDownload(id) {
@@ -278,6 +309,7 @@ class LibraryManager {
         item.error = 'Torrent metadata timeout (90s) — try a torrent with more seeds';
         this._stopDownload(id);
         this._saveMetadata();
+        this._processQueue();
       }
     }, 90000);
 
@@ -291,6 +323,7 @@ class LibraryManager {
         item.error = 'No valid video file found in torrent';
         this._stopDownload(id);
         this._saveMetadata();
+        this._processQueue();
         return;
       }
 
@@ -358,6 +391,7 @@ class LibraryManager {
           console.log(`[Library] Download complete: "${item.name}" (${(expectedSize / 1e9).toFixed(2)} GB)`);
           this._stopDownload(id);
           this._saveMetadata();
+          this._processQueue();
         }
       }, 2000);
 
@@ -372,6 +406,7 @@ class LibraryManager {
       item.error = err.message;
       this._stopDownload(id);
       this._saveMetadata();
+      this._processQueue();
     });
   }
 
@@ -497,11 +532,11 @@ class LibraryManager {
     for (const item of toResume) {
       delete item._needsResume;
 
-      // Respect concurrent download limit
+      // Respect concurrent download limit — queue excess
       if (started >= this._maxConcurrentDownloads) {
-        console.log(`[Library] Queued "${item.name}" — concurrent limit reached, marked for retry`);
-        item.status = 'failed';
-        item.error = 'Queued — re-add to resume (concurrent limit reached during restart)';
+        console.log(`[Library] Queued "${item.name}" — concurrent limit reached during restart`);
+        item.status = 'queued';
+        item.error = null;
         continue;
       }
 
@@ -531,6 +566,9 @@ class LibraryManager {
     }
 
     this._saveMetadata();
+
+    // Process any pre-existing queued items if slots are available
+    this._processQueue();
   }
 
   _saveMetadata() {

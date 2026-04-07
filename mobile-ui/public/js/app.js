@@ -1801,6 +1801,10 @@
         showToast('Already in your library');
       } else if (data.status === 'already_downloading') {
         showToast('Already downloading');
+      } else if (data.status === 'already_queued') {
+        showToast('Already queued for download');
+      } else if (data.status === 'queued') {
+        showToast('Download queued — will start when a slot opens');
       } else {
         showToast('Added to library — downloading...');
       }
@@ -1839,6 +1843,10 @@
 
       const libraryItems = libResp.items || [];
       console.log(`[Library] ${libraryItems.length} library items`);
+
+      // Compute queue positions for queued items (FIFO by addedAt)
+      const queuedItems = libraryItems.filter(i => i.status === 'queued').sort((a, b) => a.addedAt - b.addedAt);
+      queuedItems.forEach((item, idx) => { item._queuePosition = idx + 1; });
 
       if (libraryItems.length === 0) {
         dom.libraryContent.innerHTML = '';
@@ -1904,7 +1912,7 @@
       attachLibraryHandlers();
 
       // Start progress polling for downloading items
-      const needsPoll = libraryItems.some(i => i.status === 'downloading');
+      const needsPoll = libraryItems.some(i => i.status === 'downloading' || i.status === 'queued');
       if (needsPoll) {
         startLibraryProgressPoll();
       }
@@ -1936,6 +1944,10 @@
           <div class="library-card-progress-bar" style="width:${item.progress}%"></div>
         </div>`;
       metaHtml = `<div class="library-card-meta downloading">${speed || 'Starting...'}${item.numPeers ? ' &middot; ' + item.numPeers + ' peers' : ''}</div>`;
+    } else if (item.status === 'queued') {
+      const posText = item._queuePosition ? `#${item._queuePosition} in queue` : 'Waiting...';
+      overlayHtml = `<div class="library-card-overlay queued">Queued</div>`;
+      metaHtml = `<div class="library-card-meta queued">${posText}</div>`;
     } else if (item.status === 'complete') {
       const size = item.fileSize ? formatSize(item.fileSize) : item.size || '';
       overlayHtml = `
@@ -2132,7 +2144,8 @@
           }
         }
 
-        if (downloading.length === 0) {
+        const queued = items.filter(i => i.status === 'queued');
+        if (downloading.length === 0 && queued.length === 0) {
           stopLibraryProgressPoll();
         }
       } catch { /* ignore polling errors */ }

@@ -3557,7 +3557,8 @@
     applyTheme();
 
     // Initial load
-    loadHome();
+    navigateTo('home');
+    loadHome().catch(err => console.error('[Init] loadHome failed:', err));
 
     // VPN check
     checkVPNStatus()

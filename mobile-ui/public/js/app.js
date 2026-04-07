@@ -1561,19 +1561,25 @@
     const alreadyWarmed = preload.isWarmed(stream);
     preload.cancel(); // stop background fetch — playback takes over now
 
-    // Build loading screen with poster
+    // Build stage curtain loading screen with poster
     const poster = state.currentMeta?.poster || '';
     const title = state.currentMeta?.name || '';
     const statusLabel = alreadyWarmed
       ? 'Starting playback...'
       : (stream.infoHash ? 'Connecting to torrent peers...' : 'Loading stream...');
     dom.playerOverlay.innerHTML = `
-      ${poster ? `<img class="loading-poster" src="${poster}" alt="">` : ''}
-      <div class="loading-info">
-        ${title ? `<div class="loading-title">${escapeHTML(title)}</div>` : ''}
-        <div class="loading-bar-container"><div class="loading-bar"></div></div>
-        <div class="loading-status">${statusLabel}</div>
-        ${stream.infoHash && !alreadyWarmed ? '<div class="loading-sub">This may take 30-60 seconds</div>' : ''}
+      <div class="curtain-stage dropping">
+        <div class="curtain-valance"></div>
+        <div class="curtain-lights"></div>
+        <div class="curtain-poster-wrap">
+          ${poster ? `<img src="${poster}" alt="">` : ''}
+          ${title ? `<div class="curtain-poster-title">${escapeHTML(title)}</div>` : ''}
+          <div class="curtain-loading-bar"><div class="loading-bar"></div></div>
+          <div class="curtain-poster-status loading-status">${statusLabel}</div>
+          ${stream.infoHash && !alreadyWarmed ? '<div class="curtain-poster-status" style="opacity:0.5">This may take 30-60 seconds</div>' : ''}
+        </div>
+        <div class="curtain-panel curtain-panel-left"></div>
+        <div class="curtain-panel curtain-panel-right"></div>
       </div>
     `;
 
@@ -1626,7 +1632,18 @@
 
       if (statusInterval) clearInterval(statusInterval);
       await dom.videoPlayer.play();
-      dom.playerOverlay.classList.add('hidden');
+
+      // Open the curtains to reveal the video
+      const curtainStage = dom.playerOverlay.querySelector('.curtain-stage');
+      if (curtainStage) {
+        curtainStage.classList.add('opening');
+        // Remove overlay after curtain animation completes
+        setTimeout(() => {
+          dom.playerOverlay.classList.add('hidden');
+        }, 1400);
+      } else {
+        dom.playerOverlay.classList.add('hidden');
+      }
 
       // Mid-playback stall detection — re-show overlay during rebuffering
       const onStalled = () => {

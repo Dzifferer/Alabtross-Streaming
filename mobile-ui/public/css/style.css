@@ -1247,6 +1247,12 @@ html, body {
   z-index: 10;
 }
 
+/* When curtain is present, let it handle the background */
+#player-overlay:has(.curtain-stage) {
+  background: #000;
+  padding: 0;
+}
+
 /* Landscape: horizontal layout for loading screen */
 @media (orientation: landscape) and (max-height: 500px) {
   #player-overlay {
@@ -1262,6 +1268,220 @@ html, body {
     flex-direction: column;
     align-items: center;
     gap: 10px;
+  }
+}
+
+/* ===== Stage Curtain Loading Transition ===== */
+.curtain-stage {
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  overflow: hidden;
+}
+
+/* Poster displayed on top of closed curtains */
+.curtain-poster-wrap {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 3;
+  padding: 24px;
+  gap: 16px;
+}
+
+.curtain-poster-wrap img {
+  max-width: 180px;
+  max-height: 45vh;
+  border-radius: 12px;
+  box-shadow: 0 12px 48px rgba(0,0,0,0.8);
+  object-fit: cover;
+}
+
+.curtain-poster-title {
+  font-size: 18px;
+  font-weight: 700;
+  text-align: center;
+  max-width: 280px;
+  text-shadow: 0 2px 8px rgba(0,0,0,0.8);
+}
+
+.curtain-poster-status {
+  font-size: 13px;
+  color: rgba(255,255,255,0.6);
+  text-shadow: 0 1px 4px rgba(0,0,0,0.8);
+}
+
+.curtain-loading-bar {
+  width: 200px;
+  height: 3px;
+  background: rgba(255,255,255,0.12);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.curtain-loading-bar .loading-bar {
+  height: 100%;
+  background: #ffd700;
+  border-radius: 3px;
+  animation: loading-slide 2s ease-in-out infinite;
+}
+
+/* Left & Right Curtain Panels */
+.curtain-panel {
+  position: absolute;
+  top: 0;
+  width: 50%;
+  height: 100%;
+  z-index: 2;
+  transition: transform 1.2s cubic-bezier(0.7, 0, 0.3, 1);
+}
+
+.curtain-panel-left {
+  left: 0;
+  background: linear-gradient(
+    to right,
+    #6b0000 0%,
+    #a01020 8%,
+    #7a0808 20%,
+    #a01020 40%,
+    #6b0000 60%,
+    #a01020 80%,
+    #7a0808 100%
+  );
+  box-shadow: inset 0 0 60px rgba(0,0,0,0.7), 4px 0 20px rgba(0,0,0,0.5);
+}
+
+.curtain-panel-right {
+  right: 0;
+  background: linear-gradient(
+    to left,
+    #6b0000 0%,
+    #a01020 8%,
+    #7a0808 20%,
+    #a01020 40%,
+    #6b0000 60%,
+    #a01020 80%,
+    #7a0808 100%
+  );
+  box-shadow: inset 0 0 60px rgba(0,0,0,0.7), -4px 0 20px rgba(0,0,0,0.5);
+}
+
+/* Fabric texture overlay */
+.curtain-panel::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    180deg,
+    rgba(255,255,255,0.04) 0px,
+    transparent 2px,
+    transparent 8px
+  );
+  pointer-events: none;
+}
+
+/* Gold fringe at bottom */
+.curtain-panel::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 24px;
+  background: repeating-linear-gradient(
+    90deg,
+    #ffd700,
+    #ffd700 8px,
+    #b8860b 8px,
+    #b8860b 16px
+  );
+  box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+}
+
+/* Stage lights glow at top */
+.curtain-lights {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 80px;
+  background: linear-gradient(rgba(255,215,0,0.15), transparent);
+  z-index: 4;
+  pointer-events: none;
+}
+
+/* Valance (top drape) */
+.curtain-valance {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 40px;
+  z-index: 5;
+  background: linear-gradient(
+    to bottom,
+    #7a0808,
+    #6b0000
+  );
+  box-shadow: 0 4px 16px rgba(0,0,0,0.6);
+}
+
+.curtain-valance::after {
+  content: '';
+  position: absolute;
+  bottom: -12px;
+  left: 0;
+  right: 0;
+  height: 12px;
+  background: repeating-conic-gradient(#7a0808 0% 25%, transparent 0% 50%) 0 0 / 24px 12px;
+}
+
+/* Drop animation — curtain falls from top */
+.curtain-stage.dropping {
+  animation: curtainDrop 0.8s ease-out forwards;
+}
+
+@keyframes curtainDrop {
+  from { transform: translateY(-100%); }
+  to { transform: translateY(0); }
+}
+
+/* Open animation — curtains slide apart */
+.curtain-stage.opening .curtain-panel-left {
+  transform: translateX(-100%);
+}
+
+.curtain-stage.opening .curtain-panel-right {
+  transform: translateX(100%);
+}
+
+.curtain-stage.opening .curtain-poster-wrap {
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+
+.curtain-stage.opening .curtain-valance {
+  transform: translateY(-100%);
+  transition: transform 0.8s cubic-bezier(0.7, 0, 0.3, 1);
+}
+
+.curtain-stage.opening .curtain-lights {
+  opacity: 0;
+  transition: opacity 0.6s ease;
+}
+
+/* Landscape adjustments */
+@media (orientation: landscape) and (max-height: 500px) {
+  .curtain-poster-wrap {
+    flex-direction: row;
+    gap: 24px;
+  }
+  .curtain-poster-wrap img {
+    max-width: 120px;
+    max-height: 70vh;
   }
 }
 

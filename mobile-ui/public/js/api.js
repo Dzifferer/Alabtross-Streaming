@@ -996,14 +996,20 @@ class StremioAPI {
   // ─── Collection / Franchise Grouping ──────────────
 
   /**
-   * Enrich a list of IMDB IDs with collection/franchise info.
+   * Enrich a list of movies with collection/franchise info.
+   * @param {string[]} imdbIds - IMDB IDs
+   * @param {string[]} [names] - Movie names (for title-based fallback)
    * Returns { collections: { "collectionId": { name, poster, movieIds: [imdbIds] } } }
    */
-  async enrichWithCollections(imdbIds) {
+  async enrichWithCollections(imdbIds, names) {
     const validIds = imdbIds.filter(id => /^tt\d+$/.test(id));
     if (validIds.length === 0) return { collections: {} };
     try {
-      const resp = await fetch('/api/collections/enrich?ids=' + validIds.join(','), {
+      let url = '/api/collections/enrich?ids=' + validIds.join(',');
+      if (names && names.length > 0) {
+        url += '&names=' + encodeURIComponent(names.join('||'));
+      }
+      const resp = await fetch(url, {
         signal: AbortSignal.timeout(15000),
       });
       if (!resp.ok) return { collections: {} };

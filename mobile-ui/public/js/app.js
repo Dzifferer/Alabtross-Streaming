@@ -487,9 +487,11 @@
       attachCardListeners(moviePlaceholder);
 
       // Asynchronously enrich with collection data and re-render with grouping
-      const imdbIds = movieSlice.map(item => item.imdb_id || item.id).filter(id => /^tt\d+$/.test(id));
-      if (imdbIds.length > 0) {
-        api.enrichWithCollections(imdbIds).then(enrichment => {
+      const imdbIds = movieSlice.map(item => item.imdb_id || item.id);
+      const movieNames = movieSlice.map(item => item.name || '');
+      const validIds = imdbIds.filter(id => /^tt\d+$/.test(id));
+      if (validIds.length > 0) {
+        api.enrichWithCollections(imdbIds, movieNames).then(enrichment => {
           const colEntries = Object.entries(enrichment.collections || {});
           // Only re-render if there are collections with 2+ movies
           const hasGroups = colEntries.some(([, c]) => (c.movieIds || []).length >= 2);
@@ -2052,10 +2054,12 @@
       // Enrich movies with collection data, then render
       let movieCollectionData = { collections: {} };
       if (movies.length > 0) {
-        const movieImdbIds = movies.map(m => m.imdbId).filter(id => id && /^tt\d+$/.test(id));
-        if (movieImdbIds.length > 0) {
+        const movieImdbIds = movies.map(m => m.imdbId || '');
+        const movieNames = movies.map(m => m.name || '');
+        const validIds = movieImdbIds.filter(id => id && /^tt\d+$/.test(id));
+        if (validIds.length > 0) {
           try {
-            movieCollectionData = await api.enrichWithCollections(movieImdbIds);
+            movieCollectionData = await api.enrichWithCollections(movieImdbIds, movieNames);
           } catch (e) {
             console.warn('[Library] Collection enrichment failed:', e.message);
           }

@@ -778,8 +778,9 @@ if [[ "$MOBILE_ALREADY_OK" != "true" ]]; then
     docker build -t alabtross-mobile "$MOBILE_UI_DIR" \
       || die "Failed to build Mobile UI. Check: ls $MOBILE_UI_DIR"
 
-    # Create library directory on host for persistent movie storage
-    LIBRARY_HOST_DIR="${MOUNT_POINT:-$HOME/.stremio-data}/alabtross-library"
+    # Create torrent cache and library directories on host for persistent storage
+    TORRENT_CACHE_HOST_DIR="${MOUNT_POINT:-$HOME/.stremio-data}/torrent-cache"
+    LIBRARY_HOST_DIR="${TORRENT_CACHE_HOST_DIR}/library"
     mkdir -p "$LIBRARY_HOST_DIR"
 
     info "Starting Alabtross Mobile UI..."
@@ -791,8 +792,9 @@ if [[ "$MOBILE_ALREADY_OK" != "true" ]]; then
       --net=host \
       -e PORT=8080 \
       -e STREMIO_SERVER="http://${STREMIO_BIND_IP}:11470" \
-      -e LIBRARY_PATH="/app/library" \
-      -v "${LIBRARY_HOST_DIR}:/app/library" \
+      -e TORRENT_CACHE="/app/torrent-cache" \
+      -e LIBRARY_PATH="/app/torrent-cache/library" \
+      -v "${TORRENT_CACHE_HOST_DIR}:/app/torrent-cache" \
       alabtross-mobile \
       || die "Failed to start Mobile UI container."
 

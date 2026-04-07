@@ -37,7 +37,7 @@ app.use(express.json({ limit: '10kb' }));
 // ─── Rate Limiting (simple in-memory, per-IP) ────────────────────────
 const rateLimitMap = new Map();
 const RATE_LIMIT_WINDOW = 60 * 1000; // 1 minute
-const RATE_LIMIT_MAX = 30;           // max requests per window
+const RATE_LIMIT_MAX = 300;          // max requests per window
 
 function rateLimit(req, res, next) {
   const ip = req.ip || req.socket.remoteAddress;
@@ -263,7 +263,7 @@ app.get('/api/play/:infoHash', rateLimit, (req, res) => {
 });
 
 // GET /api/cache — list items in torrent cache on disk
-app.get('/api/cache', rateLimit, async (req, res) => {
+app.get('/api/cache', async (req, res) => {
   try {
     const cacheDir = TORRENT_CACHE_PATH;
     if (!fs.existsSync(cacheDir)) return res.json({ items: [] });
@@ -349,7 +349,7 @@ app.get('/api/torrent-status/:infoHash', (req, res) => {
 // ─── Library API Routes ───────────────────────────────────────────────
 
 // GET /api/library — list all library items
-app.get('/api/library', rateLimit, (req, res) => {
+app.get('/api/library', (req, res) => {
   try {
     const items = library.getAll();
     res.json({ items });
@@ -360,7 +360,7 @@ app.get('/api/library', rateLimit, (req, res) => {
 });
 
 // GET /api/library/:id — get single library item
-app.get('/api/library/:id', rateLimit, (req, res) => {
+app.get('/api/library/:id', (req, res) => {
   const item = library.getItem(req.params.id);
   if (!item) return res.status(404).json({ error: 'Item not found' });
   res.json(item);
@@ -396,7 +396,7 @@ app.delete('/api/library/:id', rateLimit, (req, res) => {
 });
 
 // GET /api/library/:id/stream — stream a completed library item
-app.get('/api/library/:id/stream', rateLimit, async (req, res) => {
+app.get('/api/library/:id/stream', async (req, res) => {
   const item = library.getItem(req.params.id);
   if (!item) return res.status(404).json({ error: 'Item not found' });
   if (item.status !== 'complete') {
@@ -456,7 +456,7 @@ app.get('/api/library/:id/stream', rateLimit, async (req, res) => {
 });
 
 // GET /api/library/:id/stream/remux — stream a library file remuxed to MP4 (AAC audio)
-app.get('/api/library/:id/stream/remux', rateLimit, async (req, res) => {
+app.get('/api/library/:id/stream/remux', async (req, res) => {
   const item = library.getItem(req.params.id);
   if (!item) return res.status(404).json({ error: 'Item not found' });
   if (item.status !== 'complete') {

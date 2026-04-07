@@ -1217,6 +1217,7 @@
     preload.cancel(); // invalidate any preload from a previously viewed title
     if (api._speedTestController) api._speedTestController.abort(); // cancel stale speed tests
     ++_streamLoadGeneration; // invalidate any in-flight loadStreams from a previous title
+    _autoSelectedStream = null;
 
     dom.detailContent.innerHTML = `
       <div class="loading-state"><div class="spinner"></div><p>Loading details...</p></div>
@@ -1513,8 +1514,7 @@
       return;
     }
 
-    // Show streams with a "testing" state
-    const statusLabel = 'Ranking streams...';
+    // Phase A: Race top 3 streams to find a clear winner
     container.innerHTML = `
       <div class="stream-speed-status" style="
         text-align:center; padding:12px; margin-bottom:8px;
@@ -1522,32 +1522,56 @@
         background:var(--bg-card); border-radius:var(--radius-sm);
       ">
         <div class="spinner" style="width:20px;height:20px;margin:0 auto 8px;border-width:2px"></div>
-        ${statusLabel} <span id="speed-progress">0/${streams.length}</span>
+        Finding best stream...
+      </div>
+    `;
+
+    const raceResult = await api.raceTopStreams(streams);
+    if (generation !== _streamLoadGeneration) return;
+
+    if (raceResult.winner) {
+      // Clear winner found — show Play + Add to Library directly
+      renderWinnerPanel(container, raceResult.winner);
+      preload.warmStream(raceResult.winner);
+      _autoSelectedStream = raceResult.winner;
+
+      // Hide the standalone download section (winner panel has its own Add to Library)
+      const libSection = document.getElementById('library-add-section');
+      if (libSection) libSection.style.display = 'none';
+
+      // Background: run full ranking to populate "More options"
+      runBackgroundRanking(streams, generation);
+      return;
+    }
+
+    // Phase B: No clear winner — fall back to full stream list
+    container.innerHTML = `
+      <div class="stream-speed-status" style="
+        text-align:center; padding:12px; margin-bottom:8px;
+        font-size:13px; color:var(--text-dim);
+        background:var(--bg-card); border-radius:var(--radius-sm);
+      ">
+        <div class="spinner" style="width:20px;height:20px;margin:0 auto 8px;border-width:2px"></div>
+        Ranking streams... <span id="speed-progress">0/${streams.length}</span>
       </div>
       <div class="stream-list" id="stream-list">
         ${streams.map((s, i) => renderStreamItem(s, i, 'testing')).join('')}
       </div>
     `;
 
-    // Now test all streams in parallel
     const ranked = await api.testAndRankStreams(streams, (tested, total, result) => {
       const progress = document.getElementById('speed-progress');
       if (progress) progress.textContent = `${tested}/${total}`;
-
-      // Update individual stream items with their speed
       updateStreamItemSpeed(result);
     });
 
-    // If user navigated away during speed testing, discard results
     if (generation !== _streamLoadGeneration) return;
 
-    // Start warming the best stream in the background
     const bestPlayable = ranked.find(r => r.responseTime < Infinity);
     if (bestPlayable) {
       preload.warmStream(bestPlayable.stream);
     }
 
-    // Re-render sorted by speed
     const statusEl = container.querySelector('.stream-speed-status');
     if (statusEl) {
       const fastest = ranked.find(r => r.responseTime < Infinity);
@@ -1574,7 +1598,6 @@
       attachStreamHandlers();
     }
 
-    // Enable the "Add to Library" button now that streams are available
     const addBtn = document.getElementById('add-to-library-btn');
     if (addBtn && ranked.length > 0) {
       addBtn.disabled = false;
@@ -1656,6 +1679,81 @@
     badge.textContent = seeds + ' seeds';
   }
 
+  // ─── Winner Panel (auto-selected best stream) ──────────────────────
+
+  function renderWinnerPanel(container, winner) {
+    const title = winner.title || winner.name || 'Best Stream';
+    const lines = title.split('\n');
+    const mainTitle = escapeHTML(lines[0]);
+    const seeds = winner.seeds || 0;
+    const source = winner.source || winner.addonName || 'Scraped';
+    const qualityMatch = title.match(/\b(4K|2160p|1080p|720p|480p)\b/i);
+    const quality = qualityMatch ? qualityMatch[1].toUpperCase() : '';
+    const format = winner.format || '';
+
+    container.innerHTML = `
+      <div class="winner-panel" style="background:var(--bg-card);border-radius:var(--radius);padding:20px;text-align:center;">
+        <div style="color:var(--success);font-size:14px;margin-bottom:8px;">
+          &#9889; Best stream found
+        </div>
+        <div style="font-size:15px;font-weight:600;margin-bottom:4px;">${mainTitle}</div>
+        <div style="font-size:13px;color:var(--text-dim);margin-bottom:16px;">
+          ${[quality, format, seeds + ' seeds', source].filter(Boolean).join(' \u00b7 ')}
+        </div>
+        <div style="display:flex;gap:12px;justify-content:center;">
+          <button class="btn-play" id="auto-play-btn" style="flex:1;max-width:180px;">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            Play
+          </button>
+          <button class="btn-library" id="auto-library-btn" style="flex:1;max-width:180px;">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            Add to Library
+          </button>
+        </div>
+        <div id="more-options-toggle" style="margin-top:16px;font-size:13px;color:var(--text-muted);cursor:pointer;">
+          More options &#9662;
+        </div>
+        <div id="more-options-list" style="display:none;margin-top:12px;text-align:left;">
+          <div class="stream-list" id="stream-list">
+            <div style="text-align:center;padding:12px;color:var(--text-dim);font-size:12px;">
+              <div class="spinner" style="width:16px;height:16px;margin:0 auto 6px;border-width:2px"></div>
+              Loading alternatives...
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    document.getElementById('auto-play-btn').addEventListener('click', () => playStream(winner));
+    document.getElementById('auto-library-btn').addEventListener('click', () => addToLibrary(winner));
+    document.getElementById('more-options-toggle').addEventListener('click', () => {
+      const list = document.getElementById('more-options-list');
+      const toggle = document.getElementById('more-options-toggle');
+      if (list.style.display === 'none') {
+        list.style.display = 'block';
+        toggle.innerHTML = 'Fewer options &#9652;';
+      } else {
+        list.style.display = 'none';
+        toggle.innerHTML = 'More options &#9662;';
+      }
+    });
+  }
+
+  async function runBackgroundRanking(streams, generation) {
+    const ranked = await api.testAndRankStreams(streams);
+    if (generation !== _streamLoadGeneration) return;
+
+    _lastRankedStreams = ranked;
+    const listEl = document.getElementById('stream-list');
+    if (listEl) {
+      listEl.innerHTML = ranked.map((r, i) => renderStreamItem(r.stream, i, 'done', r.responseTime)).join('');
+      attachStreamHandlers();
+    }
+  }
+
   // ─── Preload Manager ───────────────────────────────────────────────
   // Warms the top-ranked stream in the background so torrent peers are
   // already connecting by the time the user taps Play.
@@ -1714,6 +1812,7 @@
   let _lastRankedStreams = [];
 
   let _selectedStreamIndex = -1;
+  let _autoSelectedStream = null;
 
   function attachStreamHandlers() {
     const list = document.getElementById('stream-list');

@@ -407,6 +407,26 @@ class StremioAPI {
   }
 
   /**
+   * Fetch complete series/movie streams from the backend.
+   * Returns torrents containing all seasons in a bulk download.
+   */
+  async getCompleteStreams(id) {
+    const imdbId = id.match(/^tt\d+/) ? id.match(/^(tt\d+)/)[1] : id;
+    const params = new URLSearchParams();
+    if (this._lastTitle) params.set('title', this._lastTitle);
+    const url = `/api/streams/complete/${imdbId}?${params.toString()}`;
+    try {
+      const resp = await fetch(url);
+      if (!resp.ok) return [];
+      const data = await resp.json();
+      return data.streams || [];
+    } catch (e) {
+      console.warn('[API] Complete streams fetch failed:', e);
+      return [];
+    }
+  }
+
+  /**
    * Narrow streams to the best ~6 options by scoring quality, format, seeds, and size.
    * Reduces cognitive load and makes preload hit rate high.
    */

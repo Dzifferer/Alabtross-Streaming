@@ -1543,6 +1543,33 @@ html, body {
   border-color: var(--accent);
 }
 
+.search-complete-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 20px;
+  border: 1px solid rgba(0, 206, 201, 0.4);
+  background: rgba(0, 206, 201, 0.1);
+  color: var(--success);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.search-complete-btn:hover,
+.search-complete-btn:active {
+  background: rgba(0, 206, 201, 0.25);
+  border-color: var(--success);
+}
+
+.complete-pack-item.selected {
+  border: 1px solid var(--success);
+  background: rgba(0, 206, 201, 0.08);
+}
+
 .season-pack-results {
   display: flex;
   flex-direction: column;

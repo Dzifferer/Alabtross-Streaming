@@ -111,11 +111,22 @@ class TorrentEngine {
         const peerCount = engine.swarm ? engine.swarm.wires.length : 0;
         console.log(`[TorrentEngine] Torrent ready: "${engine.torrent.name}", ${engine.files.length} files, ${peerCount} peers`);
 
+        // Deselect non-video files and find the largest video file to pre-select
+        let largestVideo = null;
         for (const file of engine.files) {
           if (!isFileNameSafe(file.name)) {
             file.deselect();
             console.log(`[Security] Deselected: "${file.name}"`);
+          } else if (!largestVideo || file.length > largestVideo.length) {
+            largestVideo = file;
           }
+        }
+
+        // Pre-select the largest video file so piece downloading starts immediately
+        // rather than waiting for the first HTTP request
+        if (largestVideo) {
+          largestVideo.select();
+          console.log(`[TorrentEngine] Pre-selected: "${largestVideo.name}" (${(largestVideo.length / 1e6).toFixed(0)}MB)`);
         }
 
         const entry = {

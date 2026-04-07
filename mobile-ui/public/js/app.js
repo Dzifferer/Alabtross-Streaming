@@ -202,9 +202,10 @@
     updateNavUI(view);
     updateTopBar(view, opts);
 
-    // Clean up stream action bar when leaving detail view
+    // Clean up stream action bar and preload when leaving detail view
     const actionBar = document.querySelector('.stream-action-bar');
     if (actionBar) actionBar.remove();
+    preload.cancel();
 
     // Abort in-flight speed tests and clean up stale ranked streams when leaving detail
     if (view !== 'detail') {
@@ -218,6 +219,10 @@
   }
 
   function goBack() {
+    preload.cancel();
+    _lastRankedStreams = [];
+    _selectedStreamIndex = -1;
+
     const prev = state.viewHistory.pop();
     if (prev) {
       state.currentView = prev;
@@ -237,7 +242,7 @@
       state.playerStarted = false;
       dom.videoPlayer.pause();
       dom.videoPlayer.src = '';
-      dom.videoPlayer.load();
+      dom.videoPlayer.load(); // release previous resource from memory
     }
   }
 
@@ -774,9 +779,16 @@
 
   async function openDetail(type, id) {
     navigateTo('detail', { title: 'Loading...' });
+    preload.cancel(); // invalidate any preload from a previously viewed title
+
     dom.detailContent.innerHTML = `
       <div class="loading-state"><div class="spinner"></div><p>Loading details...</p></div>
     `;
+
+    // For movies in custom mode, start fetching streams in parallel with metadata
+    const streamsPromise = (type === 'movie' && api.getMode() === 'custom')
+      ? api.getStreams(type, id)
+      : null;
 
     const meta = await api.getMeta(type, id);
     if (!meta) {
@@ -843,9 +855,9 @@
     html += '</div>';
     dom.detailContent.innerHTML = html;
 
-    // Load streams for movies
+    // Load streams for movies — use pre-fetched promise if available
     if (type === 'movie') {
-      loadStreams(type, id);
+      loadStreams(type, id, undefined, streamsPromise);
     }
 
     // Attach series handlers
@@ -941,7 +953,7 @@
 
   // ─── Stream Loading with Speed Testing ───────────
 
-  async function loadStreams(type, id, seasonEpisode) {
+  async function loadStreams(type, id, seasonEpisode, prefetchedStreamsPromise) {
     const container = document.getElementById('stream-container');
     if (!container) return;
 
@@ -953,7 +965,10 @@
       }
     }
 
-    const streams = await api.getStreams(type, id, seasonEpisode);
+    // Use pre-fetched streams if available (from parallel fetch in openDetail)
+    const streams = prefetchedStreamsPromise
+      ? await prefetchedStreamsPromise
+      : await api.getStreams(type, id, seasonEpisode);
 
     if (streams.length === 0) {
       const isCustom = api.getMode() === 'custom';
@@ -1044,6 +1059,12 @@
       // Update individual stream items with their speed
       updateStreamItemSpeed(result);
     });
+
+    // Start warming the best stream in the background
+    const bestPlayable = ranked.find(r => r.responseTime < Infinity);
+    if (bestPlayable) {
+      preload.warmStream(bestPlayable.stream);
+    }
 
     // Re-render sorted by speed
     const statusEl = container.querySelector('.stream-speed-status');
@@ -1185,6 +1206,60 @@
     }
   }
 
+  // ─── Preload Manager ───────────────────────────────────────────────
+  // Warms the top-ranked stream in the background so torrent peers are
+  // already connecting by the time the user taps Play.
+  const preload = (() => {
+    let _controller = null;
+    let _preloadedHash = null;
+
+    function cancel() {
+      if (_controller) {
+        _controller.abort();
+        _controller = null;
+      }
+      _preloadedHash = null;
+    }
+
+    async function warmStream(stream) {
+      if (!stream || !stream.infoHash || !stream._customMode) return;
+      if (_preloadedHash === stream.infoHash) return; // already warming
+
+      cancel();
+
+      _preloadedHash = stream.infoHash;
+      _controller = new AbortController();
+
+      const url = api.getPlaybackUrl(stream);
+      if (!url) return;
+
+      try {
+        // Range: bytes=0-0 causes the server to connect to peers and start buffering
+        // without streaming the full response
+        const resp = await fetch(url, {
+          headers: { 'Range': 'bytes=0-0' },
+          signal: _controller.signal,
+        });
+        if (resp.body) {
+          const reader = resp.body.getReader();
+          await reader.read();
+          reader.cancel();
+        }
+        console.debug('[preload] warm complete for', stream.infoHash.slice(0, 8));
+      } catch (e) {
+        if (e.name !== 'AbortError') {
+          console.debug('[preload] warm failed:', e.message);
+        }
+      }
+    }
+
+    function isWarmed(stream) {
+      return stream && stream.infoHash === _preloadedHash;
+    }
+
+    return { warmStream, cancel, isWarmed };
+  })();
+
   // Store ranked results so stream items can reference them by index
   let _lastRankedStreams = [];
 
@@ -1245,6 +1320,18 @@
 
   // ─── Playback ────────────────────────────────────
 
+  function showPlayerError(title, hint) {
+    dom.playerOverlay.innerHTML = `
+      <p style="color:var(--danger)">${escapeHTML(title)}</p>
+      <p style="font-size:13px;color:var(--text-muted)">${hint}</p>
+      <button id="player-go-back" style="
+        margin-top:16px; padding:10px 24px; background:var(--accent);
+        border:none; border-radius:8px; color:white; font-size:14px; cursor:pointer;
+      ">Go Back</button>
+    `;
+    document.getElementById('player-go-back').addEventListener('click', () => goBack());
+  }
+
   async function playStream(stream) {
     const url = api.getPlaybackUrl(stream);
     if (!url) {
@@ -1261,17 +1348,22 @@
     navigateTo('player');
     dom.playerOverlay.classList.remove('hidden');
 
+    const alreadyWarmed = preload.isWarmed(stream);
+    preload.cancel(); // stop background fetch — playback takes over now
+
     // Build loading screen with poster
     const poster = state.currentMeta?.poster || '';
     const title = state.currentMeta?.name || '';
-    const statusLabel = stream._customMode ? 'Connecting to torrent peers...' : 'Loading stream...';
+    const statusLabel = alreadyWarmed
+      ? 'Starting playback...'
+      : (stream._customMode ? 'Connecting to torrent peers...' : 'Loading stream...');
     dom.playerOverlay.innerHTML = `
       ${poster ? `<img class="loading-poster" src="${poster}" alt="">` : ''}
       <div class="loading-info">
         ${title ? `<div class="loading-title">${escapeHTML(title)}</div>` : ''}
         <div class="loading-bar-container"><div class="loading-bar"></div></div>
         <div class="loading-status">${statusLabel}</div>
-        ${stream._customMode ? '<div class="loading-sub">This may take 30-60 seconds</div>' : ''}
+        ${stream._customMode && !alreadyWarmed ? '<div class="loading-sub">This may take 30-60 seconds</div>' : ''}
       </div>
     `;
 
@@ -1325,6 +1417,23 @@
       if (statusInterval) clearInterval(statusInterval);
       await dom.videoPlayer.play();
       dom.playerOverlay.classList.add('hidden');
+
+      // Mid-playback stall detection — re-show overlay during rebuffering
+      const onStalled = () => {
+        dom.playerOverlay.innerHTML = `
+          <div class="loading-info">
+            <div class="spinner" style="width:32px;height:32px;margin:0 auto 12px;border-width:3px"></div>
+            <div class="loading-status">Buffering...</div>
+          </div>
+        `;
+        dom.playerOverlay.classList.remove('hidden');
+      };
+      const onPlaying = () => {
+        dom.playerOverlay.classList.add('hidden');
+      };
+      dom.videoPlayer.addEventListener('waiting', onStalled);
+      dom.videoPlayer.addEventListener('stalled', onStalled);
+      dom.videoPlayer.addEventListener('playing', onPlaying);
     } catch (e) {
       if (statusInterval) clearInterval(statusInterval);
       let hint = escapeHTML(e.message);

@@ -1766,14 +1766,15 @@
     try {
       // Fetch library items, cache items, and active torrents in parallel
       const [libResp, cacheResp, torrentResp] = await Promise.all([
-        fetch('/api/library').then(r => r.json()).catch(() => ({ items: [] })),
-        fetch('/api/cache').then(r => r.json()).catch(() => ({ items: [] })),
+        fetch('/api/library').then(r => { if (!r.ok) throw new Error(`Library API ${r.status}`); return r.json(); }).catch(e => { console.error('[Library] fetch failed:', e); return { items: [] }; }),
+        fetch('/api/cache').then(r => { if (!r.ok) throw new Error(`Cache API ${r.status}`); return r.json(); }).catch(e => { console.error('[Cache] fetch failed:', e); return { items: [] }; }),
         fetch('/api/torrent-status').then(r => r.json()).catch(() => ({ torrents: [] })),
       ]);
 
       const libraryItems = libResp.items || [];
       const cacheItems = cacheResp.items || [];
       const activeTorrents = torrentResp.torrents || [];
+      console.log(`[Library] ${libraryItems.length} library items, ${cacheItems.length} cache items, ${activeTorrents.length} active torrents`);
 
       // Build a set of names already in library to avoid duplicates
       const libraryNames = new Set(libraryItems.map(i => (i.name || '').toLowerCase()));

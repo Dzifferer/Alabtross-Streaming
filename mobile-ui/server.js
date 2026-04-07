@@ -350,7 +350,13 @@ app.get('/api/torrent-status/:infoHash', (req, res) => {
 
 // GET /api/library — list all library items
 app.get('/api/library', rateLimit, (req, res) => {
-  res.json({ items: library.getAll() });
+  try {
+    const items = library.getAll();
+    res.json({ items });
+  } catch (err) {
+    console.error('[Library] getAll() failed:', err.message);
+    res.status(500).json({ items: [], error: err.message });
+  }
 });
 
 // GET /api/library/:id — get single library item

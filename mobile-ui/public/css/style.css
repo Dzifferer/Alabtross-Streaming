@@ -1256,22 +1256,13 @@ html, body {
   animation: slideUp 0.2s ease-out;
 }
 
-.stream-action-bar--inline {
-  position: static;
-  transform: none;
-  box-shadow: none;
-  border: none;
-  background: transparent;
-  justify-content: center;
-  animation: none;
-}
-
 @keyframes slideUp {
   from { transform: translateX(-50%) translateY(20px); opacity: 0; }
   to { transform: translateX(-50%) translateY(0); opacity: 1; }
 }
 
-.stream-action-bar button {
+.btn-play,
+.btn-library {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1284,12 +1275,12 @@ html, body {
   transition: all 0.2s;
 }
 
-.stream-action-bar .btn-play {
+.btn-play {
   background: var(--accent);
   color: white;
 }
 
-.stream-action-bar .btn-library {
+.btn-library {
   background: rgba(255,255,255,0.1);
   color: var(--text-primary);
 }

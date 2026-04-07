@@ -2328,13 +2328,14 @@
       // Group shows by name (imdbId or name), then by season
       const showGroups = new Map();
       for (const ep of shows) {
-        const showKey = ep.imdbId || ep.name || 'Unknown Show';
+        const showKey = ep.imdbId || ep.showName || ep.name || 'Unknown Show';
         if (!showGroups.has(showKey)) {
-          showGroups.set(showKey, { name: ep.name, poster: ep.poster, year: ep.year, seasons: new Map() });
+          showGroups.set(showKey, { name: ep.showName || ep.name, poster: ep.poster, year: ep.year, seasons: new Map() });
         }
         const group = showGroups.get(showKey);
-        // Use the best poster/name available
+        // Use the best poster/name/showName available
         if (!group.poster && ep.poster) group.poster = ep.poster;
+        if (ep.showName && (!group.name || group.name.includes(' - '))) group.name = ep.showName;
         const seasonNum = ep.season || 1;
         if (!group.seasons.has(seasonNum)) {
           group.seasons.set(seasonNum, []);
@@ -3056,7 +3057,7 @@
       result.push({
         _isPack: true,
         packId,
-        name: first.name,
+        name: first.showName || first.name,
         poster: first.poster,
         season: first.season,
         quality: first.quality,
@@ -3200,10 +3201,11 @@
 
     // Build collapsed episode list (hidden by default)
     let episodeListHtml = pack.episodes.map(ep => {
-      const epLabel = ep.episode != null ? `E${String(ep.episode).padStart(2, '0')}` : ep.fileName || '?';
+      const epLabel = ep.episode != null ? `E${String(ep.episode).padStart(2, '0')}` : '?';
+      const epName = ep.name || ep.fileName || '';
       const epPct = ep.status === 'complete' ? '100%' : `${ep.progress || 0}%`;
       const epStatus = ep.status === 'complete' ? 'done' : ep.status === 'failed' ? 'fail' : '';
-      return `<div class="pack-episode-row ${epStatus}"><span class="pack-ep-label">${escapeHTML(epLabel)}</span><span class="pack-ep-file">${escapeHTML(ep.fileName || '')}</span><span class="pack-ep-pct">${epPct}</span></div>`;
+      return `<div class="pack-episode-row ${epStatus}"><span class="pack-ep-label">${escapeHTML(epLabel)}</span><span class="pack-ep-file">${escapeHTML(epName)}</span><span class="pack-ep-pct">${epPct}</span></div>`;
     }).join('');
 
     return `

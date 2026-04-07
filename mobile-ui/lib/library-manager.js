@@ -168,10 +168,11 @@ class LibraryManager {
       engine.on('ready', () => {
         clearTimeout(timeout);
 
-        // Find all video files, excluding samples/trailers
+        // Find all video files, excluding samples/trailers/promos and tiny junk files
+        const PACK_MIN_FILE_SIZE = 10 * 1024 * 1024; // 10 MB — skip promo/ad files
         const dominated = /\b(sample|trailer|extra|bonus|featurette|interview)\b/i;
         const videoFiles = engine.files.filter(f =>
-          isFileNameSafe(f.name) && !dominated.test(f.name)
+          isFileNameSafe(f.name) && !dominated.test(f.name) && f.length >= PACK_MIN_FILE_SIZE
         );
 
         if (videoFiles.length === 0) {
@@ -208,11 +209,15 @@ class LibraryManager {
 
           const relativePath = path.relative(this._libraryPath, path.join(packDir, file.path));
 
+          // Use filename-derived name for individual episodes (e.g., "Naruto Shippuden - 010 - Sealing Jutsu")
+          const episodeName = this._deriveEpisodeName(file.name);
+
           const item = {
             id: itemId,
             imdbId,
             type: 'series',
-            name: name || 'Unknown',
+            name: episodeName,
+            showName: name || 'Unknown',
             poster: poster || '',
             year: year || '',
             quality: quality || '',
@@ -325,8 +330,8 @@ class LibraryManager {
     // Try E05 pattern (without season)
     const eMatch = base.match(/\bE(\d+)\b/i);
     if (eMatch) return parseInt(eMatch[1], 10);
-    // Try "- 05 -" or "- 05." pattern
-    const dashMatch = base.match(/[-–]\s*(\d{1,3})\s*[-–.]/);
+    // Try "- 05 -" or "- 05." or "- 05 " at end before extension (anime fansub convention)
+    const dashMatch = base.match(/[-–]\s*(\d{1,4})\s*(?:[-–.\s]|$)/);
     if (dashMatch) return parseInt(dashMatch[1], 10);
     // Try "Episode 5" pattern
     const epMatch = base.match(/Episode\s*(\d+)/i);
@@ -335,6 +340,25 @@ class LibraryManager {
     const xMatch = base.match(/\d+x(\d+)/i);
     if (xMatch) return parseInt(xMatch[1], 10);
     return null;
+  }
+
+  /**
+   * Derive a display name for a pack episode from its filename.
+   * Strips group tags, file extension, and cleans up separators.
+   * e.g. "[animeawake] Naruto Shippuden - 010 - Sealing Jutsu.mp4"
+   *   -> "Naruto Shippuden - 010 - Sealing Jutsu"
+   */
+  _deriveEpisodeName(fileName) {
+    let name = path.basename(fileName, path.extname(fileName));
+    // Strip [group] tags at start
+    name = name.replace(/^\[[^\]]*\]\s*/g, '');
+    // Strip trailing whitespace/dots
+    name = name.replace(/[\s.]+$/, '');
+    // Replace underscores/dots with spaces (if used as separators)
+    if (!name.includes(' ') && (name.includes('.') || name.includes('_'))) {
+      name = name.replace(/[._]/g, ' ');
+    }
+    return name.trim() || path.basename(fileName);
   }
 
   _stopPackEngine(packId) {
@@ -1407,6 +1431,7 @@ class LibraryManager {
       convertProgress: item.convertProgress || null,
       convertError: item.convertError || null,
       packId: item.packId || null,
+      showName: item.showName || null,
     };
   }
 

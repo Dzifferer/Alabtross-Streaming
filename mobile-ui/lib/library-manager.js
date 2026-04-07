@@ -508,6 +508,16 @@ class LibraryManager {
     // Stop download if active
     this._stopDownload(id);
 
+    // If this item belongs to a pack, check if we should stop the shared engine
+    if (item.packId) {
+      const remainingPackItems = [...this._items.values()].filter(
+        i => i.packId === item.packId && i.id !== id && i.status === 'downloading'
+      );
+      if (remainingPackItems.length === 0) {
+        this._stopPackEngine(item.packId);
+      }
+    }
+
     // Kill conversion process if active
     this._stopConversion(id);
 
@@ -1413,6 +1423,7 @@ class LibraryManager {
       error: item.error,
       convertProgress: item.convertProgress || null,
       convertError: item.convertError || null,
+      packId: item.packId || null,
     };
   }
 

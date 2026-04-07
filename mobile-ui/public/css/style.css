@@ -3127,6 +3127,93 @@ html, body {
   background: rgba(255,255,255,0.1);
 }
 
+/* ===== Season Pack Rows (Downloads) ===== */
+.download-pack-item {
+  border-left: 3px solid var(--accent);
+}
+
+.pack-season-tag {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  background: rgba(108, 92, 231, 0.15);
+  padding: 1px 6px;
+  border-radius: 3px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.pack-expand-btn {
+  transition: transform 0.2s;
+}
+
+.pack-expand-btn.expanded {
+  transform: rotate(180deg);
+}
+
+.pack-episodes-detail {
+  margin: 0 0 8px 52px;
+  padding: 6px 10px;
+  background: var(--bg-elevated);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  overflow: hidden;
+  transition: max-height 0.3s ease, opacity 0.2s ease;
+  max-height: 500px;
+  opacity: 1;
+}
+
+.pack-episodes-detail.collapsed {
+  max-height: 0;
+  opacity: 0;
+  padding: 0 10px;
+  margin-bottom: 0;
+}
+
+.pack-episode-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+
+.pack-episode-row:last-child {
+  border-bottom: none;
+}
+
+.pack-episode-row.done .pack-ep-pct {
+  color: var(--success);
+}
+
+.pack-episode-row.fail .pack-ep-pct {
+  color: var(--danger);
+}
+
+.pack-ep-label {
+  font-weight: 600;
+  color: var(--text-dim);
+  width: 36px;
+  flex-shrink: 0;
+}
+
+.pack-ep-file {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-muted);
+}
+
+.pack-ep-pct {
+  flex-shrink: 0;
+  font-weight: 500;
+  color: var(--text-dim);
+  min-width: 36px;
+  text-align: right;
+}
+
 /* ===== Diagnostics Panel ===== */
 .diagnostics-empty {
   padding: 16px;

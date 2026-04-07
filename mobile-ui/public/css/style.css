@@ -2055,6 +2055,12 @@ html, body {
   color: var(--accent);
 }
 
+.library-card-overlay.queued {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
 .library-card-overlay.failed {
   font-size: 12px;
   font-weight: 600;
@@ -2134,6 +2140,7 @@ html, body {
 
 .library-card-meta.downloading { color: var(--accent); }
 .library-card-meta.complete { color: var(--success); }
+.library-card-meta.queued { color: var(--text-muted); }
 .library-card-meta.failed { color: var(--danger); }
 
 /* Section headers span full grid width */

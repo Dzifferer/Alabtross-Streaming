@@ -2619,11 +2619,14 @@
     }
 
     return `
-      <div class="card" data-id="${escapeHTML(item.id)}" data-status="${item.status}">
+      <div class="card" data-id="${escapeHTML(item.id)}" data-imdb-id="${escapeHTML(item.imdbId || '')}" data-item-name="${escapeHTML(item.name || '')}" data-status="${item.status}">
         <div class="card-poster">
           ${poster ? `<img src="${poster}" alt="${title}">` : ''}
           ${!poster ? `<div class="poster-placeholder">${title}</div>` : ''}
           ${overlayHtml}
+          <button class="library-card-relink" data-id="${escapeHTML(item.id)}" title="Re-link to correct IMDB">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>
+          </button>
           <button class="library-card-remove" data-id="${escapeHTML(item.id)}" title="Remove">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
           </button>
@@ -2776,6 +2779,128 @@
     }
   }
 
+  // ─── Re-link Modal (Manual IMDB Linking) ─────────
+
+  function showRelinkModal(itemId, currentName) {
+    const existing = document.getElementById('relink-modal');
+    if (existing) existing.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'relink-modal';
+    modal.className = 'relink-modal';
+
+    modal.innerHTML = `
+      <div class="relink-modal-backdrop"></div>
+      <div class="relink-modal-content">
+        <div class="relink-modal-header">
+          <span>Re-link: ${escapeHTML(currentName)}</span>
+          <button class="relink-modal-close" aria-label="Close">&times;</button>
+        </div>
+        <div class="relink-search-row">
+          <input type="text" class="relink-search-input" placeholder="Search for correct movie or show..." maxlength="200" value="${escapeHTML(currentName)}">
+          <button class="relink-search-btn">Search</button>
+        </div>
+        <div class="relink-results"></div>
+      </div>
+    `;
+
+    document.body.appendChild(modal);
+
+    const close = () => modal.remove();
+    modal.querySelector('.relink-modal-backdrop').addEventListener('click', close);
+    modal.querySelector('.relink-modal-close').addEventListener('click', close);
+
+    const input = modal.querySelector('.relink-search-input');
+    const searchBtn = modal.querySelector('.relink-search-btn');
+    const resultsDiv = modal.querySelector('.relink-results');
+
+    const doSearch = async () => {
+      const query = input.value.trim();
+      if (!query) return;
+      resultsDiv.innerHTML = '<div class="relink-loading">Searching...</div>';
+      searchBtn.disabled = true;
+
+      try {
+        const resp = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+        if (!resp.ok) throw new Error('Search failed');
+        const data = await resp.json();
+        const results = data.results || [];
+
+        if (results.length === 0) {
+          resultsDiv.innerHTML = '<div class="relink-empty">No results found. Try a different search.</div>';
+          return;
+        }
+
+        resultsDiv.innerHTML = results.map(r => {
+          const poster = isSafePosterUrl(r.poster) ? r.poster : '';
+          const imdbId = r.imdb_id || r.id || '';
+          const typeBadge = r.type === 'series' ? 'TV' : 'Movie';
+          return `
+            <div class="relink-result" data-imdb-id="${escapeHTML(imdbId)}" data-name="${escapeHTML(r.name || '')}" data-poster="${escapeHTML(poster)}" data-year="${escapeHTML(r.year || '')}" data-type="${escapeHTML(r.type || 'movie')}">
+              <div class="relink-result-poster">
+                ${poster ? `<img src="${poster}" alt="${escapeHTML(r.name || '')}">` : `<div class="relink-result-no-poster">${escapeHTML(r.name || '?')}</div>`}
+              </div>
+              <div class="relink-result-info">
+                <div class="relink-result-title">${escapeHTML(r.name || 'Unknown')}</div>
+                <div class="relink-result-meta">${r.year || ''}${r.year ? ' · ' : ''}${typeBadge}${imdbId ? ' · ' + escapeHTML(imdbId) : ''}</div>
+                ${r.overview ? `<div class="relink-result-overview">${escapeHTML(r.overview.substring(0, 120))}${r.overview.length > 120 ? '...' : ''}</div>` : ''}
+              </div>
+            </div>
+          `;
+        }).join('');
+
+        // Attach click handlers on results
+        resultsDiv.querySelectorAll('.relink-result').forEach(el => {
+          el.addEventListener('click', async () => {
+            const imdbId = el.dataset.imdbId;
+            const name = el.dataset.name;
+            const poster = el.dataset.poster;
+            const year = el.dataset.year;
+            const type = el.dataset.type;
+
+            if (!imdbId || !imdbId.startsWith('tt')) {
+              resultsDiv.innerHTML = '<div class="relink-empty">This item has no IMDB ID and cannot be linked.</div>';
+              return;
+            }
+
+            el.style.opacity = '0.5';
+            el.style.pointerEvents = 'none';
+
+            try {
+              const resp = await fetch(`/api/library/${encodeURIComponent(itemId)}/relink`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ imdbId, name, poster, year, type }),
+              });
+              if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                throw new Error(err.error || 'Re-link failed');
+              }
+              close();
+              loadLibrary();
+            } catch (e) {
+              el.style.opacity = '1';
+              el.style.pointerEvents = '';
+              console.error('[Library] Re-link failed:', e.message);
+              resultsDiv.insertAdjacentHTML('afterbegin', `<div class="relink-empty" style="color:var(--danger)">Error: ${escapeHTML(e.message)}</div>`);
+            }
+          });
+        });
+      } catch (e) {
+        resultsDiv.innerHTML = `<div class="relink-empty">Search failed: ${escapeHTML(e.message)}</div>`;
+      } finally {
+        searchBtn.disabled = false;
+      }
+    };
+
+    searchBtn.addEventListener('click', doSearch);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
+    input.select();
+
+    // Auto-search with current name
+    doSearch();
+  }
+
   function attachCategorizeHandlers(container) {
     container.querySelectorAll('.card[data-uncategorized="true"]').forEach(card => {
       // Add a long-press handler to show categorize modal
@@ -2824,6 +2949,17 @@
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         removeLibraryItem(btn.dataset.id);
+      });
+    });
+
+    // Re-link buttons
+    container.querySelectorAll('.library-card-relink').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const card = btn.closest('.card');
+        const itemId = card.dataset.id;
+        const itemName = card.dataset.itemName || '';
+        showRelinkModal(itemId, itemName);
       });
     });
 

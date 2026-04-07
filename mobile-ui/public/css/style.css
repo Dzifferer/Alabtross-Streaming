@@ -1041,6 +1041,175 @@ html, body {
   opacity: 0.8;
 }
 
+/* ===== Re-link Modal (Manual IMDB Linking) ===== */
+.relink-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.relink-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+}
+
+.relink-modal-content {
+  position: relative;
+  z-index: 1;
+  background: var(--surface, #1a1a2e);
+  border-radius: var(--radius, 8px);
+  width: 94%;
+  max-width: 480px;
+  max-height: 85vh;
+  overflow-y: auto;
+  padding: 16px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+}
+
+.relink-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary, #fff);
+}
+
+.relink-modal-close {
+  background: none;
+  border: none;
+  color: var(--text-muted, #888);
+  font-size: 22px;
+  cursor: pointer;
+  padding: 4px 8px;
+  line-height: 1;
+}
+
+.relink-search-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.relink-search-input {
+  flex: 1;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: var(--radius-sm, 6px);
+  color: var(--text-primary, #fff);
+  padding: 10px 12px;
+  font-size: 14px;
+  outline: none;
+}
+
+.relink-search-input:focus {
+  border-color: var(--accent, #4ade80);
+}
+
+.relink-search-btn {
+  background: var(--accent, #6c5ce7);
+  border: none;
+  border-radius: var(--radius-sm, 6px);
+  color: #fff;
+  padding: 10px 16px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.relink-search-btn:active {
+  opacity: 0.8;
+}
+
+.relink-search-btn:disabled {
+  opacity: 0.5;
+}
+
+.relink-results {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.relink-loading,
+.relink-empty {
+  text-align: center;
+  padding: 24px 8px;
+  color: var(--text-muted, #888);
+  font-size: 13px;
+}
+
+.relink-result {
+  display: flex;
+  gap: 10px;
+  padding: 8px;
+  border-radius: var(--radius-sm, 6px);
+  background: rgba(255,255,255,0.04);
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.relink-result:active {
+  background: rgba(255,255,255,0.1);
+}
+
+.relink-result-poster {
+  flex-shrink: 0;
+  width: 50px;
+  height: 75px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--bg-card, #16161f);
+}
+
+.relink-result-poster img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.relink-result-no-poster {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  color: var(--text-muted, #888);
+  text-align: center;
+  padding: 4px;
+}
+
+.relink-result-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.relink-result-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary, #fff);
+  margin-bottom: 2px;
+}
+
+.relink-result-meta {
+  font-size: 12px;
+  color: var(--text-muted, #888);
+  margin-bottom: 4px;
+}
+
+.relink-result-overview {
+  font-size: 11px;
+  color: var(--text-dim, #8888a0);
+  line-height: 1.4;
+}
+
 /* ===== Channel Cards (Live TV) ===== */
 .channel-card {
   flex-shrink: 0;
@@ -1235,6 +1404,9 @@ html, body {
 .grid-view .card-poster img {
   position: absolute;
   inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .grid-view .card-poster .poster-placeholder {
@@ -2548,6 +2720,38 @@ html, body {
 
 @media (hover: hover) {
   .card:hover .library-card-remove { opacity: 1; }
+}
+
+/* Re-link button on poster */
+.library-card-relink {
+  position: absolute;
+  top: 36px;
+  right: 6px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: rgba(0,0,0,0.6);
+  border: none;
+  color: rgba(255,255,255,0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 3;
+  opacity: 0;
+  transition: opacity 0.2s, color 0.2s;
+}
+
+.library-card-relink:active {
+  color: var(--accent);
+}
+
+@media (hover: none) {
+  .library-card-relink { opacity: 1; }
+}
+
+@media (hover: hover) {
+  .card:hover .library-card-relink { opacity: 1; }
 }
 
 /* Status text below card */

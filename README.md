@@ -6,8 +6,7 @@ A fully automated setup that turns an NVIDIA Jetson Orin Nano into a secure home
 
 - **Alabtross Mobile UI** — a lightweight, mobile-first web interface with dual streaming modes, built-in video player, live TV, and a download library
 - **Stremio Server** — stream movies and TV shows from anywhere, with content cached to local or external storage
-- **WireGuard VPN** — secure tunnel so your streaming server is never exposed to the public internet
-- **UPnP Auto Port Forwarding** — automatically configures your router (no manual port forwarding needed)
+- **Tailscale VPN** — secure peer-to-peer tunnel so your streaming server is never exposed to the public internet (no port forwarding needed, works behind CGNAT)
 - **DuckDNS** (optional) — keeps your server reachable when your home IP changes
 - **Health Monitoring** — auto-restarts crashed containers every 5 minutes
 
@@ -107,35 +106,23 @@ On your laptop:
 
 ### Step 5 — Connect Your Devices
 
-If you used `VPN_PROFILE_NAMES`, the script already created profiles and showed QR codes. Scan them with the WireGuard app.
+The script installs Tailscale automatically. To connect your devices:
 
-If you didn't, create profiles manually over SSH:
+14. Install the Tailscale app on your phone/computer
+15. Log in with the same account used on the Jetson
 
-14. Create a VPN profile for your phone:
-    ```bash
-    pivpn add
-    ```
-
-15. Get the QR code:
-    ```bash
-    pivpn -qr myphone
-    ```
-    Scan it with the WireGuard app on your phone.
-
-**Router port forwarding:**
-- If `ENABLE_UPNP=yes` (the default in headless mode), the script auto-forwards port 51820 via UPnP — no router login needed
-- If UPnP isn't available on your router, you'll need to manually forward `51820 UDP` to the Jetson's IP
+No port forwarding or manual configuration needed — Tailscale handles NAT traversal automatically.
 
 ### Step 6 — Done
 
 16. The Jetson is now running headless. Disconnect the USB cable if you want — everything runs over ethernet.
 
-17. On your phone: connect WireGuard, open `http://<jetson-ip>:8080`
+17. On your phone: connect Tailscale, open `http://<jetson-tailscale-ip>:8080`
 
 18. To SSH in anytime:
     ```bash
-    ssh jetson@192.168.1.XX      # from home network
-    ssh jetson@10.6.0.1          # from VPN
+    ssh jetson@192.168.1.XX          # from home network
+    ssh jetson@<jetson-tailscale-ip> # from Tailscale
     ```
 
 ## Quick Start (interactive, with monitor)
@@ -194,8 +181,8 @@ Metadata (movie info, posters, search) always comes from **Cinemeta** regardless
 
 ## After Setup
 
-1. **Connect** your phone/laptop to WireGuard VPN
-2. **Open** `http://<jetson-ip>:8080` in your mobile browser
+1. **Connect** your phone/laptop to Tailscale
+2. **Open** `http://<jetson-tailscale-ip>:8080` in your mobile browser
 3. **Add to Home Screen** for an app-like experience (it's a PWA)
 4. Browse, search, and stream — the default Custom mode works immediately with no extra configuration
 
@@ -203,9 +190,8 @@ Metadata (movie info, posters, search) always comes from **Cinemeta** regardless
 
 | Service | Port | Protocol | Exposed to Internet |
 |---------|------|----------|---------------------|
-| Stremio Server | 11470 | TCP | No (VPN only) |
-| Alabtross Mobile UI | 8080 | TCP | No (VPN only) |
-| WireGuard VPN | 51820 | UDP | Yes (encrypted tunnel) |
+| Stremio Server | 11470 | TCP | No (Tailscale only) |
+| Alabtross Mobile UI | 8080 | TCP | No (Tailscale only) |
 | SSH | 22 | TCP | No (LAN only) |
 
 ## Mobile UI Features
@@ -216,8 +202,8 @@ Metadata (movie info, posters, search) always comes from **Cinemeta** regardless
 - Auto speed-tests all available streams and picks the fastest source
 - **Library** — download movies/episodes to the server for offline playback
 - **Live TV** — paste an M3U/M3U8 playlist URL in Settings to browse IPTV channels
-- **Share** — generate a QR code so other devices on your VPN can connect
-- VPN detection — warns if you're not connected through WireGuard
+- **Share** — Tailscale setup guide for connecting other devices
+- VPN detection — warns if you're not connected through Tailscale
 - PWA installable — add to home screen for a native app feel
 - Built-in video player with range-request support
 
@@ -229,9 +215,8 @@ docker restart stremio-server     # Restart Stremio
 docker stats stremio-server       # CPU/RAM usage
 docker logs alabtross-mobile      # View Mobile UI logs
 docker restart alabtross-mobile   # Restart Mobile UI
-pivpn -c                          # List VPN connections
-pivpn add                         # Add a new VPN client
-pivpn -qr <name>                  # Show QR code for a client
+tailscale status                  # Check Tailscale VPN status
+tailscale ip                      # Show Tailscale IP address
 df -h /mnt/movies                 # Check external drive space
 cat /var/log/alabtross-health.log # View health monitor log
 ```
@@ -241,7 +226,7 @@ cat /var/log/alabtross-health.log # View health monitor log
 ```
 Phone/Laptop
     |
-    | WireGuard VPN (port 51820, encrypted)
+    | Tailscale VPN (encrypted peer-to-peer)
     |
 Jetson Orin Nano (home network)
     |
@@ -274,10 +259,9 @@ docker restart stremio-server
 ```
 
 **Can't connect via VPN from outside home:**
-- If UPnP was used, verify it worked: `upnpc -s` (look for ExternalIPAddress)
-- Otherwise, confirm port 51820 UDP is forwarded on your router
-- Check your DuckDNS hostname resolves: `ping yourdomain.duckdns.org`
-- Check WireGuard is running: `sudo systemctl status wg-quick@wg0`
+- Check Tailscale is running: `tailscale status`
+- Verify the Jetson appears in your Tailscale admin console
+- Try `tailscale ping <jetson-name>` from another device
 
 **Mobile UI not loading:**
 ```bash

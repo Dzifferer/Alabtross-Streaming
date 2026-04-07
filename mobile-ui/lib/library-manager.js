@@ -94,7 +94,7 @@ class LibraryManager {
       episode: episode != null ? episode : null,
       infoHash,
       magnetUri,
-      status: shouldQueue ? 'queued' : 'downloading',   // downloading | complete | failed | queued
+      status: shouldQueue ? 'queued' : 'downloading',   // downloading | complete | failed | queued | paused
       progress: 0,
       downloadSpeed: 0,
       numPeers: 0,
@@ -158,6 +158,82 @@ class LibraryManager {
     }
 
     return null;
+  }
+
+  /**
+   * Pause an active download. Stops the torrent engine but keeps the item
+   * in 'paused' status so it can be resumed later.
+   */
+  pauseItem(id) {
+    const item = this._items.get(id);
+    if (!item) return false;
+    if (item.status !== 'downloading') return false;
+
+    this._stopDownload(id);
+    item.status = 'paused';
+    item.downloadSpeed = 0;
+    item.numPeers = 0;
+    this._saveMetadata();
+    this._processQueue();
+    console.log(`[Library] Paused: "${item.name}"`);
+    return true;
+  }
+
+  /**
+   * Resume a paused download. Re-starts the torrent engine.
+   */
+  resumeItem(id) {
+    const item = this._items.get(id);
+    if (!item) return false;
+    if (item.status !== 'paused') return false;
+
+    const activeDownloads = [...this._items.values()].filter(i => i.status === 'downloading').length;
+    if (activeDownloads >= this._maxConcurrentDownloads) {
+      item.status = 'queued';
+      this._saveMetadata();
+      console.log(`[Library] Resume queued (at capacity): "${item.name}"`);
+      return true;
+    }
+
+    item.status = 'downloading';
+    item.error = null;
+    this._startDownload(id);
+    this._saveMetadata();
+    console.log(`[Library] Resumed: "${item.name}"`);
+    return true;
+  }
+
+  /**
+   * Reorder an item in the queue. newPosition is 0-based index within queued items.
+   */
+  reorderQueue(id, newPosition) {
+    const item = this._items.get(id);
+    if (!item || item.status !== 'queued') return false;
+
+    // Get all queued items sorted by addedAt
+    const queued = [...this._items.values()]
+      .filter(i => i.status === 'queued')
+      .sort((a, b) => a.addedAt - b.addedAt);
+
+    if (queued.length <= 1) return true;
+    newPosition = Math.max(0, Math.min(newPosition, queued.length - 1));
+
+    // Reassign addedAt timestamps to reflect new order
+    const currentIdx = queued.findIndex(i => i.id === id);
+    if (currentIdx === -1) return false;
+
+    queued.splice(currentIdx, 1);
+    queued.splice(newPosition, 0, item);
+
+    // Reassign timestamps to maintain order
+    const baseTime = Date.now() - queued.length * 1000;
+    for (let i = 0; i < queued.length; i++) {
+      queued[i].addedAt = baseTime + i * 1000;
+    }
+
+    this._saveMetadata();
+    console.log(`[Library] Reordered queue: "${item.name}" to position ${newPosition}`);
+    return true;
   }
 
   /**

@@ -90,6 +90,28 @@
         <div class="settings-panel">
           <h2>Settings</h2>
 
+          <!-- Downloads -->
+          <div class="setting-group">
+            <label>Downloads</label>
+            <div id="downloads-panel">
+              <div id="downloads-loading" class="downloads-empty">
+                <span class="setting-hint">Loading downloads...</span>
+              </div>
+            </div>
+            <span class="setting-hint" style="margin-top:8px">Active downloads, queued items, and completed files</span>
+          </div>
+
+          <!-- Source Diagnostics -->
+          <div class="setting-group">
+            <label>Source Diagnostics</label>
+            <div id="diagnostics-panel">
+              <div class="diagnostics-empty">
+                <span class="setting-hint">Test connectivity to stream sources</span>
+              </div>
+            </div>
+            <button id="run-diagnostics-btn" class="btn-block" style="margin-top:8px">Run Diagnostics</button>
+          </div>
+
           <!-- Concurrent Streams -->
           <div class="setting-group">
             <label>Max Concurrent Streams</label>
@@ -137,6 +159,7 @@
                 <span class="source-badge active">Active</span>
               </div>
             </div>
+            <div id="source-stats" class="source-stats"></div>
             <span class="setting-hint">Streams are fetched directly from torrent sources</span>
           </div>
 

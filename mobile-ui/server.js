@@ -903,7 +903,7 @@ app.post('/api/library/:id/reorder', rateLimit, (req, res) => {
 app.get('/api/library/:id/stream', async (req, res) => {
   const item = library.getItem(req.params.id);
   if (!item) return res.status(404).json({ error: 'Item not found' });
-  if (item.status !== 'complete') {
+  if (item.status !== 'complete' && item.status !== 'converting') {
     return res.status(400).json({ error: 'Download not complete' });
   }
 
@@ -963,7 +963,7 @@ app.get('/api/library/:id/stream', async (req, res) => {
 app.get('/api/library/:id/stream/remux', async (req, res) => {
   const item = library.getItem(req.params.id);
   if (!item) return res.status(404).json({ error: 'Item not found' });
-  if (item.status !== 'complete') {
+  if (item.status !== 'complete' && item.status !== 'converting') {
     return res.status(400).json({ error: 'Download not complete' });
   }
 
@@ -1050,7 +1050,7 @@ app.get('/api/library/:id/stream/remux', async (req, res) => {
 app.get('/api/library/:id/probe', async (req, res) => {
   const item = library.getItem(req.params.id);
   if (!item) return res.status(404).json({ error: 'Item not found' });
-  if (item.status !== 'complete') {
+  if (item.status !== 'complete' && item.status !== 'converting') {
     return res.status(400).json({ error: 'Download not complete' });
   }
 

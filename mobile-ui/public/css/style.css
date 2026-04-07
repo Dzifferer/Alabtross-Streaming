@@ -2164,6 +2164,10 @@ html, body {
   transition: width 0.5s ease;
 }
 
+.library-card-progress-bar.converting {
+  background: #f59e0b;
+}
+
 /* Status overlay centered on poster */
 .library-card-overlay {
   position: absolute;
@@ -2180,6 +2184,12 @@ html, body {
   font-size: 14px;
   font-weight: 700;
   color: var(--accent);
+}
+
+.library-card-overlay.converting {
+  font-size: 14px;
+  font-weight: 700;
+  color: #f59e0b;
 }
 
 .library-card-overlay.queued {
@@ -2266,6 +2276,7 @@ html, body {
 }
 
 .library-card-meta.downloading { color: var(--accent); }
+.library-card-meta.converting { color: #f59e0b; }
 .library-card-meta.complete { color: var(--success); }
 .library-card-meta.queued { color: var(--text-muted); }
 .library-card-meta.failed { color: var(--danger); }

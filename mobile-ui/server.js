@@ -74,6 +74,9 @@ function getEngine() {
 
 // ─── Library Manager (initialized on startup) ─────────────────────────
 const library = new LibraryManager({ libraryPath: LIBRARY_PATH, maxConcurrentDownloads: MAX_CONCURRENT_STREAMS });
+console.log(`[Debug] LIBRARY_PATH resolved to: ${LIBRARY_PATH}`);
+console.log(`[Debug] LIBRARY_PATH exists: ${fs.existsSync(LIBRARY_PATH)}`);
+console.log(`[Debug] TORRENT_CACHE_PATH: ${TORRENT_CACHE_PATH}`);
 
 // Security headers
 app.use((req, res, next) => {
@@ -352,11 +355,95 @@ app.get('/api/torrent-status/:infoHash', (req, res) => {
 app.get('/api/library', (req, res) => {
   try {
     const items = library.getAll();
+    console.log(`[Debug] GET /api/library: returning ${items.length} items`);
     res.json({ items });
   } catch (err) {
     console.error('[Library] getAll() failed:', err.message);
     res.status(500).json({ items: [], error: err.message });
   }
+});
+
+// GET /api/library/debug — diagnostic endpoint for troubleshooting
+app.get('/api/library/debug', (req, res) => {
+  const { VIDEO_EXTENSIONS } = require('./lib/file-safety');
+  const diag = {};
+
+  // 1. Path configuration
+  diag.libraryPath = LIBRARY_PATH;
+  diag.torrentCachePath = TORRENT_CACHE_PATH;
+  diag.envLibraryPath = process.env.LIBRARY_PATH || '(not set, using default)';
+  diag.envTorrentCache = process.env.TORRENT_CACHE || '(not set, using default)';
+
+  // 2. Directory existence and permissions
+  try {
+    diag.directoryExists = fs.existsSync(LIBRARY_PATH);
+    if (diag.directoryExists) {
+      const stat = fs.statSync(LIBRARY_PATH);
+      diag.directoryMode = '0' + (stat.mode & 0o777).toString(8);
+      diag.directoryUid = stat.uid;
+    }
+  } catch (err) {
+    diag.directoryError = err.message;
+  }
+
+  // 3. Raw directory listing
+  try {
+    if (diag.directoryExists) {
+      const entries = fs.readdirSync(LIBRARY_PATH, { withFileTypes: true });
+      diag.directoryEntries = entries.map(e => ({
+        name: e.name,
+        isFile: e.isFile(),
+        isDirectory: e.isDirectory(),
+        ext: path.extname(e.name).toLowerCase(),
+      }));
+    }
+  } catch (err) {
+    diag.directoryListError = err.message;
+  }
+
+  // 4. Metadata file status
+  const metadataPath = path.join(LIBRARY_PATH, '_metadata.json');
+  const backupPath = metadataPath + '.bak';
+  try {
+    diag.metadataExists = fs.existsSync(metadataPath);
+    diag.metadataBackupExists = fs.existsSync(backupPath);
+    if (diag.metadataExists) {
+      const raw = fs.readFileSync(metadataPath, 'utf8');
+      diag.metadataSize = raw.length;
+      diag.metadataEmpty = !raw.trim();
+      try {
+        const parsed = JSON.parse(raw);
+        diag.metadataIsArray = Array.isArray(parsed);
+        diag.metadataItemCount = Array.isArray(parsed) ? parsed.length : null;
+      } catch (e) {
+        diag.metadataParseError = e.message;
+      }
+    }
+  } catch (err) {
+    diag.metadataReadError = err.message;
+  }
+
+  // 5. Internal state
+  diag.trackedItemCount = library._items.size;
+  diag.trackedItemIds = [...library._items.keys()];
+
+  // 6. getAll() result
+  try {
+    const all = library.getAll();
+    diag.getAllCount = all.length;
+    diag.getAllSample = all.slice(0, 3);
+  } catch (err) {
+    diag.getAllError = err.message;
+  }
+
+  // 7. VIDEO_EXTENSIONS for reference
+  diag.videoExtensions = [...VIDEO_EXTENSIONS];
+
+  // 8. Process info
+  diag.processUid = process.getuid ? process.getuid() : 'N/A';
+  diag.processCwd = process.cwd();
+
+  res.json(diag);
 });
 
 // GET /api/library/:id — get single library item

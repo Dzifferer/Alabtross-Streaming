@@ -1125,6 +1125,17 @@ app.post('/api/library/:id/reorder', rateLimit, (req, res) => {
   res.json({ success: true });
 });
 
+// POST /api/library/:id/relink — manually re-link a library item to a different IMDB entry
+app.post('/api/library/:id/relink', rateLimit, (req, res) => {
+  const { imdbId, name, poster, year, type } = req.body || {};
+  if (!imdbId) return res.status(400).json({ error: 'imdbId is required' });
+  if (!/^tt\d{1,10}$/.test(imdbId)) return res.status(400).json({ error: 'Invalid IMDB ID format' });
+
+  const success = library.relinkItem(req.params.id, { imdbId, name, poster, year, type });
+  if (!success) return res.status(404).json({ error: 'Item not found' });
+  res.json({ success: true });
+});
+
 // GET /api/library/:id/stream — stream a completed library item
 app.get('/api/library/:id/stream', async (req, res) => {
   const item = library.getItem(req.params.id);

@@ -483,6 +483,25 @@ class LibraryManager {
   }
 
   /**
+   * Re-link a library item to a different IMDB entry.
+   * Updates the imdbId, name, poster, and year without touching the downloaded file.
+   */
+  relinkItem(id, { imdbId, name, poster, year, type }) {
+    const item = this._items.get(id);
+    if (!item) return false;
+
+    if (imdbId) item.imdbId = imdbId;
+    if (name) item.name = name;
+    if (poster !== undefined) item.poster = poster;
+    if (year !== undefined) item.year = year;
+    if (type) item.type = type;
+
+    this._saveMetadata();
+    console.log(`[Library] Re-linked "${item.name}" (${id}) -> ${imdbId}`);
+    return true;
+  }
+
+  /**
    * Remove a library item and its file.
    */
   removeItem(id) {

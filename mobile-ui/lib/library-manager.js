@@ -123,6 +123,239 @@ class LibraryManager {
   }
 
   /**
+   * Add an entire season pack to the library. Downloads ALL video files
+   * from the torrent, creating a separate library item for each episode.
+   * Returns a promise that resolves once the torrent metadata is loaded
+   * and all items are created.
+   */
+  addSeasonPack(opts) {
+    const { imdbId, name, poster, year, magnetUri, infoHash, quality, size, season } = opts;
+
+    if (!infoHash || !magnetUri) {
+      throw new Error('infoHash and magnetUri are required');
+    }
+
+    const packId = `pack_${infoHash}`;
+
+    // Check if this pack is already being downloaded
+    if (this._engines.has(packId)) {
+      return Promise.resolve({ status: 'already_downloading', items: [] });
+    }
+
+    const packDir = path.join(this._libraryPath, this._safeDirectoryName({ name: `${name} S${String(season).padStart(2, '0')}`, infoHash }));
+
+    return new Promise((resolve, reject) => {
+      const engine = torrentStream(magnetUri, {
+        connections: 500,
+        uploads: 0,
+        dht: true,
+        verify: true,
+        path: packDir,
+        trackers: TRACKERS,
+      });
+
+      const timeout = setTimeout(() => {
+        engine.destroy();
+        reject(new Error('Torrent metadata timeout (90s) — try a torrent with more seeds'));
+      }, 90000);
+
+      engine.on('error', (err) => {
+        clearTimeout(timeout);
+        try { engine.destroy(); } catch { /* ignore */ }
+        reject(err);
+      });
+
+      engine.on('ready', () => {
+        clearTimeout(timeout);
+
+        // Find all video files, excluding samples/trailers
+        const dominated = /\b(sample|trailer|extra|bonus|featurette|interview)\b/i;
+        const videoFiles = engine.files.filter(f =>
+          isFileNameSafe(f.name) && !dominated.test(f.name)
+        );
+
+        if (videoFiles.length === 0) {
+          engine.destroy();
+          return resolve({ status: 'no_video_files', items: [] });
+        }
+
+        // Deselect all files first
+        for (const f of engine.files) f.deselect();
+
+        // Select and create items for each video file
+        const createdItems = [];
+        const seasonNum = parseInt(season, 10) || 1;
+
+        for (const file of videoFiles) {
+          file.select();
+
+          // Try to parse episode number from filename
+          const episodeNum = this._parseEpisodeNumber(file.name, seasonNum);
+
+          const itemId = episodeNum
+            ? `${imdbId}_s${seasonNum}e${episodeNum}_${infoHash.slice(0, 8)}`
+            : `${imdbId}_pack_${infoHash.slice(0, 8)}_${path.basename(file.name, path.extname(file.name)).replace(/[^\w]/g, '_').slice(0, 30)}`;
+
+          // Skip if already in library
+          if (this._items.has(itemId)) {
+            const existing = this._items.get(itemId);
+            if (existing.status === 'complete' || existing.status === 'downloading') {
+              createdItems.push({ id: itemId, status: 'already_exists', episode: episodeNum });
+              continue;
+            }
+            this._items.delete(itemId);
+          }
+
+          const relativePath = path.relative(this._libraryPath, path.join(packDir, file.path));
+
+          const item = {
+            id: itemId,
+            imdbId,
+            type: 'series',
+            name: name || 'Unknown',
+            poster: poster || '',
+            year: year || '',
+            quality: quality || '',
+            size: (file.length / (1024 * 1024 * 1024)).toFixed(1) + ' GB',
+            season: seasonNum,
+            episode: episodeNum,
+            infoHash,
+            magnetUri,
+            packId,
+            status: 'downloading',
+            progress: 0,
+            downloadSpeed: 0,
+            numPeers: 0,
+            filePath: relativePath,
+            fileName: path.basename(file.name),
+            fileSize: file.length,
+            addedAt: Date.now(),
+            completedAt: null,
+            error: null,
+          };
+
+          this._items.set(itemId, item);
+          createdItems.push({ id: itemId, status: 'started', episode: episodeNum });
+        }
+
+        if (createdItems.filter(i => i.status === 'started').length === 0) {
+          engine.destroy();
+          this._saveMetadata();
+          return resolve({ status: 'all_exist', items: createdItems });
+        }
+
+        // Store the shared engine
+        this._engines.set(packId, engine);
+        this._startPeriodicSave();
+
+        // Track progress for each file individually
+        const progressTimer = setInterval(() => {
+          if (!this._engines.has(packId)) {
+            clearInterval(progressTimer);
+            return;
+          }
+
+          const sw = engine.swarm;
+          const speed = sw ? sw.downloadSpeed() : 0;
+          const peers = sw ? sw.wires.length : 0;
+          let allComplete = true;
+
+          for (const [itemId, item] of this._items) {
+            if (item.packId !== packId || item.status !== 'downloading') continue;
+
+            item.downloadSpeed = speed;
+            item.numPeers = peers;
+
+            // Calculate progress from file size on disk
+            const fullPath = path.join(this._libraryPath, item.filePath);
+            try {
+              if (fs.existsSync(fullPath)) {
+                const stat = fs.statSync(fullPath);
+                item.progress = Math.min(100, Math.round((stat.size / item.fileSize) * 100));
+              }
+            } catch { /* file might not exist yet */ }
+
+            if (item.progress >= 100) {
+              // Verify file is actually complete
+              const fullPath2 = path.join(this._libraryPath, item.filePath);
+              try {
+                const finalSize = fs.statSync(fullPath2).size;
+                if (finalSize < item.fileSize * 0.99) {
+                  item.progress = Math.round((finalSize / item.fileSize) * 100);
+                  allComplete = false;
+                  continue;
+                }
+              } catch {
+                allComplete = false;
+                continue;
+              }
+
+              item.status = 'complete';
+              item.completedAt = Date.now();
+              item.downloadSpeed = 0;
+              console.log(`[Library] Pack episode complete: "${item.fileName}"`);
+              this._checkAndConvert(itemId);
+            } else {
+              allComplete = false;
+            }
+          }
+
+          // If all pack items are complete, destroy the shared engine
+          if (allComplete) {
+            clearInterval(progressTimer);
+            this._stopPackEngine(packId);
+            this._saveMetadata();
+          }
+        }, 2000);
+
+        this._progressTimers.set(packId, progressTimer);
+        this._saveMetadata();
+
+        console.log(`[Library] Season pack started: "${name}" S${String(seasonNum).padStart(2, '0')} — ${videoFiles.length} episodes`);
+        resolve({ status: 'started', items: createdItems });
+      });
+    });
+  }
+
+  _parseEpisodeNumber(fileName, seasonNum) {
+    const base = path.basename(fileName);
+    // Try S01E05 pattern
+    const seMatch = base.match(/S(\d+)E(\d+)/i);
+    if (seMatch) return parseInt(seMatch[2], 10);
+    // Try E05 pattern (without season)
+    const eMatch = base.match(/\bE(\d+)\b/i);
+    if (eMatch) return parseInt(eMatch[1], 10);
+    // Try "- 05 -" or "- 05." pattern
+    const dashMatch = base.match(/[-–]\s*(\d{1,3})\s*[-–.]/);
+    if (dashMatch) return parseInt(dashMatch[1], 10);
+    // Try "Episode 5" pattern
+    const epMatch = base.match(/Episode\s*(\d+)/i);
+    if (epMatch) return parseInt(epMatch[1], 10);
+    // Try "x05" pattern (1x05)
+    const xMatch = base.match(/\d+x(\d+)/i);
+    if (xMatch) return parseInt(xMatch[1], 10);
+    return null;
+  }
+
+  _stopPackEngine(packId) {
+    const timer = this._progressTimers.get(packId);
+    if (timer) {
+      clearInterval(timer);
+      this._progressTimers.delete(packId);
+    }
+    const engine = this._engines.get(packId);
+    if (engine) {
+      try { engine.destroy(); } catch { /* ignore */ }
+      this._engines.delete(engine);
+    }
+    this._engines.delete(packId);
+
+    if (this._engines.size === 0 && this._convertProcesses.size === 0) {
+      this._stopPeriodicSave();
+    }
+  }
+
+  /**
    * Get all library items, including untracked video files found on disk.
    */
   getAll() {

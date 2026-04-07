@@ -1200,8 +1200,111 @@ async function diagnoseProviders() {
   return results;
 }
 
+// ─── Season Pack Search ────────────────────────────
+// Search for full-season pack torrents (e.g., "Breaking Bad S01 Complete 1080p")
+// across TPB and 1337x. Filters out individual episodes, keeping only packs.
+
+const SEASON_PACK_MIN_SIZE_BYTES = 1.5 * 1024 * 1024 * 1024; // 1.5 GB minimum for a season pack
+
+function isSeasonPack(name, sizeBytes) {
+  const upper = (name || '').toUpperCase();
+  // Must NOT be a single episode (S01E05 pattern)
+  if (/\bS\d+E\d+\b/i.test(name)) return false;
+  // Positive signals: "Complete", "Season N", "S01" without episode, range like "E01-E10"
+  const hasPackSignal =
+    /\bcomplete\b/i.test(name) ||
+    /\bseason\s*\d/i.test(name) ||
+    /\bfull\s*season\b/i.test(name) ||
+    /\bS\d+\b/i.test(name) ||
+    /E\d+\s*[-–~]\s*E?\d+/i.test(name) ||
+    /\d+\s*[-–~]\s*\d+/.test(name) ||
+    /\bbatch\b/i.test(name);
+  // If size is known and large enough, that's a strong signal even without keywords
+  const isLarge = sizeBytes > 0 && sizeBytes >= SEASON_PACK_MIN_SIZE_BYTES;
+  return hasPackSignal || isLarge;
+}
+
+function parsePackSizeBytes(sizeStr) {
+  if (!sizeStr) return 0;
+  const match = sizeStr.match(/([\d.]+)\s*(GB|MB|TB)/i);
+  if (!match) return 0;
+  const num = parseFloat(match[1]);
+  const unit = match[2].toUpperCase();
+  if (unit === 'TB') return num * 1024 * 1024 * 1024 * 1024;
+  if (unit === 'GB') return num * 1024 * 1024 * 1024;
+  if (unit === 'MB') return num * 1024 * 1024;
+  return 0;
+}
+
+async function getSeasonPackStreams(title, season, imdbId) {
+  if (!title && !imdbId) return [];
+
+  const seasonNum = parseInt(season, 10);
+  if (isNaN(seasonNum)) return [];
+
+  const sTag = `S${String(seasonNum).padStart(2, '0')}`;
+  const searchTitle = (title || '').replace(/['']/g, ' ').replace(/[^\w\s-]/g, ' ').replace(/\s+/g, ' ').trim();
+
+  const cacheKey = `season-pack:${imdbId || searchTitle}:${seasonNum}`;
+  const cached = getCachedStreams(cacheKey);
+  if (cached) {
+    console.log(`[SeasonPack] Cache hit for ${cacheKey} (${cached.length} streams)`);
+    return cached;
+  }
+
+  console.log(`[SeasonPack] Searching packs for "${searchTitle}" ${sTag}`);
+
+  // Build multiple search queries to maximize coverage
+  const queries = [
+    `${searchTitle} ${sTag}`,
+    `${searchTitle} Season ${seasonNum}`,
+    `${searchTitle} ${sTag} Complete`,
+  ];
+
+  // Run TPB and 1337x searches in parallel with all query variants
+  const promises = [];
+  for (const q of queries) {
+    promises.push(searchTPB(q).catch(e => { console.log(`[SeasonPack/TPB] Error: ${e.message}`); return []; }));
+    promises.push(search1337x(q).catch(e => { console.log(`[SeasonPack/1337x] Error: ${e.message}`); return []; }));
+  }
+
+  const results = await Promise.all(promises);
+  const allStreams = results.flat();
+
+  // Deduplicate by infoHash
+  const seen = new Set();
+  const unique = [];
+  for (const s of allStreams) {
+    if (!seen.has(s.infoHash)) {
+      seen.add(s.infoHash);
+      unique.push(s);
+    }
+  }
+
+  console.log(`[SeasonPack] Raw results: ${allStreams.length}, unique: ${unique.length}`);
+
+  // Filter to only season packs
+  const packs = unique.filter(s => {
+    const name = (s.title || '').split('\n')[0]; // First line is the torrent name
+    const sizeBytes = parsePackSizeBytes(s.size);
+    return isSeasonPack(name, sizeBytes);
+  });
+
+  // Tag them as packs
+  for (const s of packs) {
+    s.isSeasonPack = true;
+  }
+
+  console.log(`[SeasonPack] After pack filter: ${packs.length} packs`);
+
+  const ranked = filterAndRank(packs);
+  if (ranked.length > 0) setCachedStreams(cacheKey, ranked);
+  return ranked;
+}
+
 module.exports = {
   getMovieStreams,
   getSeriesStreams,
+  getSeasonPackStreams,
   diagnoseProviders,
 };

@@ -6,7 +6,7 @@ const https = require('https');
 const { URL } = require('url');
 const dns = require('dns');
 // http-proxy-middleware removed — Stremio server proxy no longer needed
-const { getMovieStreams, getSeriesStreams, diagnoseProviders } = require('./lib/stream-providers');
+const { getMovieStreams, getSeriesStreams, getSeasonPackStreams, diagnoseProviders } = require('./lib/stream-providers');
 const TorrentEngine = require('./lib/torrent-engine');
 const LibraryManager = require('./lib/library-manager');
 const { discoverDevices, getLocalIP } = require('./lib/local-discovery');
@@ -719,6 +719,25 @@ app.get('/api/streams/series/:imdbId', rateLimit, async (req, res) => {
   }
 });
 
+// GET /api/streams/season-pack/:imdbId?season=N&title=ShowName — search for season pack torrents
+app.get('/api/streams/season-pack/:imdbId', rateLimit, async (req, res) => {
+  const { imdbId } = req.params;
+  const season = req.query.season ? parseInt(req.query.season, 10) : undefined;
+  const title = req.query.title || '';
+
+  if (season === undefined || isNaN(season)) {
+    return res.status(400).json({ error: 'season query parameter is required' });
+  }
+
+  try {
+    const streams = await getSeasonPackStreams(title, season, imdbId);
+    res.json({ streams });
+  } catch (err) {
+    console.error('[API] Season pack stream error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch season pack streams' });
+  }
+});
+
 // GET /api/streams/diagnose — test connectivity to all providers
 app.get('/api/streams/diagnose', rateLimit, async (req, res) => {
   try {
@@ -966,6 +985,32 @@ app.post('/api/library/add', rateLimit, (req, res) => {
     res.json(result);
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+// POST /api/library/add-pack — add season pack to library (downloads all episodes)
+app.post('/api/library/add-pack', rateLimit, async (req, res) => {
+  const { imdbId, name, poster, year, magnetUri, infoHash, quality, size, season } = req.body;
+
+  if (!infoHash || !/^[0-9a-f]{40}$/i.test(infoHash)) {
+    return res.status(400).json({ error: 'Invalid infoHash' });
+  }
+  if (!magnetUri || !magnetUri.startsWith('magnet:?')) {
+    return res.status(400).json({ error: 'Invalid magnet URI' });
+  }
+  if (!magnetUri.toLowerCase().includes(infoHash.toLowerCase())) {
+    return res.status(400).json({ error: 'Magnet URI does not match infoHash' });
+  }
+  if (season === undefined || season === null) {
+    return res.status(400).json({ error: 'season is required' });
+  }
+
+  try {
+    const result = await library.addSeasonPack({ imdbId, name, poster, year, magnetUri, infoHash, quality, size, season });
+    res.json(result);
+  } catch (err) {
+    console.error('[API] Season pack download error:', err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 

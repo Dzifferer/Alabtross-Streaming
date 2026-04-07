@@ -1355,6 +1355,14 @@
         Season ${s}
       </button>`;
     });
+    html += `<button class="season-pack-btn" id="season-pack-btn" data-season="${state.currentSeason}" title="Search for season pack download">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+        <polyline points="7 10 12 15 17 10"/>
+        <line x1="12" y1="15" x2="12" y2="3"/>
+      </svg>
+      Season Pack
+    </button>`;
     html += '</div>';
     html += `<div id="episode-list" class="episode-list">${renderEpisodes(videos, state.currentSeason)}</div>`;
     html += `<div id="stream-container" class="hidden"></div>`;
@@ -1404,6 +1412,9 @@
         tab.classList.add('active');
         const list = document.getElementById('episode-list');
         if (list) list.innerHTML = renderEpisodes(meta.videos, season);
+        // Update season pack button's data-season
+        const packBtn = document.getElementById('season-pack-btn');
+        if (packBtn) packBtn.dataset.season = season;
         // Re-attach episode click handlers
         attachEpisodeHandlers();
         // Hide stream container
@@ -1411,6 +1422,22 @@
         if (sc) sc.classList.add('hidden');
       });
     });
+
+    // Season Pack button
+    const packBtn = document.getElementById('season-pack-btn');
+    if (packBtn) {
+      packBtn.addEventListener('click', () => {
+        const season = parseInt(packBtn.dataset.season, 10);
+        const showId = meta.imdb_id || meta.id;
+        const sc = document.getElementById('stream-container');
+        if (sc) {
+          sc.classList.remove('hidden');
+          sc.innerHTML = `<div class="loading-state"><div class="spinner"></div><p>Searching for Season ${season} packs...</p></div>`;
+          sc.scrollIntoView({ behavior: 'smooth' });
+        }
+        loadSeasonPacks(showId, season, meta);
+      });
+    }
 
     // Event delegation for "Load More" episodes button
     const episodeList = document.getElementById('episode-list');
@@ -2152,6 +2179,144 @@
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           Add to Library
         `;
+      }
+    }
+  }
+
+  async function loadSeasonPacks(showId, season, meta) {
+    const sc = document.getElementById('stream-container');
+    if (!sc) return;
+
+    const streams = await api.getSeasonPackStreams(showId, season);
+
+    if (streams.length === 0) {
+      sc.innerHTML = `
+        <div class="empty-state" style="padding:24px 0">
+          <p>No season packs found</p>
+          <p style="font-size:12px;color:var(--text-muted)">Try downloading episodes individually instead</p>
+        </div>
+      `;
+      return;
+    }
+
+    let html = `<h4 style="margin:0 0 12px;font-size:14px;color:var(--text-dim)">Season ${season} Packs (${streams.length} found)</h4>`;
+    html += '<div class="season-pack-results">';
+    streams.forEach((s, i) => {
+      const title = s.title || 'Unknown';
+      const lines = title.split('\n');
+      const mainTitle = escapeHTML(lines[0]);
+      const detail = lines.slice(1).map(l => escapeHTML(l)).join(' &middot; ');
+      const seeds = s.seeds || 0;
+      let seedColor = 'var(--success)';
+      let seedBg = 'rgba(0,206,201,0.15)';
+      if (seeds < 5) { seedColor = 'var(--danger)'; seedBg = 'rgba(255,107,107,0.15)'; }
+      else if (seeds < 20) { seedColor = 'var(--warning)'; seedBg = 'rgba(253,203,110,0.15)'; }
+
+      html += `
+        <div class="stream-item season-pack-item" data-pack-index="${i}">
+          <div class="stream-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+          </div>
+          <div class="stream-info">
+            <div class="stream-title">${mainTitle}</div>
+            <div class="stream-detail">${detail}</div>
+          </div>
+          <span class="stream-quality" style="background:${seedBg};color:${seedColor}">${seeds} seeds</span>
+        </div>
+      `;
+    });
+    html += '</div>';
+
+    sc.innerHTML = html;
+
+    // Attach click handlers to pack items
+    sc.querySelectorAll('.season-pack-item').forEach(item => {
+      item.addEventListener('click', () => {
+        const idx = parseInt(item.dataset.packIndex, 10);
+        const stream = streams[idx];
+        if (!stream) return;
+
+        // Highlight selected
+        sc.querySelectorAll('.season-pack-item').forEach(el => el.classList.remove('selected'));
+        item.classList.add('selected');
+
+        // Show or update download button
+        let dlBtn = document.getElementById('season-pack-dl-btn');
+        if (!dlBtn) {
+          const btnHtml = `<button id="season-pack-dl-btn" class="season-pack-download-btn">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            Download Season ${season}
+          </button>`;
+          sc.insertAdjacentHTML('beforeend', btnHtml);
+          dlBtn = document.getElementById('season-pack-dl-btn');
+        }
+
+        dlBtn.onclick = () => addSeasonPackToLibrary(stream, season, meta);
+      });
+    });
+  }
+
+  async function addSeasonPackToLibrary(stream, season, meta) {
+    const btn = document.getElementById('season-pack-dl-btn');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Starting download...';
+    }
+
+    try {
+      const body = {
+        imdbId: meta.imdb_id || meta.id,
+        name: meta.name || 'Unknown',
+        poster: meta.poster || '',
+        year: meta.releaseInfo || meta.year || '',
+        magnetUri: stream.magnetUri || stream.url,
+        infoHash: stream.infoHash,
+        quality: stream.quality || '',
+        size: stream.size || '',
+        season,
+      };
+
+      const resp = await fetch('/api/library/add-pack', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      const data = await resp.json();
+      if (!resp.ok) {
+        throw new Error(data.error || 'Failed to start season pack download');
+      }
+
+      if (data.status === 'already_downloading') {
+        showToast('This season pack is already downloading');
+      } else if (data.status === 'no_video_files') {
+        showToast('No video files found in this torrent');
+      } else if (data.status === 'all_exist') {
+        showToast('All episodes already in library');
+      } else {
+        const count = (data.items || []).filter(i => i.status === 'started').length;
+        showToast(`Season pack downloading — ${count} episode${count !== 1 ? 's' : ''} added to library`);
+      }
+
+      if (btn) {
+        btn.innerHTML = `
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+          Downloading
+        `;
+      }
+    } catch (err) {
+      showToast(err.message);
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = `Download Season ${season}`;
       }
     }
   }

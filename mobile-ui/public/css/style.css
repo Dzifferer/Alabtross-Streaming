@@ -1200,6 +1200,67 @@ html, body {
   border-color: var(--accent);
 }
 
+.season-pack-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 20px;
+  border: 1px solid rgba(99, 110, 250, 0.4);
+  background: rgba(99, 110, 250, 0.1);
+  color: var(--accent);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.season-pack-btn:hover,
+.season-pack-btn:active {
+  background: rgba(99, 110, 250, 0.25);
+  border-color: var(--accent);
+}
+
+.season-pack-results {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.season-pack-item.selected {
+  border: 1px solid var(--accent);
+  background: rgba(99, 110, 250, 0.08);
+}
+
+.season-pack-download-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 14px;
+  border-radius: var(--radius-sm);
+  border: none;
+  background: var(--accent);
+  color: white;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.2s;
+  margin-top: 8px;
+}
+
+.season-pack-download-btn:hover {
+  opacity: 0.9;
+}
+
+.season-pack-download-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .episode-list {
   display: flex;
   flex-direction: column;

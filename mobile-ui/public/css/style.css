@@ -584,6 +584,10 @@ html, body {
 }
 
 /* ===== Catalog Rows (Home) ===== */
+#home-catalogs {
+  padding-bottom: 16px;
+}
+
 .catalog-row {
   margin-bottom: 28px;
 }
@@ -2122,7 +2126,7 @@ html, body {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 10px;
-  padding: 12px;
+  padding: 12px 12px 24px;
 }
 
 @media (min-width: 480px) {

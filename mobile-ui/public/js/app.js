@@ -2745,8 +2745,14 @@
           if (probe.directPlay) {
             useRemux = false;
           }
+        } else if (probeResp.status === 400) {
+          const errData = await probeResp.json().catch(() => ({}));
+          if (errData.error === 'Download not complete') {
+            throw new Error('Download not complete');
+          }
         }
       } catch (e) {
+        if (e.message === 'Download not complete') throw e;
         console.warn('[Library] Probe failed, falling back to remux:', e.message);
       }
 
@@ -2808,7 +2814,9 @@
           hint = escapeHTML(retryErr.message);
         }
       }
-      if (e.message.includes('Media error')) {
+      if (e.message === 'Download not complete') {
+        hint = 'This episode is still downloading<br><span style="font-size:12px">Wait for the download to finish and try again</span>';
+      } else if (e.message.includes('Media error')) {
         hint += '<br><span style="font-size:12px">The file format may not be supported by your browser</span>';
       } else if (e.message.includes('timed out')) {
         hint += '<br><span style="font-size:12px">Try again — playback may work on a second attempt</span>';

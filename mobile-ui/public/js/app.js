@@ -406,8 +406,21 @@
       attachCardListeners(recentRow);
     }
 
-    // Create placeholder rows for Movies, Shows, and Live TV immediately
-    // so the user sees the layout while data loads in parallel
+    // Show Live TV section FIRST (right after Recently Played) so it's always visible.
+    // Render a placeholder immediately, then fill it when data arrives.
+    const tvContainer = document.createElement('div');
+    tvContainer.id = 'home-livetv-section';
+    tvContainer.className = 'catalog-row fade-in';
+    tvContainer.innerHTML = `
+      <div class="catalog-row-header">
+        <h3 class="catalog-row-title">Live TV</h3>
+        <span class="catalog-row-badge">LIVE</span>
+      </div>
+      <div class="catalog-scroll"><div class="row-loading"><div class="spinner-sm"></div> Loading channels...</div></div>
+    `;
+    dom.homeCatalogs.appendChild(tvContainer);
+
+    // Movie and Series placeholders below Live TV
     const moviePlaceholder = document.createElement('div');
     moviePlaceholder.className = 'catalog-row fade-in';
     moviePlaceholder.innerHTML = `
@@ -423,18 +436,6 @@
       <div class="catalog-scroll"><div class="row-loading"><div class="spinner-sm"></div> Loading...</div></div>
     `;
     dom.homeCatalogs.appendChild(seriesPlaceholder);
-
-    const tvPlaceholder = document.createElement('div');
-    tvPlaceholder.id = 'livetv-placeholder';
-    tvPlaceholder.className = 'catalog-row fade-in';
-    tvPlaceholder.innerHTML = `
-      <div class="catalog-row-header">
-        <h3 class="catalog-row-title">Live TV</h3>
-        <span class="catalog-row-badge">LIVE</span>
-      </div>
-      <div class="catalog-scroll"><div class="row-loading"><div class="spinner-sm"></div> Loading channels...</div></div>
-    `;
-    dom.homeCatalogs.appendChild(tvPlaceholder);
 
     // Fetch movies, series, and Live TV in parallel
     const [movieResult, seriesResult, tvResult] = await Promise.allSettled([
@@ -480,59 +481,89 @@
       seriesPlaceholder.remove();
     }
 
-    // Render Live TV row(s) (replace placeholder)
-    const tvGroups = tvResult.status === 'fulfilled' ? tvResult.value : [];
-    tvPlaceholder.remove();
-    if (tvGroups.length > 0) {
-      for (const group of tvGroups) {
-        const tvRow = document.createElement('div');
-        tvRow.className = 'catalog-row fade-in';
-        tvRow.innerHTML = `
+    // Render Live TV section (replace placeholder content in tvContainer)
+    try {
+      const tvGroups = tvResult.status === 'fulfilled' ? tvResult.value : [];
+      console.log('[LiveTV] Home results:', tvGroups.length, 'groups,', tvResult.status);
+
+      if (tvGroups.length > 0) {
+        // Replace the placeholder with first group's channels inline
+        const firstGroup = tvGroups[0];
+        tvContainer.innerHTML = `
           <div class="catalog-row-header">
-            <h3 class="catalog-row-title">${escapeHTML(group.sourceName)}</h3>
+            <h3 class="catalog-row-title">${escapeHTML(firstGroup.sourceName)}</h3>
             <span class="catalog-row-badge">LIVE</span>
           </div>
-          <div class="catalog-scroll">${group.channels.slice(0, 30).map(ch => channelCardHTML(ch)).join('')}</div>
+          <div class="catalog-scroll">${firstGroup.channels.slice(0, 30).map(ch => channelCardHTML(ch)).join('')}</div>
         `;
-        dom.homeCatalogs.appendChild(tvRow);
-        attachChannelListeners(tvRow);
-      }
-    } else {
-      // Always show a Live TV section even when channels fail to load
-      const sources = api.getLiveTVSources();
-      const tvRow = document.createElement('div');
-      tvRow.className = 'catalog-row fade-in';
-      if (sources.length > 0) {
-        tvRow.innerHTML = `
-          <div class="catalog-row-header">
-            <h3 class="catalog-row-title">Live TV</h3>
-            <span class="catalog-row-badge">LIVE</span>
-          </div>
-          <div class="livetv-error-state">
-            <p>Unable to load channels — sources may be offline or unreachable.</p>
-            <button class="btn-sm livetv-goto-settings">Configure in Settings</button>
-          </div>
-        `;
+        attachChannelListeners(tvContainer);
+
+        // Append additional groups as separate rows after tvContainer
+        for (let i = 1; i < tvGroups.length; i++) {
+          const extraRow = document.createElement('div');
+          extraRow.className = 'catalog-row fade-in';
+          extraRow.innerHTML = `
+            <div class="catalog-row-header">
+              <h3 class="catalog-row-title">${escapeHTML(tvGroups[i].sourceName)}</h3>
+              <span class="catalog-row-badge">LIVE</span>
+            </div>
+            <div class="catalog-scroll">${tvGroups[i].channels.slice(0, 30).map(ch => channelCardHTML(ch)).join('')}</div>
+          `;
+          tvContainer.insertAdjacentElement('afterend', extraRow);
+          attachChannelListeners(extraRow);
+        }
       } else {
-        tvRow.innerHTML = `
-          <div class="catalog-row-header">
-            <h3 class="catalog-row-title">Live TV</h3>
-            <span class="catalog-row-badge">LIVE</span>
-          </div>
-          <div class="livetv-error-state">
-            <p>No live TV sources configured.</p>
-            <button class="btn-sm livetv-goto-settings">Add Sources in Settings</button>
-          </div>
-        `;
+        // Show error/config state — always keep the section visible
+        const sources = api.getLiveTVSources();
+        console.log('[LiveTV] No channels loaded. Sources:', sources.length, sources.map(s => s.name + '(' + (s.enabled ? 'on' : 'off') + ')').join(', '));
+        if (sources.length > 0 && sources.some(s => s.enabled)) {
+          tvContainer.innerHTML = `
+            <div class="catalog-row-header">
+              <h3 class="catalog-row-title">Live TV</h3>
+              <span class="catalog-row-badge">LIVE</span>
+            </div>
+            <div class="livetv-error-state">
+              <p>Unable to load channels — sources may be offline or unreachable.</p>
+              <button class="btn-sm livetv-goto-settings">Configure in Settings</button>
+            </div>
+          `;
+        } else {
+          tvContainer.innerHTML = `
+            <div class="catalog-row-header">
+              <h3 class="catalog-row-title">Live TV</h3>
+              <span class="catalog-row-badge">LIVE</span>
+            </div>
+            <div class="livetv-error-state">
+              <p>No live TV sources configured.</p>
+              <button class="btn-sm livetv-goto-settings">Add Sources in Settings</button>
+            </div>
+          `;
+        }
+        tvContainer.querySelector('.livetv-goto-settings')?.addEventListener('click', (e) => {
+          e.preventDefault();
+          navigateTo('settings');
+        });
       }
-      dom.homeCatalogs.appendChild(tvRow);
-      tvRow.querySelector('.livetv-goto-settings')?.addEventListener('click', (e) => {
+    } catch (e) {
+      console.error('[LiveTV] Error rendering Live TV section:', e);
+      tvContainer.innerHTML = `
+        <div class="catalog-row-header">
+          <h3 class="catalog-row-title">Live TV</h3>
+          <span class="catalog-row-badge">LIVE</span>
+        </div>
+        <div class="livetv-error-state">
+          <p>Error loading Live TV: ${escapeHTML(String(e.message || e))}</p>
+          <button class="btn-sm livetv-goto-settings">Go to Settings</button>
+        </div>
+      `;
+      tvContainer.querySelector('.livetv-goto-settings')?.addEventListener('click', (e) => {
         e.preventDefault();
         navigateTo('settings');
       });
     }
 
-    // If nothing at all loaded (no recent, no movies, no shows, no TV section), show empty state
+    // If nothing at all loaded (no recent, no movies, no shows), show empty state
+    // (Live TV section always stays visible so this is a fallback for extreme failure)
     if (dom.homeCatalogs.children.length === 0) {
       dom.homeCatalogs.innerHTML = `
         <div class="empty-state">

@@ -1,10 +1,10 @@
-# Alabtross Streaming
+# Albatross Streaming
 
 A fully automated setup that turns an NVIDIA Jetson Orin Nano into a secure home media streaming server with a mobile-friendly interface and VPN access.
 
 ## What You Get
 
-- **Alabtross Mobile UI** — a lightweight, mobile-first web interface with dual streaming modes, built-in video player, live TV, and a download library
+- **Albatross Mobile UI** — a lightweight, mobile-first web interface with dual streaming modes, built-in video player, live TV, and a download library
 - **Stremio Server** — stream movies and TV shows from anywhere, with content cached to local or external storage
 - **Tailscale VPN** — secure peer-to-peer tunnel so your streaming server is never exposed to the public internet (no port forwarding needed, works behind CGNAT)
 - **DuckDNS** (optional) — keeps your server reachable when your home IP changes
@@ -191,7 +191,7 @@ Metadata (movie info, posters, search) always comes from **Cinemeta** regardless
 | Service | Port | Protocol | Exposed to Internet |
 |---------|------|----------|---------------------|
 | Stremio Server | 11470 | TCP | No (Tailscale only) |
-| Alabtross Mobile UI | 8080 | TCP | No (Tailscale only) |
+| Albatross Mobile UI | 8080 | TCP | No (Tailscale only) |
 | SSH | 22 | TCP | No (LAN only) |
 
 ## Mobile UI Features
@@ -230,7 +230,7 @@ Phone/Laptop
     |
 Jetson Orin Nano (home network)
     |
-    +-- Alabtross Mobile UI (port 8080, Docker)
+    +-- Albatross Mobile UI (port 8080, Docker)
     |       |
     |       +-- Custom Mode: scrapes TPB/YTS/EZTV/1337x directly
     |       +-- Stremio Mode: proxies API requests to Stremio

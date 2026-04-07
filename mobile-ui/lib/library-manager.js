@@ -1,5 +1,5 @@
 /**
- * Alabtross — Library Manager
+ * Albatross — Library Manager
  *
  * Manages downloading movies/episodes to permanent server storage.
  * Metadata is persisted as a JSON file alongside the video files.

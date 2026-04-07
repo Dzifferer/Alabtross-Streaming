@@ -776,7 +776,7 @@ function fetchUrl(url, redirectCount = 0) {
   }
   return new Promise((resolve, reject) => {
     const mod = url.startsWith('https') ? https : http;
-    const req = mod.get(url, { headers: { 'User-Agent': 'Alabtross/1.0' }, timeout: 8000 }, (res) => {
+    const req = mod.get(url, { headers: { 'User-Agent': 'Albatross/1.0' }, timeout: 8000 }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         return fetchUrl(res.headers.location, redirectCount + 1).then(resolve, reject);
       }
@@ -909,7 +909,7 @@ app.get('/api/iptv/stream', rateLimit, async (req, res) => {
 
   const mod = parsedUrl.protocol === 'https:' ? https : http;
   const proxyReq = mod.get(streamUrl, {
-    headers: { 'User-Agent': 'Alabtross/1.0' },
+    headers: { 'User-Agent': 'Albatross/1.0' },
     timeout: 15000,
   }, (upstream) => {
     if (upstream.statusCode >= 300 && upstream.statusCode < 400 && upstream.headers.location) {
@@ -1050,7 +1050,7 @@ app.post('/api/cast/play', rateLimit, async (req, res) => {
 
   try {
     console.log(`[Cast API] Casting to ${device.friendlyName}: ${mediaUrl}`);
-    await castManager.castToDevice(device, mediaUrl, title || 'Alabtross', mimeType || 'video/mp4');
+    await castManager.castToDevice(device, mediaUrl, title || 'Albatross', mimeType || 'video/mp4');
     res.json({ success: true, mediaUrl, device: device.friendlyName });
   } catch (err) {
     console.error(`[Cast API] Cast failed: ${err.message}`);
@@ -1111,7 +1111,7 @@ app.get('*', (req, res) => {
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Alabtross Mobile UI running on http://0.0.0.0:${PORT}`);
+  console.log(`Albatross Mobile UI running on http://0.0.0.0:${PORT}`);
   console.log(`Stream endpoints: /api/streams/* and /api/play/*`);
 });
 

@@ -1,4 +1,4 @@
-# Alabtross Streaming — Command Cheatsheet
+# Albatross Streaming — Command Cheatsheet
 
 ## Docker Services
 

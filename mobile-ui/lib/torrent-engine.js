@@ -1,5 +1,5 @@
 /**
- * Alabtross — Torrent Streaming Engine
+ * Albatross — Torrent Streaming Engine
  *
  * Pure JavaScript torrent client using torrent-stream (same engine
  * as Peerflix/Popcorn Time). No native C++ modules required.

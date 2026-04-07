@@ -1,5 +1,5 @@
 /**
- * Alabtross — Shared File Safety & Configuration
+ * Albatross — Shared File Safety & Configuration
  *
  * Centralizes video file validation, MIME types, and tracker lists
  * used by both TorrentEngine and LibraryManager.

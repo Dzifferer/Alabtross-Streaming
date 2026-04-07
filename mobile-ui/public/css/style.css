@@ -193,10 +193,17 @@
 html, body {
   height: 100%;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  background: var(--bg);
+  background: linear-gradient(135deg, var(--bg), #0f0f1e, var(--bg));
+  background-size: 400% 400%;
+  animation: ambientGlow 15s ease infinite;
   color: var(--text);
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
+}
+
+@keyframes ambientGlow {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
 }
 
 #app {
@@ -235,10 +242,18 @@ html, body {
 #page-title {
   font-size: 20px;
   font-weight: 700;
-  background: linear-gradient(135deg, var(--accent), #a29bfe);
+  background: linear-gradient(135deg, var(--accent), #a29bfe, var(--accent));
+  background-size: 200% auto;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
+  animation: gradientShimmer 4s ease infinite;
+}
+
+@keyframes gradientShimmer {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
 }
 
 .icon-btn {
@@ -351,6 +366,13 @@ html, body {
   background: var(--accent);
   color: white;
   border-color: var(--accent);
+  animation: chipBounce 0.3s ease;
+}
+
+@keyframes chipBounce {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.1); }
+  100% { transform: scale(1); }
 }
 
 /* Custom theme overrides for filter bar */
@@ -402,6 +424,12 @@ html, body {
 
 .view.active {
   display: block;
+  animation: viewFadeIn 0.3s ease-out;
+}
+
+@keyframes viewFadeIn {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .hidden {
@@ -584,11 +612,16 @@ html, body {
   width: 130px;
   scroll-snap-align: start;
   cursor: pointer;
-  transition: transform 0.2s;
+  transition: transform 0.25s ease, box-shadow 0.25s ease;
 }
 
 .card:active {
   transform: scale(0.96);
+  box-shadow: 0 2px 16px var(--accent-glow);
+}
+
+.card:active .card-poster img {
+  transform: scale(1.05);
 }
 
 .card-poster {
@@ -604,7 +637,7 @@ html, body {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  transition: opacity 0.3s;
+  transition: opacity 0.3s, transform 0.3s ease;
 }
 
 .card-poster img.loading {
@@ -621,6 +654,14 @@ html, body {
   font-size: 13px;
   text-align: center;
   padding: 8px;
+  background: linear-gradient(90deg, var(--bg-card) 25%, var(--bg-elevated) 50%, var(--bg-card) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
 }
 
 .card-info {
@@ -854,6 +895,13 @@ html, body {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  animation: kenBurns 20s ease-in-out alternate infinite;
+  will-change: transform;
+}
+
+@keyframes kenBurns {
+  0% { transform: scale(1) translate(0, 0); }
+  100% { transform: scale(1.08) translate(-1%, -1%); }
 }
 
 .detail-hero-gradient {
@@ -1605,6 +1653,12 @@ html, body {
 .toast.show {
   transform: translateX(-50%) translateY(0);
   opacity: 1;
+  animation: toastBounceIn 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+@keyframes toastBounceIn {
+  from { transform: translateX(-50%) translateY(40px); opacity: 0; }
+  to { transform: translateX(-50%) translateY(0); opacity: 1; }
 }
 
 /* ===== Animations ===== */
@@ -1615,6 +1669,56 @@ html, body {
 
 .fade-in {
   animation: fadeIn 0.3s ease;
+}
+
+/* ===== Staggered Card Reveal ===== */
+.catalog-row {
+  opacity: 0;
+  transform: translateY(20px);
+  transition: opacity 0.5s ease, transform 0.5s ease;
+}
+
+.catalog-row.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.catalog-row.visible .card {
+  opacity: 0;
+  animation: cardReveal 0.4s ease forwards;
+}
+
+.catalog-row.visible .card:nth-child(1) { animation-delay: 0.05s; }
+.catalog-row.visible .card:nth-child(2) { animation-delay: 0.1s; }
+.catalog-row.visible .card:nth-child(3) { animation-delay: 0.15s; }
+.catalog-row.visible .card:nth-child(4) { animation-delay: 0.2s; }
+.catalog-row.visible .card:nth-child(5) { animation-delay: 0.25s; }
+.catalog-row.visible .card:nth-child(6) { animation-delay: 0.3s; }
+.catalog-row.visible .card:nth-child(7) { animation-delay: 0.35s; }
+.catalog-row.visible .card:nth-child(8) { animation-delay: 0.4s; }
+
+@keyframes cardReveal {
+  from { opacity: 0; transform: translateY(15px) scale(0.95); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* ===== Button Ripple Effect ===== */
+.ripple-container {
+  position: relative;
+  overflow: hidden;
+}
+
+.ripple {
+  position: absolute;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.15);
+  transform: scale(0);
+  animation: rippleExpand 0.5s ease-out forwards;
+  pointer-events: none;
+}
+
+@keyframes rippleExpand {
+  to { transform: scale(4); opacity: 0; }
 }
 
 /* ===== Library View ===== */
@@ -2125,4 +2229,20 @@ html, body {
 /* ===== Scrollbar ===== */
 #content::-webkit-scrollbar {
   width: 0;
+}
+
+/* ===== Reduced Motion Accessibility ===== */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .catalog-row {
+    opacity: 1;
+    transform: none;
+  }
+  .catalog-row .card {
+    opacity: 1;
+  }
 }

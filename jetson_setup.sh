@@ -754,9 +754,9 @@ if [[ "$STREMIO_ALREADY_OK" != "true" ]]; then
 fi
 
 # ---------------------------------------------------------------
-# STEP 7b — Alabtross Mobile UI
+# STEP 7b — Albatross Mobile UI
 # ---------------------------------------------------------------
-step "Setting up Alabtross Mobile UI"
+step "Setting up Albatross Mobile UI"
 
 MOBILE_UI_DIR="$(cd "$(dirname "$0")" && pwd)/mobile-ui"
 MOBILE_ALREADY_OK=false
@@ -764,7 +764,7 @@ MOBILE_ALREADY_OK=false
 if docker ps --filter "name=alabtross-mobile" --filter "status=running" \
    --format '{{.Names}}' 2>/dev/null | grep -q "alabtross-mobile"; then
   if curl -s --max-time 3 "http://${STREMIO_BIND_IP}:8080/" &>/dev/null; then
-    ok "Alabtross Mobile UI already running — skipping"
+    ok "Albatross Mobile UI already running — skipping"
     MOBILE_ALREADY_OK=true
   fi
 fi
@@ -774,7 +774,7 @@ if [[ "$MOBILE_ALREADY_OK" != "true" ]]; then
     docker stop alabtross-mobile 2>/dev/null || true
     docker rm   alabtross-mobile 2>/dev/null || true
 
-    info "Building Alabtross Mobile UI container..."
+    info "Building Albatross Mobile UI container..."
     docker build -t alabtross-mobile "$MOBILE_UI_DIR" \
       || die "Failed to build Mobile UI. Check: ls $MOBILE_UI_DIR"
 
@@ -783,7 +783,7 @@ if [[ "$MOBILE_ALREADY_OK" != "true" ]]; then
     LIBRARY_HOST_DIR="${TORRENT_CACHE_HOST_DIR}/library"
     mkdir -p "$LIBRARY_HOST_DIR"
 
-    info "Starting Alabtross Mobile UI..."
+    info "Starting Albatross Mobile UI..."
     # --net=host is required for SSDP multicast (local device discovery for
     # casting over VPN). Port 8080 is exposed directly on the host.
     docker run -d \
@@ -798,14 +798,14 @@ if [[ "$MOBILE_ALREADY_OK" != "true" ]]; then
       alabtross-mobile \
       || die "Failed to start Mobile UI container."
 
-    ok "Alabtross Mobile UI is live on port 8080"
+    ok "Albatross Mobile UI is live on port 8080"
   else
     err "Mobile UI directory not found at $MOBILE_UI_DIR — skipping"
   fi
 fi
 
 # Allow port 8080 through firewall (same LAN-only binding as Stremio)
-ufw allow 8080/tcp comment "Alabtross Mobile UI" 2>/dev/null || true
+ufw allow 8080/tcp comment "Albatross Mobile UI" 2>/dev/null || true
 
 # Install systemd service for on-boot startup
 SETUP_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -814,7 +814,7 @@ if [[ -f "$SERVICE_SRC" ]]; then
   cp "$SERVICE_SRC" /etc/systemd/system/alabtross-mobile.service
   systemctl daemon-reload
   systemctl enable alabtross-mobile.service
-  ok "Alabtross Mobile UI will start automatically on boot"
+  ok "Albatross Mobile UI will start automatically on boot"
 else
   info "Service file not found — on-boot startup not configured"
 fi
@@ -855,7 +855,7 @@ else
     echo "  Then install Tailscale on your phone/laptop"
     echo "  and sign in with the same account."
     echo ""
-    echo "  Access Alabtross via your Tailscale IP:"
+    echo "  Access Albatross via your Tailscale IP:"
     echo "    http://<tailscale-ip>:8080"
     echo "---------------------------------------------"
     echo ""
@@ -947,7 +947,7 @@ if [[ "${ENABLE_HEALTH:-no}" == "yes" ]]; then
 
   cat > "$HEALTH_SCRIPT" << 'HEALTHEOF'
 #!/bin/bash
-# Alabtross health check — restarts containers if they crash
+# Albatross health check — restarts containers if they crash
 LOG="/var/log/alabtross-health.log"
 
 check_container() {
@@ -1042,7 +1042,7 @@ echo "     https://tailscale.com/download"
 echo "     Sign in with the same account"
 echo ""
 NEXT_STEP=$((NEXT_STEP+1))
-echo "  $NEXT_STEP. Access Alabtross from anywhere via Tailscale:"
+echo "  $NEXT_STEP. Access Albatross from anywhere via Tailscale:"
 echo "     http://$TAILSCALE_IP:8080"
 echo "     Tip: Add to Home Screen for an app-like experience"
 echo ""

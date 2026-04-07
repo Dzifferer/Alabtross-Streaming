@@ -1,7 +1,7 @@
 {
   "name": "alabtross-mobile",
   "version": "1.1.0",
-  "description": "Mobile streaming interface for Alabtross Streaming Server",
+  "description": "Mobile streaming interface for Albatross Streaming Server",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

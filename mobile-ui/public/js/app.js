@@ -3019,6 +3019,61 @@
     }, 3000);
   }
 
+  // Group items by packId — pack items become a single aggregate row
+  function groupPackItems(items) {
+    const packs = new Map();   // packId -> array of items
+    const singles = [];
+    for (const item of items) {
+      if (item.packId) {
+        if (!packs.has(item.packId)) packs.set(item.packId, []);
+        packs.get(item.packId).push(item);
+      } else {
+        singles.push(item);
+      }
+    }
+    // Build merged list: singles stay as-is, packs become aggregate objects
+    const result = [...singles];
+    for (const [packId, packItems] of packs) {
+      // Sort episodes within pack
+      packItems.sort((a, b) => (a.episode || 0) - (b.episode || 0));
+      const first = packItems[0];
+      const totalSize = packItems.reduce((s, i) => s + (i.fileSize || 0), 0);
+      const completedCount = packItems.filter(i => i.status === 'complete').length;
+      const failedCount = packItems.filter(i => i.status === 'failed').length;
+      const totalProgress = packItems.length > 0
+        ? Math.round(packItems.reduce((s, i) => s + (i.progress || 0), 0) / packItems.length)
+        : 0;
+      // Aggregate speed/peers (shared engine, so take max — they're the same)
+      const speed = Math.max(...packItems.map(i => i.downloadSpeed || 0));
+      const peers = Math.max(...packItems.map(i => i.numPeers || 0));
+      // Determine aggregate status
+      let aggStatus = 'downloading';
+      if (completedCount === packItems.length) aggStatus = 'complete';
+      else if (failedCount === packItems.length) aggStatus = 'failed';
+      else if (packItems.every(i => i.status === 'paused')) aggStatus = 'paused';
+      else if (packItems.every(i => i.status === 'queued')) aggStatus = 'queued';
+
+      result.push({
+        _isPack: true,
+        packId,
+        name: first.name,
+        poster: first.poster,
+        season: first.season,
+        quality: first.quality,
+        status: aggStatus,
+        progress: totalProgress,
+        downloadSpeed: speed,
+        numPeers: peers,
+        fileSize: totalSize,
+        episodes: packItems,
+        completedCount,
+        totalCount: packItems.length,
+        addedAt: first.addedAt,
+      });
+    }
+    return result;
+  }
+
   async function renderDownloads() {
     const panel = $('#downloads-panel');
     if (!panel) return;
@@ -3029,12 +3084,15 @@
       const data = await resp.json();
       const items = data.items || [];
 
+      // Group pack items into single aggregate rows
+      const grouped = groupPackItems(items);
+
       // Split into categories
-      const downloading = items.filter(i => i.status === 'downloading');
-      const paused = items.filter(i => i.status === 'paused');
-      const queued = items.filter(i => i.status === 'queued');
-      const completed = items.filter(i => i.status === 'complete').slice(0, 5);
-      const failed = items.filter(i => i.status === 'failed');
+      const downloading = grouped.filter(i => i.status === 'downloading');
+      const paused = grouped.filter(i => i.status === 'paused');
+      const queued = grouped.filter(i => i.status === 'queued');
+      const completed = grouped.filter(i => i.status === 'complete').slice(0, 5);
+      const failed = grouped.filter(i => i.status === 'failed');
 
       if (downloading.length === 0 && paused.length === 0 && queued.length === 0 && completed.length === 0 && failed.length === 0) {
         panel.innerHTML = '<div class="downloads-empty"><span class="setting-hint">No downloads</span></div>';
@@ -3042,36 +3100,38 @@
         return;
       }
 
+      const renderItem = (i, idx, len) => i._isPack ? downloadPackHTML(i) : downloadItemHTML(i, idx, len);
+
       let html = '';
 
       // Active downloads
       if (downloading.length > 0) {
         html += '<div class="download-section-label">Downloading</div>';
-        html += downloading.map(i => downloadItemHTML(i)).join('');
+        html += downloading.map(i => renderItem(i)).join('');
       }
 
       // Paused
       if (paused.length > 0) {
         html += '<div class="download-section-label">Paused</div>';
-        html += paused.map(i => downloadItemHTML(i)).join('');
+        html += paused.map(i => renderItem(i)).join('');
       }
 
       // Queue
       if (queued.length > 0) {
         html += '<div class="download-section-label">Queue (' + queued.length + ')</div>';
-        html += queued.map((i, idx) => downloadItemHTML(i, idx, queued.length)).join('');
+        html += queued.map((i, idx) => renderItem(i, idx, queued.length)).join('');
       }
 
       // Failed
       if (failed.length > 0) {
         html += '<div class="download-section-label">Failed</div>';
-        html += failed.map(i => downloadItemHTML(i)).join('');
+        html += failed.map(i => renderItem(i)).join('');
       }
 
       // Recent completed
       if (completed.length > 0) {
         html += '<div class="download-section-label">Completed</div>';
-        html += completed.map(i => downloadItemHTML(i)).join('');
+        html += completed.map(i => renderItem(i)).join('');
       }
 
       panel.innerHTML = html;
@@ -3080,6 +3140,90 @@
     } catch {
       panel.innerHTML = '<div class="downloads-empty"><span class="setting-hint">Could not load downloads</span></div>';
     }
+  }
+
+  function downloadPackHTML(pack) {
+    const poster = pack.poster
+      ? `<img class="download-poster" src="${escapeHTML(pack.poster)}" alt="" loading="lazy">`
+      : '<div class="download-poster"></div>';
+
+    const speed = pack.downloadSpeed > 0
+      ? `${(pack.downloadSpeed / 1e6).toFixed(1)} MB/s`
+      : '';
+    const peers = pack.numPeers > 0 ? `${pack.numPeers} peers` : '';
+    const meta = [pack.quality, speed, peers].filter(Boolean).join(' \u00b7 ');
+
+    const totalSizeStr = pack.fileSize > 0
+      ? `${(pack.fileSize / 1e9).toFixed(1)} GB`
+      : '';
+
+    const seasonLabel = pack.season ? `S${String(pack.season).padStart(2, '0')}` : 'Pack';
+    const episodeCount = `${pack.completedCount}/${pack.totalCount} episodes`;
+
+    const progressClass = pack.status === 'complete' ? 'complete'
+      : pack.status === 'paused' ? 'paused' : '';
+
+    const statusLabel = pack.status === 'downloading'
+      ? `${pack.progress}% \u00b7 ${episodeCount}`
+      : pack.status === 'complete'
+      ? `${episodeCount} \u00b7 ${totalSizeStr}`
+      : pack.status === 'paused'
+      ? `Paused at ${pack.progress}% \u00b7 ${episodeCount}`
+      : pack.status === 'failed'
+      ? `Failed \u00b7 ${episodeCount}`
+      : `Queued \u00b7 ${episodeCount}`;
+
+    // Actions apply to all episodes in the pack
+    let actions = '';
+    const firstEpId = pack.episodes[0]?.id || '';
+    if (pack.status === 'downloading') {
+      actions = `
+        <button class="download-action-btn cancel" data-pack-id="${escapeHTML(pack.packId)}" data-action="remove-pack" title="Cancel All">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>`;
+    } else if (pack.status === 'complete') {
+      actions = `
+        <button class="download-action-btn cancel" data-pack-id="${escapeHTML(pack.packId)}" data-action="remove-pack" title="Remove All">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>`;
+    } else if (pack.status === 'failed') {
+      actions = `
+        <button class="download-action-btn cancel" data-pack-id="${escapeHTML(pack.packId)}" data-action="remove-pack" title="Remove All">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>`;
+    }
+
+    const showProgress = ['downloading', 'paused', 'queued'].includes(pack.status);
+    const progressBar = showProgress
+      ? `<div class="download-progress-bar"><div class="download-progress-fill ${progressClass}" style="width:${pack.progress || 0}%"></div></div>`
+      : '';
+
+    // Build collapsed episode list (hidden by default)
+    let episodeListHtml = pack.episodes.map(ep => {
+      const epLabel = ep.episode != null ? `E${String(ep.episode).padStart(2, '0')}` : ep.fileName || '?';
+      const epPct = ep.status === 'complete' ? '100%' : `${ep.progress || 0}%`;
+      const epStatus = ep.status === 'complete' ? 'done' : ep.status === 'failed' ? 'fail' : '';
+      return `<div class="pack-episode-row ${epStatus}"><span class="pack-ep-label">${escapeHTML(epLabel)}</span><span class="pack-ep-file">${escapeHTML(ep.fileName || '')}</span><span class="pack-ep-pct">${epPct}</span></div>`;
+    }).join('');
+
+    return `
+      <div class="download-item download-pack-item" data-pack-id="${escapeHTML(pack.packId)}">
+        ${poster}
+        <div class="download-info">
+          <div class="download-name">${escapeHTML(pack.name)} <span class="pack-season-tag">${seasonLabel}</span></div>
+          <div class="download-meta">${escapeHTML(statusLabel)}${meta ? ' \u00b7 ' + escapeHTML(meta) : ''}</div>
+          ${progressBar}
+        </div>
+        <div class="download-actions">
+          <button class="download-action-btn pack-expand-btn" data-pack-id="${escapeHTML(pack.packId)}" title="Show episodes">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+          ${actions}
+        </div>
+      </div>
+      <div class="pack-episodes-detail collapsed" data-pack-detail="${escapeHTML(pack.packId)}">
+        ${episodeListHtml}
+      </div>`;
   }
 
   function downloadItemHTML(item, queueIdx, queueLen) {
@@ -3169,7 +3313,26 @@
       btn.addEventListener('click', async (e) => {
         e.stopPropagation();
         const id = btn.dataset.id;
+        const packId = btn.dataset.packId;
         const action = btn.dataset.action;
+
+        if (action === 'remove-pack' && packId) {
+          // Remove all episodes in this pack
+          const packDetail = panel.querySelector(`[data-pack-detail="${CSS.escape(packId)}"]`);
+          const epRows = packDetail ? packDetail.querySelectorAll('.pack-episode-row') : [];
+          // Find all item IDs from the current library data
+          try {
+            const resp = await fetch('/api/library');
+            const data = await resp.json();
+            const packItems = (data.items || []).filter(i => i.packId === packId);
+            await Promise.all(packItems.map(i =>
+              fetch(`/api/library/${encodeURIComponent(i.id)}`, { method: 'DELETE' })
+            ));
+            showToast('Season pack removed');
+          } catch { showToast('Failed to remove pack'); }
+          renderDownloads();
+          return;
+        }
 
         if (action === 'pause') {
           await fetch(`/api/library/${encodeURIComponent(id)}/pause`, { method: 'POST' });
@@ -3191,6 +3354,19 @@
             body: JSON.stringify({ position: newPos }),
           });
           renderDownloads();
+        }
+      });
+    });
+
+    // Pack expand/collapse toggle
+    panel.querySelectorAll('.pack-expand-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const packId = btn.dataset.packId;
+        const detail = panel.querySelector(`[data-pack-detail="${CSS.escape(packId)}"]`);
+        if (detail) {
+          detail.classList.toggle('collapsed');
+          btn.classList.toggle('expanded');
         }
       });
     });

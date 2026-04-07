@@ -1751,6 +1751,46 @@ html, body {
   background: rgba(255, 107, 107, 0.1);
 }
 
+/* Library section headers and grouping */
+.library-section-header {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+  padding: 8px 0 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+
+.library-section-header:not(:first-child) {
+  margin-top: 16px;
+}
+
+.library-show-group {
+  margin-bottom: 12px;
+}
+
+.library-show-header {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  padding: 8px 0 2px;
+}
+
+.library-season-header {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+  padding: 4px 0 2px 8px;
+}
+
+.library-episode {
+  padding-left: 16px;
+}
+
+.library-episode .library-item-title {
+  font-size: 14px;
+}
+
 /* Add to Library button on detail page */
 .library-add-section {
   padding-bottom: 24px;

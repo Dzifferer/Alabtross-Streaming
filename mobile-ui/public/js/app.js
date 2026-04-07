@@ -2318,20 +2318,6 @@
     app.classList.add('theme-custom');
   }
 
-  // ─── Player Error Helper ──────────────────────────
-
-  function showPlayerError(title, hint) {
-    dom.playerOverlay.innerHTML = `
-      <p style="color:var(--danger)">${escapeHTML(title)}</p>
-      <p style="font-size:13px;color:var(--text-muted)">${hint}</p>
-      <button id="player-go-back" style="
-        margin-top:16px; padding:10px 24px; background:var(--accent);
-        border:none; border-radius:8px; color:white; font-size:14px; cursor:pointer;
-      ">Go Back</button>
-    `;
-    document.getElementById('player-go-back').addEventListener('click', () => goBack());
-  }
-
   // ─── Utility ─────────────────────────────────────
 
   const _escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };

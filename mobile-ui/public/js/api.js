@@ -270,6 +270,28 @@ class StremioAPI {
         console.warn('Meta fetch failed for', addon.url, e);
       }
     }
+
+    // Fallback: fetch metadata directly from TMDB for tmdb: IDs
+    if (id.startsWith('tmdb:')) {
+      try {
+        const tmdbId = id.replace('tmdb:', '');
+        const resp = await fetch(`/api/tmdb-meta/${type}/${tmdbId}`);
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data.meta) {
+            this._lastTitle = data.meta.name || null;
+            // If TMDB resolved an IMDB ID, update the ID for stream lookups
+            if (data.meta.imdb_id) {
+              data.meta._resolvedImdbId = data.meta.imdb_id;
+            }
+            return data.meta;
+          }
+        }
+      } catch (e) {
+        console.warn('TMDB meta fallback failed:', e);
+      }
+    }
+
     return null;
   }
 

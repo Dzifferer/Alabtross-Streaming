@@ -1209,8 +1209,8 @@
       <div class="loading-state"><div class="spinner"></div><p>Loading details...</p></div>
     `;
 
-    // For movies, start fetching streams in parallel with metadata
-    const streamsPromise = type === 'movie' ? api.getStreams(type, id) : null;
+    // For movies with IMDB IDs, start fetching streams in parallel with metadata
+    let streamsPromise = (type === 'movie' && !id.startsWith('tmdb:')) ? api.getStreams(type, id) : null;
 
     const meta = await api.getMeta(type, id);
     if (!meta) {
@@ -1218,6 +1218,15 @@
         <div class="empty-state"><p>Could not load details</p></div>
       `;
       return;
+    }
+
+    // If TMDB metadata resolved an IMDB ID, use it for streams and update the working ID
+    if (meta._resolvedImdbId && id.startsWith('tmdb:')) {
+      id = meta._resolvedImdbId;
+      // Start the movie stream fetch now that we have a real IMDB ID
+      if (type === 'movie' && !streamsPromise) {
+        streamsPromise = api.getStreams(type, id);
+      }
     }
 
     state.currentMeta = meta;
@@ -2210,8 +2219,8 @@
 
       attachLibraryHandlers();
 
-      // Start progress polling for downloading items
-      const needsPoll = libraryItems.some(i => i.status === 'downloading' || i.status === 'queued');
+      // Start progress polling for downloading/converting items
+      const needsPoll = libraryItems.some(i => i.status === 'downloading' || i.status === 'queued' || i.status === 'converting');
       if (needsPoll) {
         startLibraryProgressPoll();
       }
@@ -2243,6 +2252,19 @@
           <div class="library-card-progress-bar" style="width:${item.progress}%"></div>
         </div>`;
       metaHtml = `<div class="library-card-meta downloading">${speed || 'Starting...'}${item.numPeers ? ' &middot; ' + item.numPeers + ' peers' : ''}</div>`;
+    } else if (item.status === 'converting') {
+      const pct = item.convertProgress || 0;
+      overlayHtml = `
+        <div class="library-card-overlay converting">${pct}%</div>
+        <div class="library-card-progress">
+          <div class="library-card-progress-bar converting" style="width:${pct}%"></div>
+        </div>
+        <div class="library-card-play">
+          <div class="library-card-play-circle">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          </div>
+        </div>`;
+      metaHtml = `<div class="library-card-meta converting">Converting to MP4...${item.convertError ? ' (retry failed)' : ''}</div>`;
     } else if (item.status === 'queued') {
       const posText = item._queuePosition ? `#${item._queuePosition} in queue` : 'Waiting...';
       overlayHtml = `<div class="library-card-overlay queued">Queued</div>`;
@@ -2288,8 +2310,8 @@
       });
     });
 
-    // Click on card to play if complete
-    dom.libraryContent.querySelectorAll('.card[data-status="complete"]').forEach(card => {
+    // Click on card to play if complete or converting (converting items still play via remux)
+    dom.libraryContent.querySelectorAll('.card[data-status="complete"], .card[data-status="converting"]').forEach(card => {
       card.addEventListener('click', () => {
         playLibraryItem(card.dataset.id);
       });
@@ -2436,6 +2458,14 @@
               const speed = item.downloadSpeed > 0 ? formatSpeed(item.downloadSpeed) : '';
               meta.innerHTML = `${speed || 'Starting...'}${item.numPeers ? ' &middot; ' + item.numPeers + ' peers' : ''}`;
             }
+          } else if (item.status === 'converting') {
+            const bar = el.querySelector('.library-card-progress-bar');
+            const overlay = el.querySelector('.library-card-overlay');
+            const meta = el.querySelector('.library-card-meta');
+            const pct = item.convertProgress || 0;
+            if (bar) bar.style.width = pct + '%';
+            if (overlay) overlay.textContent = pct + '%';
+            if (meta) meta.textContent = 'Converting to MP4...';
           } else if (el.dataset.status !== item.status) {
             // Status changed — reload full list
             loadLibrary();
@@ -2444,7 +2474,8 @@
         }
 
         const queued = items.filter(i => i.status === 'queued');
-        if (downloading.length === 0 && queued.length === 0) {
+        const converting = items.filter(i => i.status === 'converting');
+        if (downloading.length === 0 && queued.length === 0 && converting.length === 0) {
           stopLibraryProgressPoll();
         }
       } catch { /* ignore polling errors */ }
@@ -3557,7 +3588,8 @@
     applyTheme();
 
     // Initial load
-    loadHome();
+    navigateTo('home');
+    loadHome().catch(err => console.error('[Init] loadHome failed:', err));
 
     // VPN check
     checkVPNStatus()

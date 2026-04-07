@@ -12,6 +12,7 @@
  */
 
 const torrentStream = require('torrent-stream');
+const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const { VIDEO_EXTENSIONS, TRACKERS, isFileNameSafe, getMimeType } = require('./file-safety');
@@ -28,6 +29,8 @@ class LibraryManager {
     this._items = new Map();       // id -> library item
     this._engines = new Map();     // id -> torrent engine (active downloads only)
     this._progressTimers = new Map(); // id -> interval timer
+    this._convertProcesses = new Map(); // id -> FFmpeg child process (active conversions)
+    this._maxConcurrentConversions = 1;
     this._metadataSaveTimer = null;
 
     // Ensure library directory exists
@@ -39,8 +42,9 @@ class LibraryManager {
     this._loadMetadata();
     console.log(`[Library] Initialized at ${this._libraryPath}, ${this._items.size} items loaded`);
 
-    // Auto-resume any downloads that were interrupted (power loss, crash, restart)
+    // Auto-resume any downloads/conversions that were interrupted (power loss, crash, restart)
     this._resumeInterruptedDownloads();
+    this._resumeInterruptedConversions();
   }
 
   // ─── Public API ──────────────────────────────────
@@ -63,7 +67,7 @@ class LibraryManager {
     // Check if already in library
     if (this._items.has(id)) {
       const existing = this._items.get(id);
-      if (existing.status === 'complete') {
+      if (existing.status === 'complete' || existing.status === 'converting') {
         return { id, status: 'already_exists' };
       }
       if (existing.status === 'queued') {
@@ -262,18 +266,36 @@ class LibraryManager {
     // Stop download if active
     this._stopDownload(id);
 
-    // Delete file
+    // Kill conversion process if active
+    this._stopConversion(id);
+
+    // Delete file(s) — current file and any temp conversion file
     if (item.filePath) {
       const fullPath = path.join(this._libraryPath, item.filePath);
       try {
         if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
-        // Try to remove parent directory if empty
-        const dir = path.dirname(fullPath);
-        if (dir !== this._libraryPath) {
-          try { fs.rmdirSync(dir); } catch { /* not empty, fine */ }
-        }
       } catch (err) {
         console.error(`[Library] Failed to delete file: ${err.message}`);
+      }
+    }
+    if (item.originalFilePath && item.originalFilePath !== item.filePath) {
+      const origPath = path.join(this._libraryPath, item.originalFilePath);
+      try {
+        if (fs.existsSync(origPath)) fs.unlinkSync(origPath);
+      } catch { /* ignore */ }
+    }
+    // Clean up temp .converting.mp4 file
+    if (item.filePath) {
+      const tempPath = this._getConvertTempPath(path.join(this._libraryPath, item.filePath));
+      try {
+        if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+      } catch { /* ignore */ }
+    }
+    // Try to remove parent directory if empty
+    if (item.filePath) {
+      const dir = path.dirname(path.join(this._libraryPath, item.filePath));
+      if (dir !== this._libraryPath) {
+        try { fs.rmdirSync(dir); } catch { /* not empty, fine */ }
       }
     }
 
@@ -297,7 +319,7 @@ class LibraryManager {
       return null;
     }
 
-    if (!item || item.status !== 'complete' || !item.filePath) return null;
+    if (!item || (item.status !== 'complete' && item.status !== 'converting') || !item.filePath) return null;
 
     const fullPath = path.join(this._libraryPath, item.filePath);
     if (!fs.existsSync(fullPath)) {
@@ -327,9 +349,14 @@ class LibraryManager {
     for (const [id] of this._engines) {
       this._stopDownload(id);
     }
+    // Kill active conversions — they keep status='converting' for auto-resume on restart
+    for (const [id, proc] of this._convertProcesses) {
+      try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+    }
+    this._convertProcesses.clear();
     // Downloads keep status='downloading' so they auto-resume on next startup
     this._saveMetadata();
-    console.log('[Library] State saved — downloads will resume on next start');
+    console.log('[Library] State saved — downloads and conversions will resume on next start');
   }
 
   // ─── Queue Processing ──────────────────────────
@@ -468,6 +495,9 @@ class LibraryManager {
           this._stopDownload(id);
           this._saveMetadata();
           this._processQueue();
+
+          // Check if conversion to browser-compatible MP4 is needed
+          this._checkAndConvert(id);
         }
       }, 2000);
 
@@ -499,8 +529,8 @@ class LibraryManager {
       this._engines.delete(id);
     }
 
-    // Stop periodic save when no downloads are active
-    if (this._engines.size === 0) {
+    // Stop periodic save when no downloads or conversions are active
+    if (this._engines.size === 0 && this._convertProcesses.size === 0) {
       this._stopPeriodicSave();
     }
   }
@@ -545,6 +575,8 @@ class LibraryManager {
           console.log(`[Library] Cleaned up stale temp file: ${f}`);
         }
       }
+      // Clean up orphaned .converting.mp4 files in subdirectories
+      // (these are handled per-item in _resumeInterruptedConversions)
     } catch {
       // Non-critical — ignore
     }
@@ -577,6 +609,11 @@ class LibraryManager {
             item._needsResume = true;
             item.downloadSpeed = 0;
             item.numPeers = 0;
+          }
+          // Mark interrupted conversions for auto-resume
+          if (item.status === 'converting') {
+            item._needsConversion = true;
+            item.convertProgress = 0;
           }
           this._items.set(item.id, item);
         }
@@ -647,10 +684,53 @@ class LibraryManager {
     this._processQueue();
   }
 
+  _resumeInterruptedConversions() {
+    const toConvert = [...this._items.values()].filter(i => i._needsConversion);
+    if (toConvert.length === 0) return;
+
+    console.log(`[Library] Found ${toConvert.length} interrupted conversion(s) — resuming...`);
+
+    for (const item of toConvert) {
+      delete item._needsConversion;
+
+      // Clean up any leftover temp file from interrupted conversion
+      if (item.filePath || item.originalFilePath) {
+        const sourcePath = item.originalFilePath || item.filePath;
+        const tempPath = this._getConvertTempPath(path.join(this._libraryPath, sourcePath));
+        try {
+          if (fs.existsSync(tempPath)) {
+            fs.unlinkSync(tempPath);
+            console.log(`[Library] Cleaned up interrupted conversion temp file for "${item.name}"`);
+          }
+        } catch { /* ignore */ }
+      }
+
+      // Ensure original file still exists
+      const sourcePath = item.originalFilePath || item.filePath;
+      const fullPath = path.join(this._libraryPath, sourcePath);
+      if (!fs.existsSync(fullPath)) {
+        console.error(`[Library] Cannot resume conversion for "${item.name}" — source file missing`);
+        item.status = 'failed';
+        item.error = 'Source file missing after restart';
+        continue;
+      }
+
+      // Reset filePath to original if it was changed
+      if (item.originalFilePath) {
+        item.filePath = item.originalFilePath;
+      }
+
+      console.log(`[Library] Resuming conversion: "${item.name}"`);
+      this._startConversion(item.id);
+    }
+
+    this._saveMetadata();
+  }
+
   _saveMetadata() {
     try {
       const data = [...this._items.values()].map(item => {
-        const { _needsResume, ...clean } = item;
+        const { _needsResume, _needsConversion, ...clean } = item;
         return clean;
       });
       const json = JSON.stringify(data, null, 2);
@@ -762,6 +842,304 @@ class LibraryManager {
     return discovered;
   }
 
+  // ─── Video Conversion ──────────────────────────
+
+  /**
+   * Probe a video file with ffprobe to check codec/container compatibility.
+   * Returns a Promise resolving to { directPlay, videoCodec, audioCodec, container, duration, ext }.
+   */
+  _probeFile(filePath) {
+    return new Promise((resolve) => {
+      const ext = path.extname(filePath).toLowerCase();
+      const ffprobe = spawn('ffprobe', [
+        '-v', 'quiet',
+        '-print_format', 'json',
+        '-show_format',
+        '-show_streams',
+        filePath,
+      ]);
+
+      let output = '';
+      ffprobe.stdout.on('data', (d) => { output += d.toString(); });
+
+      ffprobe.on('close', (code) => {
+        if (code !== 0) {
+          return resolve({ directPlay: false, reason: 'ffprobe failed' });
+        }
+        try {
+          const info = JSON.parse(output);
+          const videoStream = (info.streams || []).find(s => s.codec_type === 'video');
+          const audioStream = (info.streams || []).find(s => s.codec_type === 'audio');
+
+          const videoCodec = videoStream ? videoStream.codec_name : null;
+          const audioCodec = audioStream ? audioStream.codec_name : null;
+          const container = info.format ? info.format.format_name : null;
+          const duration = info.format ? parseFloat(info.format.duration) : null;
+
+          const compatibleVideo = ['h264', 'hevc'].includes(videoCodec);
+          const compatibleAudio = !audioStream || ['aac', 'mp3'].includes(audioCodec);
+          const compatibleContainer = ext === '.mp4' || ext === '.m4v';
+          const directPlay = compatibleVideo && compatibleAudio && compatibleContainer;
+
+          resolve({ directPlay, videoCodec, audioCodec, container, duration, ext });
+        } catch {
+          resolve({ directPlay: false, reason: 'probe parse error' });
+        }
+      });
+
+      ffprobe.on('error', () => {
+        resolve({ directPlay: false, reason: 'ffprobe not available' });
+      });
+    });
+  }
+
+  /**
+   * Check if a completed library item needs conversion and start it if so.
+   */
+  async _checkAndConvert(id) {
+    const item = this._items.get(id);
+    if (!item || item.status !== 'complete' || !item.filePath) return;
+
+    const fullPath = path.join(this._libraryPath, item.filePath);
+    if (!fs.existsSync(fullPath)) return;
+
+    const probe = await this._probeFile(fullPath);
+
+    if (probe.directPlay) {
+      console.log(`[Library] "${item.name}" is already browser-compatible — no conversion needed`);
+      return;
+    }
+
+    // Only convert if video codec can be copied (h264/hevc) — otherwise too expensive
+    if (!['h264', 'hevc'].includes(probe.videoCodec)) {
+      console.log(`[Library] "${item.name}" has unsupported video codec (${probe.videoCodec}) — skipping conversion, on-the-fly remux available`);
+      return;
+    }
+
+    // Respect concurrent conversion limit
+    if (this._convertProcesses.size >= this._maxConcurrentConversions) {
+      console.log(`[Library] Conversion queued for "${item.name}" — waiting for active conversion to finish`);
+      // Store that this needs conversion and check again when a conversion completes
+      item._pendingConversion = true;
+      item._probeDuration = probe.duration;
+      return;
+    }
+
+    item.status = 'converting';
+    item.convertProgress = 0;
+    item.convertError = null;
+    item._probeDuration = probe.duration;
+    this._saveMetadata();
+    this._startPeriodicSave();
+
+    console.log(`[Library] Starting conversion: "${item.name}" (${probe.ext} → .mp4, video: ${probe.videoCodec}, audio: ${probe.audioCodec || 'none'})`);
+    this._startConversion(id);
+  }
+
+  /**
+   * Get the temp file path used during conversion.
+   */
+  _getConvertTempPath(inputPath) {
+    const dir = path.dirname(inputPath);
+    const base = path.basename(inputPath, path.extname(inputPath));
+    return path.join(dir, base + '.converting.mp4');
+  }
+
+  /**
+   * Get the final MP4 output path for a converted file.
+   */
+  _getConvertOutputPath(inputPath) {
+    const dir = path.dirname(inputPath);
+    const base = path.basename(inputPath, path.extname(inputPath));
+    return path.join(dir, base + '.mp4');
+  }
+
+  /**
+   * Start FFmpeg conversion of a library item to browser-compatible MP4.
+   */
+  _startConversion(id) {
+    const item = this._items.get(id);
+    if (!item || !item.filePath) return;
+
+    const inputPath = path.join(this._libraryPath, item.filePath);
+    const tempOutputPath = this._getConvertTempPath(inputPath);
+    const finalOutputPath = this._getConvertOutputPath(inputPath);
+
+    // Store original file path for rollback on failure
+    if (!item.originalFilePath) {
+      item.originalFilePath = item.filePath;
+    }
+
+    const duration = item._probeDuration || 0;
+
+    const ffmpeg = spawn('ffmpeg', [
+      '-i', inputPath,
+      '-map', '0:v:0',
+      '-map', '0:a:0?',
+      '-c:v', 'copy',
+      '-c:a', 'aac',
+      '-b:a', '192k',
+      '-movflags', '+faststart',
+      '-f', 'mp4',
+      '-y',
+      '-progress', 'pipe:1',
+      '-loglevel', 'warning',
+      tempOutputPath,
+    ]);
+
+    this._convertProcesses.set(id, ffmpeg);
+
+    // Parse progress from FFmpeg stdout
+    let progressBuf = '';
+    ffmpeg.stdout.on('data', (data) => {
+      progressBuf += data.toString();
+      const lines = progressBuf.split('\n');
+      progressBuf = lines.pop(); // keep incomplete line
+
+      for (const line of lines) {
+        const match = line.match(/^out_time_us=(\d+)/);
+        if (match && duration > 0) {
+          const currentSec = parseInt(match[1], 10) / 1e6;
+          item.convertProgress = Math.min(99, Math.round((currentSec / duration) * 100));
+        }
+      }
+    });
+
+    ffmpeg.stderr.on('data', (data) => {
+      const msg = data.toString().trim();
+      if (msg) console.log(`[FFmpeg/Convert] ${msg}`);
+    });
+
+    ffmpeg.on('error', (err) => {
+      console.error(`[Library] FFmpeg conversion error for "${item.name}": ${err.message}`);
+      this._onConversionFailure(id, `FFmpeg error: ${err.message}`);
+    });
+
+    ffmpeg.on('close', (code) => {
+      this._convertProcesses.delete(id);
+
+      if (code === 0) {
+        this._onConversionSuccess(id, inputPath, tempOutputPath, finalOutputPath);
+      } else {
+        this._onConversionFailure(id, `FFmpeg exited with code ${code}`);
+      }
+    });
+  }
+
+  /**
+   * Handle successful conversion: rename temp file, delete original, update metadata.
+   */
+  _onConversionSuccess(id, inputPath, tempOutputPath, finalOutputPath) {
+    const item = this._items.get(id);
+    if (!item) return;
+
+    try {
+      // Verify output file exists and has non-zero size
+      const stat = fs.statSync(tempOutputPath);
+      if (stat.size === 0) {
+        this._onConversionFailure(id, 'Conversion produced empty file');
+        return;
+      }
+
+      // Rename temp to final
+      fs.renameSync(tempOutputPath, finalOutputPath);
+
+      // Delete original file (only if it's different from the output)
+      if (inputPath !== finalOutputPath && fs.existsSync(inputPath)) {
+        fs.unlinkSync(inputPath);
+      }
+
+      // Update item metadata
+      const newRelPath = path.relative(this._libraryPath, finalOutputPath);
+      item.filePath = newRelPath;
+      item.fileName = path.basename(finalOutputPath);
+      item.fileSize = stat.size;
+      item.status = 'complete';
+      item.convertProgress = 100;
+      item.originalFilePath = null;
+      delete item._probeDuration;
+
+      this._saveMetadata();
+      console.log(`[Library] Conversion complete: "${item.name}" → ${item.fileName} (${(stat.size / 1e9).toFixed(2)} GB)`);
+
+      // Check if there are pending conversions waiting for a slot
+      this._processConversionQueue();
+
+      // Stop periodic save if nothing active
+      if (this._engines.size === 0 && this._convertProcesses.size === 0) {
+        this._stopPeriodicSave();
+      }
+    } catch (err) {
+      console.error(`[Library] Conversion finalization error: ${err.message}`);
+      this._onConversionFailure(id, `Finalization error: ${err.message}`);
+    }
+  }
+
+  /**
+   * Handle failed conversion: clean up temp file, revert to original, allow on-the-fly remux.
+   */
+  _onConversionFailure(id, reason) {
+    const item = this._items.get(id);
+    if (!item) return;
+
+    console.error(`[Library] Conversion failed for "${item.name}": ${reason}`);
+
+    // Delete temp file if it exists
+    const sourcePath = item.originalFilePath || item.filePath;
+    const tempPath = this._getConvertTempPath(path.join(this._libraryPath, sourcePath));
+    try {
+      if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+    } catch { /* ignore */ }
+
+    // Revert to original file — on-the-fly remux still works
+    if (item.originalFilePath) {
+      item.filePath = item.originalFilePath;
+      item.originalFilePath = null;
+    }
+    item.status = 'complete';
+    item.convertError = reason;
+    item.convertProgress = null;
+    delete item._probeDuration;
+
+    this._saveMetadata();
+    this._processConversionQueue();
+
+    if (this._engines.size === 0 && this._convertProcesses.size === 0) {
+      this._stopPeriodicSave();
+    }
+  }
+
+  /**
+   * Kill an active conversion process for the given item.
+   */
+  _stopConversion(id) {
+    const proc = this._convertProcesses.get(id);
+    if (proc) {
+      try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+      this._convertProcesses.delete(id);
+    }
+  }
+
+  /**
+   * Check for items pending conversion and start them if a slot is available.
+   */
+  _processConversionQueue() {
+    if (this._convertProcesses.size >= this._maxConcurrentConversions) return;
+
+    const pending = [...this._items.values()].find(i => i._pendingConversion);
+    if (!pending) return;
+
+    delete pending._pendingConversion;
+    pending.status = 'converting';
+    pending.convertProgress = 0;
+    pending.convertError = null;
+    this._saveMetadata();
+    this._startPeriodicSave();
+
+    console.log(`[Library] Starting queued conversion: "${pending.name}"`);
+    this._startConversion(pending.id);
+  }
+
   _sanitizeItem(item) {
     return {
       id: item.id,
@@ -783,6 +1161,8 @@ class LibraryManager {
       addedAt: item.addedAt,
       completedAt: item.completedAt,
       error: item.error,
+      convertProgress: item.convertProgress || null,
+      convertError: item.convertError || null,
     };
   }
 

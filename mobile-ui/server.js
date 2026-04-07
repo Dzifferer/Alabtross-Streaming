@@ -165,27 +165,102 @@ app.get('/api/search', rateLimit, async (req, res) => {
     // Sort by popularity descending
     results.sort((a, b) => b.popularity - a.popularity);
 
-    // Fetch IMDB IDs for top results (parallel, limited to top 20)
+    // Fetch IMDB IDs for top results (concurrency-limited to avoid TMDB rate limits)
     const topResults = results.slice(0, 20);
-    const imdbLookups = topResults.map(async (item) => {
-      try {
-        const tmdbType = item.type === 'series' ? 'tv' : 'movie';
-        const ext = await tmdbFetch(`/${tmdbType}/${item.tmdb_id}/external_ids`);
-        item.imdb_id = ext.imdb_id || null;
-        item.id = ext.imdb_id || `tmdb:${item.tmdb_id}`;
-      } catch {
-        item.id = `tmdb:${item.tmdb_id}`;
-      }
+    const CONCURRENCY = 5;
+    for (let i = 0; i < topResults.length; i += CONCURRENCY) {
+      const batch = topResults.slice(i, i + CONCURRENCY);
+      await Promise.all(batch.map(async (item) => {
+        try {
+          const tmdbType = item.type === 'series' ? 'tv' : 'movie';
+          const ext = await tmdbFetch(`/${tmdbType}/${item.tmdb_id}/external_ids`);
+          item.imdb_id = ext.imdb_id || null;
+          item.id = ext.imdb_id || `tmdb:${item.tmdb_id}`;
+        } catch {
+          item.imdb_id = null;
+          item.id = `tmdb:${item.tmdb_id}`;
+        }
+      }));
+    }
+
+    // Sort: results with IMDB IDs first (fully streamable), then by popularity
+    topResults.sort((a, b) => {
+      const aHas = a.imdb_id ? 1 : 0;
+      const bHas = b.imdb_id ? 1 : 0;
+      if (aHas !== bHas) return bHas - aHas;
+      return b.popularity - a.popularity;
     });
-    await Promise.all(imdbLookups);
 
-    // Filter out results without IMDB IDs (can't stream without them)
-    const withImdb = topResults.filter(r => r.imdb_id);
-
-    res.json({ results: withImdb });
+    res.json({ results: topResults });
   } catch (err) {
     console.error('[TMDB] Search error:', err.message);
     res.json({ results: [], error: 'Search failed' });
+  }
+});
+
+// ─── TMDB Metadata Endpoint (for items without IMDB IDs) ────────────
+
+app.get('/api/tmdb-meta/:type/:tmdbId', rateLimit, async (req, res) => {
+  const { type, tmdbId } = req.params;
+  if (!/^\d+$/.test(tmdbId) || !['movie', 'series'].includes(type)) {
+    return res.status(400).json({ error: 'Invalid parameters' });
+  }
+
+  if (!TMDB_API_KEY) {
+    return res.status(503).json({ error: 'TMDB API key not configured' });
+  }
+
+  try {
+    const tmdbType = type === 'series' ? 'tv' : 'movie';
+    const data = await tmdbFetch(`/${tmdbType}/${tmdbId}`);
+
+    const meta = {
+      id: `tmdb:${tmdbId}`,
+      type,
+      name: tmdbType === 'movie' ? data.title : data.name,
+      year: (data.release_date || data.first_air_date || '').slice(0, 4),
+      poster: data.poster_path ? `https://image.tmdb.org/t/p/w342${data.poster_path}` : null,
+      background: data.backdrop_path ? `https://image.tmdb.org/t/p/w1280${data.backdrop_path}` : null,
+      description: data.overview || '',
+      genres: (data.genres || []).map(g => g.name),
+      runtime: data.runtime ? `${data.runtime} min` : undefined,
+      imdbRating: data.vote_average ? String(data.vote_average) : undefined,
+    };
+
+    // Try to resolve IMDB ID one more time
+    try {
+      const ext = await tmdbFetch(`/${tmdbType}/${tmdbId}/external_ids`);
+      if (ext.imdb_id) {
+        meta.imdb_id = ext.imdb_id;
+        meta.id = ext.imdb_id;
+      }
+    } catch { /* keep tmdb: ID */ }
+
+    // For series, include season/episode data
+    if (type === 'series' && data.seasons) {
+      meta.videos = [];
+      for (const season of data.seasons) {
+        if (season.season_number === 0) continue; // skip specials
+        try {
+          const seasonData = await tmdbFetch(`/tv/${tmdbId}/season/${season.season_number}`);
+          for (const ep of (seasonData.episodes || [])) {
+            meta.videos.push({
+              id: `tmdb:${tmdbId}:${season.season_number}:${ep.episode_number}`,
+              season: season.season_number,
+              episode: ep.episode_number,
+              title: ep.name || `Episode ${ep.episode_number}`,
+              overview: ep.overview || '',
+              released: ep.air_date || undefined,
+            });
+          }
+        } catch { /* skip season on error */ }
+      }
+    }
+
+    res.json({ meta });
+  } catch (err) {
+    console.error('[TMDB] Meta fetch error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch metadata' });
   }
 });
 
@@ -449,13 +524,46 @@ app.get('/api/collections/:collectionId', rateLimit, async (req, res) => {
 
 // ─── Custom Mode API Routes ───────────────────────────────────────────
 
+// Helper: resolve a tmdb: ID to an IMDB ID via TMDB external_ids
+async function resolveTmdbToImdb(tmdbId, type) {
+  if (!TMDB_API_KEY) return null;
+  try {
+    const tmdbType = type === 'series' ? 'tv' : 'movie';
+    const ext = await tmdbFetch(`/${tmdbType}/${tmdbId}/external_ids`);
+    return ext.imdb_id || null;
+  } catch {
+    return null;
+  }
+}
+
 // GET /api/streams/movie/:imdbId
 app.get('/api/streams/movie/:imdbId', rateLimit, async (req, res) => {
-  const { imdbId } = req.params;
+  let { imdbId } = req.params;
+  const title = req.query.title || '';
+
+  // Support tmdb: IDs — try to resolve to IMDB first
+  if (/^tmdb:\d+$/.test(imdbId)) {
+    const tmdbId = imdbId.replace('tmdb:', '');
+    const resolved = await resolveTmdbToImdb(tmdbId, 'movie');
+    if (resolved) {
+      imdbId = resolved;
+    } else if (title) {
+      // Can't resolve IMDB ID — use title-based scraping only
+      try {
+        const streams = await getMovieStreams(null, title);
+        return res.json({ streams });
+      } catch (err) {
+        console.error('[API] Movie stream error (title-only):', err.message);
+        return res.status(500).json({ error: 'Failed to fetch streams' });
+      }
+    } else {
+      return res.status(400).json({ error: 'Cannot resolve TMDB ID and no title provided' });
+    }
+  }
+
   if (!/^tt\d{1,10}$/.test(imdbId)) {
     return res.status(400).json({ error: 'Invalid IMDB ID' });
   }
-  const title = req.query.title || '';
   try {
     const streams = await getMovieStreams(imdbId, title);
     res.json({ streams });
@@ -467,9 +575,33 @@ app.get('/api/streams/movie/:imdbId', rateLimit, async (req, res) => {
 
 // GET /api/streams/series/:imdbId?season=N&episode=N
 app.get('/api/streams/series/:imdbId', rateLimit, async (req, res) => {
-  const { imdbId } = req.params;
+  let { imdbId } = req.params;
+
+  // Support tmdb: IDs — try to resolve to IMDB first
+  if (/^tmdb:\d+$/.test(imdbId)) {
+    const tmdbId = imdbId.replace('tmdb:', '');
+    const resolved = await resolveTmdbToImdb(tmdbId, 'series');
+    if (resolved) {
+      imdbId = resolved;
+    }
+    // For series without IMDB ID, title-based search handled below
+  }
+
   if (!/^tt\d{1,10}$/.test(imdbId)) {
-    return res.status(400).json({ error: 'Invalid IMDB ID' });
+    // For tmdb: IDs that couldn't be resolved, try title-based search
+    const title = req.query.title || '';
+    if (!title) return res.status(400).json({ error: 'Invalid IMDB ID' });
+    const season = req.query.season ? parseInt(req.query.season, 10) : undefined;
+    const episode = req.query.episode ? parseInt(req.query.episode, 10) : undefined;
+    const absEp = req.query.absEp ? parseInt(req.query.absEp, 10) : undefined;
+    const genres = req.query.genres ? req.query.genres.split(',').filter(Boolean) : [];
+    try {
+      const streams = await getSeriesStreams(null, season, episode, title, { absEp, genres });
+      return res.json({ streams });
+    } catch (err) {
+      console.error('[API] Series stream error (title-only):', err.message);
+      return res.status(500).json({ error: 'Failed to fetch streams' });
+    }
   }
   const season = req.query.season ? parseInt(req.query.season, 10) : undefined;
   const episode = req.query.episode ? parseInt(req.query.episode, 10) : undefined;
@@ -771,7 +903,7 @@ app.post('/api/library/:id/reorder', rateLimit, (req, res) => {
 app.get('/api/library/:id/stream', async (req, res) => {
   const item = library.getItem(req.params.id);
   if (!item) return res.status(404).json({ error: 'Item not found' });
-  if (item.status !== 'complete') {
+  if (item.status !== 'complete' && item.status !== 'converting') {
     return res.status(400).json({ error: 'Download not complete' });
   }
 
@@ -831,7 +963,7 @@ app.get('/api/library/:id/stream', async (req, res) => {
 app.get('/api/library/:id/stream/remux', async (req, res) => {
   const item = library.getItem(req.params.id);
   if (!item) return res.status(404).json({ error: 'Item not found' });
-  if (item.status !== 'complete') {
+  if (item.status !== 'complete' && item.status !== 'converting') {
     return res.status(400).json({ error: 'Download not complete' });
   }
 
@@ -918,7 +1050,7 @@ app.get('/api/library/:id/stream/remux', async (req, res) => {
 app.get('/api/library/:id/probe', async (req, res) => {
   const item = library.getItem(req.params.id);
   if (!item) return res.status(404).json({ error: 'Item not found' });
-  if (item.status !== 'complete') {
+  if (item.status !== 'complete' && item.status !== 'converting') {
     return res.status(400).json({ error: 'Download not complete' });
   }
 

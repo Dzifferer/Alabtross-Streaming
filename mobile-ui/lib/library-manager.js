@@ -594,6 +594,165 @@ class LibraryManager {
   }
 
   /**
+   * Repair metadata for pack items that were saved with incorrect season numbers.
+   * Re-parses season/episode from each item's fileName, fixes the season field,
+   * re-keys items with corrected IDs, and discovers missing episodes on disk
+   * that were downloaded but never tracked due to ID collisions.
+   */
+  repairPackMetadata() {
+    const fixes = { retagged: 0, discovered: 0, errors: [] };
+    const PACK_MIN_FILE_SIZE = 10 * 1024 * 1024;
+    const dominated = /\b(sample|trailer|extra|bonus|featurette|interview)\b/i;
+
+    // ── Phase 1: Fix season numbers on existing pack items ──
+    const packItems = [...this._items.values()].filter(i => i.packId);
+    for (const item of packItems) {
+      if (!item.fileName) continue;
+      const parsed = this._parseSeasonEpisode(item.fileName, item.season || 1);
+      const newSeason = parsed.season || item.season;
+      const newEpisode = parsed.episode;
+
+      if (newSeason === item.season && newEpisode === item.episode) continue;
+
+      // Build the corrected ID
+      const newId = newEpisode
+        ? `${item.imdbId}_s${newSeason}e${newEpisode}_${item.infoHash.slice(0, 8)}`
+        : item.id; // keep existing ID if we can't determine episode
+
+      // Re-key if the ID changed
+      if (newId !== item.id) {
+        if (this._items.has(newId)) {
+          // Target ID already exists — skip to avoid overwriting
+          fixes.errors.push(`Skipped "${item.fileName}": target ID ${newId} already exists`);
+          continue;
+        }
+        this._items.delete(item.id);
+        item.id = newId;
+        this._items.set(newId, item);
+      }
+
+      item.season = newSeason;
+      item.episode = newEpisode;
+      fixes.retagged++;
+    }
+
+    // ── Phase 2: Discover missing episodes on disk ──
+    // Group existing items by packId to find their pack directories
+    const packGroups = new Map();
+    for (const item of this._items.values()) {
+      if (!item.packId || !item.filePath) continue;
+      if (!packGroups.has(item.packId)) packGroups.set(item.packId, []);
+      packGroups.get(item.packId).push(item);
+    }
+
+    const trackedFileNames = new Set(
+      [...this._items.values()].filter(i => i.fileName).map(i => i.fileName)
+    );
+
+    for (const [packId, items] of packGroups) {
+      const first = items[0];
+      // Derive pack directory from first item's filePath
+      const packDirName = first.filePath.split(path.sep)[0];
+      const packDir = path.join(this._libraryPath, packDirName);
+
+      if (!fs.existsSync(packDir)) continue;
+
+      // Recursively find all video files in the pack directory
+      const diskFiles = this._findVideoFilesRecursive(packDir);
+
+      for (const fullPath of diskFiles) {
+        const fileName = path.basename(fullPath);
+        if (trackedFileNames.has(fileName)) continue;
+        if (dominated.test(fileName)) continue;
+
+        let fileSize;
+        try {
+          const stat = fs.statSync(fullPath);
+          fileSize = stat.size;
+        } catch { continue; }
+
+        if (fileSize < PACK_MIN_FILE_SIZE) continue;
+
+        const parsed = this._parseSeasonEpisode(fileName, first.season || 1);
+        const seasonNum = parsed.season || first.season || 1;
+        const episodeNum = parsed.episode;
+
+        const itemId = episodeNum
+          ? `${first.imdbId}_s${seasonNum}e${episodeNum}_${first.infoHash.slice(0, 8)}`
+          : `${first.imdbId}_pack_${first.infoHash.slice(0, 8)}_${path.basename(fileName, path.extname(fileName)).replace(/[^\w]/g, '_').slice(0, 30)}`;
+
+        if (this._items.has(itemId)) continue;
+
+        const relativePath = path.relative(this._libraryPath, fullPath);
+        const episodeName = this._deriveEpisodeName(fileName);
+
+        const newItem = {
+          id: itemId,
+          imdbId: first.imdbId,
+          type: 'series',
+          name: episodeName,
+          showName: first.showName || first.name,
+          poster: first.poster || '',
+          year: first.year || '',
+          quality: first.quality || '',
+          size: (fileSize / (1024 * 1024 * 1024)).toFixed(1) + ' GB',
+          season: seasonNum,
+          episode: episodeNum,
+          infoHash: first.infoHash,
+          magnetUri: first.magnetUri,
+          packId,
+          status: fileSize >= (fileSize - 1024) ? 'complete' : 'downloading',
+          progress: 100,
+          downloadSpeed: 0,
+          numPeers: 0,
+          filePath: relativePath,
+          fileName,
+          fileSize,
+          addedAt: Date.now(),
+          completedAt: Date.now(),
+          error: null,
+        };
+
+        this._items.set(itemId, newItem);
+        trackedFileNames.add(fileName);
+        fixes.discovered++;
+
+        // Check if conversion is needed
+        this._checkAndConvert(itemId);
+      }
+    }
+
+    if (fixes.retagged > 0 || fixes.discovered > 0) {
+      this._saveMetadata();
+    }
+
+    console.log(`[Library] Metadata repair: ${fixes.retagged} items retagged, ${fixes.discovered} missing episodes discovered`);
+    return fixes;
+  }
+
+  /**
+   * Recursively find all video files in a directory.
+   */
+  _findVideoFilesRecursive(dir) {
+    const results = [];
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          results.push(...this._findVideoFilesRecursive(full));
+        } else if (entry.isFile()) {
+          const ext = path.extname(entry.name).toLowerCase();
+          if (VIDEO_EXTENSIONS.has(ext)) {
+            results.push(full);
+          }
+        }
+      }
+    } catch { /* skip unreadable dirs */ }
+    return results;
+  }
+
+  /**
    * Pause an active download. Stops the torrent engine but keeps the item
    * in 'paused' status so it can be resumed later.
    */

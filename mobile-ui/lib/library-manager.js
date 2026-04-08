@@ -464,9 +464,8 @@ class LibraryManager {
     const engine = this._engines.get(packId);
     if (engine) {
       try { engine.destroy(); } catch { /* ignore */ }
-      this._engines.delete(engine);
+      this._engines.delete(packId);
     }
-    this._engines.delete(packId);
 
     if (this._engines.size === 0 && this._convertProcesses.size === 0) {
       this._stopPeriodicSave();
@@ -867,22 +866,25 @@ class LibraryManager {
   pauseItem(id) {
     const item = this._items.get(id);
     if (!item) return false;
-    if (item.status !== 'downloading') return false;
+    if (item.status !== 'downloading' && item.status !== 'queued') return false;
 
+    const wasDownloading = item.status === 'downloading';
     item.status = 'paused';
     item.downloadSpeed = 0;
     item.numPeers = 0;
 
-    if (item.packId) {
-      // For pack items, only stop the shared engine if no other items are still downloading
-      const remainingActive = [...this._items.values()].filter(
-        i => i.packId === item.packId && i.id !== id && i.status === 'downloading'
-      );
-      if (remainingActive.length === 0) {
-        this._stopPackEngine(item.packId);
+    if (wasDownloading) {
+      if (item.packId) {
+        // For pack items, only stop the shared engine if no other items are still downloading
+        const remainingActive = [...this._items.values()].filter(
+          i => i.packId === item.packId && i.id !== id && i.status === 'downloading'
+        );
+        if (remainingActive.length === 0) {
+          this._stopPackEngine(item.packId);
+        }
+      } else {
+        this._stopDownload(id);
       }
-    } else {
-      this._stopDownload(id);
     }
 
     this._saveMetadata();
@@ -899,8 +901,16 @@ class LibraryManager {
     if (!item) return false;
     if (item.status !== 'paused') return false;
 
-    const activeDownloads = [...this._items.values()].filter(i => i.status === 'downloading').length;
-    if (activeDownloads >= this._maxConcurrentDownloads) {
+    // For pack items, don't count sibling pack items individually — they share one engine.
+    // Count each active pack as 1 slot, plus individual (non-pack) downloads.
+    const activeItems = [...this._items.values()].filter(i => i.status === 'downloading');
+    const activePacks = new Set(activeItems.filter(i => i.packId).map(i => i.packId));
+    const activeSingles = activeItems.filter(i => !i.packId).length;
+    const effectiveActive = activePacks.size + activeSingles;
+
+    // If this item's pack already has an active engine, it doesn't consume an extra slot
+    const packAlreadyActive = item.packId && activePacks.has(item.packId);
+    if (!packAlreadyActive && effectiveActive >= this._maxConcurrentDownloads) {
       item.status = 'queued';
       this._saveMetadata();
       console.log(`[Library] Resume queued (at capacity): "${item.name}"`);
@@ -936,8 +946,14 @@ class LibraryManager {
     if (!item) return false;
     if (item.status !== 'failed') return false;
 
-    const activeDownloads = [...this._items.values()].filter(i => i.status === 'downloading').length;
-    if (activeDownloads >= this._maxConcurrentDownloads) {
+    // Same pack-aware concurrent limit as resumeItem
+    const activeItems = [...this._items.values()].filter(i => i.status === 'downloading');
+    const activePacks = new Set(activeItems.filter(i => i.packId).map(i => i.packId));
+    const activeSingles = activeItems.filter(i => !i.packId).length;
+    const effectiveActive = activePacks.size + activeSingles;
+    const packAlreadyActive = item.packId && activePacks.has(item.packId);
+
+    if (!packAlreadyActive && effectiveActive >= this._maxConcurrentDownloads) {
       item.status = 'queued';
       item.error = null;
       this._saveMetadata();

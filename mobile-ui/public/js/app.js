@@ -3682,12 +3682,16 @@
       // Determine aggregate status
       const hasDownloading = packItems.some(i => i.status === 'downloading');
       const hasPaused = packItems.some(i => i.status === 'paused');
-      let aggStatus = 'downloading';
+      const hasConverting = packItems.some(i => i.status === 'converting');
+      const hasQueued = packItems.some(i => i.status === 'queued');
+      let aggStatus = 'queued';
       if (completedCount === packItems.length) aggStatus = 'complete';
       else if (failedCount === packItems.length) aggStatus = 'failed';
       else if (hasDownloading) aggStatus = 'downloading';
+      else if (hasConverting) aggStatus = 'downloading';
       else if (hasPaused) aggStatus = 'paused';
-      else if (packItems.every(i => i.status === 'queued')) aggStatus = 'queued';
+      else if (hasQueued) aggStatus = 'queued';
+      else if (completedCount > 0) aggStatus = 'complete';
 
       // Determine season label: single season or multi-season
       const uniqueSeasons = [...new Set(packItems.map(i => i.season).filter(Boolean))].sort((a, b) => a - b);
@@ -4027,7 +4031,7 @@
           try {
             const resp = await fetch('/api/library');
             const data = await resp.json();
-            const packItems = (data.items || []).filter(i => i.packId === packId && i.status === 'downloading');
+            const packItems = (data.items || []).filter(i => i.packId === packId && (i.status === 'downloading' || i.status === 'queued'));
             await Promise.all(packItems.map(i =>
               fetch(`/api/library/${encodeURIComponent(i.id)}/pause`, { method: 'POST' })
             ));
@@ -4083,19 +4087,27 @@
         }
 
         if (action === 'pause') {
-          await fetch(`/api/library/${encodeURIComponent(id)}/pause`, { method: 'POST' });
+          try {
+            await fetch(`/api/library/${encodeURIComponent(id)}/pause`, { method: 'POST' });
+          } catch { showToast('Failed to pause'); }
           renderDownloads();
         } else if (action === 'resume') {
-          await fetch(`/api/library/${encodeURIComponent(id)}/resume`, { method: 'POST' });
+          try {
+            await fetch(`/api/library/${encodeURIComponent(id)}/resume`, { method: 'POST' });
+          } catch { showToast('Failed to resume'); }
           renderDownloads();
         } else if (action === 'retry') {
-          await fetch(`/api/library/${encodeURIComponent(id)}/retry`, { method: 'POST' });
+          try {
+            await fetch(`/api/library/${encodeURIComponent(id)}/retry`, { method: 'POST' });
+            showToast('Retrying download...');
+          } catch { showToast('Failed to retry'); }
           renderDownloads();
-          showToast('Retrying download...');
         } else if (action === 'remove') {
-          await fetch(`/api/library/${encodeURIComponent(id)}`, { method: 'DELETE' });
+          try {
+            await fetch(`/api/library/${encodeURIComponent(id)}`, { method: 'DELETE' });
+            showToast('Download removed');
+          } catch { showToast('Failed to remove'); }
           renderDownloads();
-          showToast('Download removed');
         } else if (action === 'move-up' || action === 'move-down') {
           const row = btn.closest('.download-item');
           const currentIdx = parseInt(row?.dataset?.queueIdx || '0', 10);

@@ -2939,6 +2939,115 @@
     dom.libraryContent.classList.remove('hidden');
   }
 
+  function showManualImportModal() {
+    const existing = document.getElementById('manual-import-modal');
+    if (existing) existing.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'manual-import-modal';
+    modal.className = 'categorize-modal';
+
+    modal.innerHTML = `
+      <div class="categorize-modal-backdrop"></div>
+      <div class="categorize-modal-content" style="max-width:420px">
+        <div class="categorize-modal-header">
+          <span>Import Torrent</span>
+          <button class="categorize-modal-close" aria-label="Close">&times;</button>
+        </div>
+        <div class="manual-import-form">
+          <label class="manual-import-label">Magnet URI or Info Hash <span style="color:var(--danger)">*</span></label>
+          <textarea id="manual-import-magnet" class="manual-import-input" rows="3" placeholder="magnet:?xt=urn:btih:... or 40-char hex hash" spellcheck="false"></textarea>
+          <label class="manual-import-label">Name <span style="color:var(--text-muted);font-weight:400">(optional)</span></label>
+          <input id="manual-import-name" class="manual-import-input" type="text" placeholder="e.g. Movie Name (2024)" maxlength="200">
+          <label class="manual-import-label">Type</label>
+          <select id="manual-import-type" class="manual-import-input">
+            <option value="movie">Movie</option>
+            <option value="series">TV Series</option>
+          </select>
+          <label class="manual-import-label">Quality <span style="color:var(--text-muted);font-weight:400">(optional)</span></label>
+          <input id="manual-import-quality" class="manual-import-input" type="text" placeholder="e.g. 1080p, 4K, 720p" maxlength="50">
+          <button id="manual-import-submit" class="manual-import-submit-btn">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Add to Library
+          </button>
+          <p id="manual-import-error" class="manual-import-error" style="display:none"></p>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(modal);
+
+    const close = () => modal.remove();
+    modal.querySelector('.categorize-modal-backdrop').addEventListener('click', close);
+    modal.querySelector('.categorize-modal-close').addEventListener('click', close);
+
+    const magnetInput = modal.querySelector('#manual-import-magnet');
+    const nameInput = modal.querySelector('#manual-import-name');
+    const typeSelect = modal.querySelector('#manual-import-type');
+    const qualityInput = modal.querySelector('#manual-import-quality');
+    const submitBtn = modal.querySelector('#manual-import-submit');
+    const errorEl = modal.querySelector('#manual-import-error');
+
+    magnetInput.focus();
+
+    submitBtn.addEventListener('click', async () => {
+      const raw = magnetInput.value.trim();
+      if (!raw) {
+        errorEl.textContent = 'Please enter a magnet URI or info hash';
+        errorEl.style.display = 'block';
+        return;
+      }
+
+      errorEl.style.display = 'none';
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Adding...';
+
+      // Determine if input is magnet URI or bare info hash
+      const body = { name: nameInput.value.trim() || undefined, type: typeSelect.value, quality: qualityInput.value.trim() || undefined };
+      if (raw.startsWith('magnet:')) {
+        body.magnetUri = raw;
+      } else if (/^[0-9a-f]{40}$/i.test(raw)) {
+        body.infoHash = raw;
+      } else {
+        errorEl.textContent = 'Enter a valid magnet URI or 40-character hex info hash';
+        errorEl.style.display = 'block';
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Add to Library';
+        return;
+      }
+
+      try {
+        const resp = await fetch('/api/library/add-manual', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed to add torrent');
+
+        if (data.status === 'already_exists') {
+          showToast('Already in your library');
+        } else if (data.status === 'already_downloading') {
+          showToast('Already downloading');
+        } else if (data.status === 'already_queued') {
+          showToast('Already queued');
+        } else if (data.status === 'queued') {
+          showToast('Download queued — will start when a slot opens');
+        } else {
+          showToast('Torrent added — downloading...');
+        }
+
+        close();
+        loadLibrary();
+      } catch (err) {
+        errorEl.textContent = err.message;
+        errorEl.style.display = 'block';
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Add to Library';
+      }
+    });
+  }
+
   function showCategorizeModal(imdbId, movieName) {
     // Remove any existing modal
     const existing = document.getElementById('categorize-modal');
@@ -4711,6 +4820,12 @@
 
     // Back button
     dom.backBtn.addEventListener('click', goBack);
+
+    // Manual torrent import button
+    const manualImportBtn = document.getElementById('manual-import-btn');
+    if (manualImportBtn) {
+      manualImportBtn.addEventListener('click', showManualImportModal);
+    }
 
     // Player back button — navigate back (goBack handles video cleanup after hiding view)
     dom.playerBackBtn.addEventListener('click', () => {

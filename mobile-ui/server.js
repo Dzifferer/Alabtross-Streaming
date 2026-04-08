@@ -1107,6 +1107,65 @@ app.post('/api/library/add-pack', rateLimit, async (req, res) => {
   }
 });
 
+// POST /api/library/add-manual — add a torrent by magnet URI or info hash
+app.post('/api/library/add-manual', rateLimit, (req, res) => {
+  const { TRACKERS } = require('./lib/file-safety');
+  let { magnetUri, infoHash, name, type, quality } = req.body;
+
+  // Accept either a magnet URI or a bare info hash
+  if (!magnetUri && !infoHash) {
+    return res.status(400).json({ error: 'Provide a magnet URI or info hash' });
+  }
+
+  // Extract info hash from magnet URI
+  if (magnetUri && !infoHash) {
+    const match = magnetUri.match(/xt=urn:btih:([a-f0-9]{40})/i);
+    if (match) {
+      infoHash = match[1].toLowerCase();
+    } else {
+      return res.status(400).json({ error: 'Could not extract info hash from magnet URI' });
+    }
+  }
+
+  if (!/^[0-9a-f]{40}$/i.test(infoHash)) {
+    return res.status(400).json({ error: 'Invalid info hash — must be 40 hex characters' });
+  }
+  infoHash = infoHash.toLowerCase();
+
+  // Build a magnet URI from info hash if only hash was provided
+  if (!magnetUri) {
+    const trackerParams = TRACKERS.map(t => `&tr=${encodeURIComponent(t)}`).join('');
+    magnetUri = `magnet:?xt=urn:btih:${infoHash}${trackerParams}`;
+  }
+
+  if (!magnetUri.startsWith('magnet:?')) {
+    return res.status(400).json({ error: 'Invalid magnet URI' });
+  }
+
+  // Extract display name from magnet URI dn= param if no name provided
+  if (!name) {
+    const dnMatch = magnetUri.match(/[?&]dn=([^&]+)/);
+    name = dnMatch ? decodeURIComponent(dnMatch[1]).replace(/\+/g, ' ') : `Torrent ${infoHash.slice(0, 8)}`;
+  }
+
+  try {
+    const result = library.addItem({
+      imdbId: null,
+      type: type || 'movie',
+      name,
+      poster: '',
+      year: '',
+      magnetUri,
+      infoHash,
+      quality: quality || '',
+      size: '',
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 // POST /api/library/restart-pack — restart a pack download (re-scan torrent for all episodes)
 app.post('/api/library/restart-pack', rateLimit, async (req, res) => {
   const { packId } = req.body;

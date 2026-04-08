@@ -18,7 +18,6 @@ const fs = require('fs');
 const { VIDEO_EXTENSIONS, TRACKERS, isFileNameSafe, getMimeType } = require('./file-safety');
 
 const DEFAULT_MAX_CONCURRENT_DOWNLOADS = 5;
-const MAX_FILE_SIZE = 20 * 1024 * 1024 * 1024; // 20 GB
 const METADATA_SAVE_INTERVAL = 30 * 1000; // Save metadata every 30s during active downloads
 
 class LibraryManager {
@@ -32,6 +31,8 @@ class LibraryManager {
     this._convertProcesses = new Map(); // id -> FFmpeg child process (active conversions)
     this._maxConcurrentConversions = 1;
     this._metadataSaveTimer = null;
+    this._discoveryCache = null;      // cached result of _discoverUntrackedFiles
+    this._discoveryCacheTs = 0;       // timestamp of last discovery scan
 
     // Ensure library directory exists
     if (!fs.existsSync(this._libraryPath)) {
@@ -42,12 +43,22 @@ class LibraryManager {
     this._loadMetadata();
     console.log(`[Library] Initialized at ${this._libraryPath}, ${this._items.size} items loaded`);
 
-    // Auto-repair season metadata for packs saved with incorrect season tags
-    this.repairPackMetadata();
-
     // Auto-resume any downloads/conversions that were interrupted (power loss, crash, restart)
     this._resumeInterruptedDownloads();
     this._resumeInterruptedConversions();
+
+    // Auto-repair season metadata for packs (deferred to avoid blocking startup)
+    setImmediate(() => this.repairPackMetadata());
+  }
+
+  /**
+   * Verify that a resolved path is contained within the library directory.
+   * Prevents path traversal attacks via crafted IDs (e.g. disk_../../etc/passwd).
+   */
+  _isPathSafe(fullPath) {
+    const resolved = path.resolve(fullPath);
+    const libraryRoot = path.resolve(this._libraryPath);
+    return resolved === libraryRoot || resolved.startsWith(libraryRoot + path.sep);
   }
 
   // ─── Public API ──────────────────────────────────
@@ -63,9 +74,10 @@ class LibraryManager {
     }
 
     // Generate a unique ID
+    const idPrefix = imdbId || 'manual';
     const id = season != null && episode != null
-      ? `${imdbId}_s${season}e${episode}_${infoHash.slice(0, 8)}`
-      : `${imdbId}_${infoHash.slice(0, 8)}`;
+      ? `${idPrefix}_s${season}e${episode}_${infoHash.slice(0, 8)}`
+      : `${idPrefix}_${infoHash.slice(0, 8)}`;
 
     // Check if already in library
     if (this._items.has(id)) {
@@ -266,76 +278,7 @@ class LibraryManager {
         this._engines.set(packId, engine);
         this._startPeriodicSave();
 
-        // Track the last observed file size per item so we can confirm writes have settled
-        const lastSizeMap = new Map();
-
-        // Track progress for each file individually
-        const progressTimer = setInterval(() => {
-          if (!this._engines.has(packId)) {
-            clearInterval(progressTimer);
-            return;
-          }
-
-          const sw = engine.swarm;
-          const speed = sw ? sw.downloadSpeed() : 0;
-          const peers = sw ? sw.wires.length : 0;
-          let allComplete = true;
-
-          for (const [itemId, item] of this._items) {
-            if (item.packId !== packId || item.status !== 'downloading') continue;
-
-            item.downloadSpeed = speed;
-            item.numPeers = peers;
-
-            // Calculate progress from file size on disk
-            const fullPath = path.join(this._libraryPath, item.filePath);
-            let currentSize = 0;
-            try {
-              if (fs.existsSync(fullPath)) {
-                const stat = fs.statSync(fullPath);
-                currentSize = stat.size;
-                item.progress = Math.min(100, Math.round((currentSize / item.fileSize) * 100));
-              }
-            } catch { /* file might not exist yet */ }
-
-            if (item.progress >= 100) {
-              // Require file size to match expected size (allow at most 1KB rounding difference)
-              // AND size must be stable since the last poll to ensure the write has finished
-              const prevSize = lastSizeMap.get(itemId) || 0;
-              lastSizeMap.set(itemId, currentSize);
-
-              if (currentSize < item.fileSize - 1024) {
-                item.progress = Math.round((currentSize / item.fileSize) * 100);
-                allComplete = false;
-                continue;
-              }
-
-              if (currentSize !== prevSize) {
-                // File is still being written — wait for next poll
-                allComplete = false;
-                continue;
-              }
-
-              item.status = 'complete';
-              item.completedAt = Date.now();
-              item.downloadSpeed = 0;
-              console.log(`[Library] Pack episode complete: "${item.fileName}"`);
-              this._checkAndConvert(itemId);
-            } else {
-              lastSizeMap.set(itemId, currentSize);
-              allComplete = false;
-            }
-          }
-
-          // If all pack items are complete, destroy the shared engine
-          if (allComplete) {
-            clearInterval(progressTimer);
-            this._stopPackEngine(packId);
-            this._saveMetadata();
-          }
-        }, 2000);
-
-        this._progressTimers.set(packId, progressTimer);
+        this._trackPackProgress(packId, engine);
         this._saveMetadata();
 
         console.log(`[Library] Season pack started: "${name}" ${isCompletePack ? '(complete pack)' : `S${String(fallbackSeason).padStart(2, '0')}`} — ${videoFiles.length} episodes`);
@@ -380,7 +323,8 @@ class LibraryManager {
     const eMatch = base.match(/\bE(\d+)\b/i);
     if (eMatch) return { season: dirSeason, episode: parseInt(eMatch[1], 10) };
     // Try "- 05 -" or "- 05." or "- 05 " at end before extension (anime fansub convention)
-    const dashMatch = base.match(/[-–]\s*(\d{1,4})\s*(?:[-–.\s]|$)/);
+    // Negative lookahead prevents matching year-like numbers (1900-2099)
+    const dashMatch = base.match(/[-–]\s*(?!(?:19|20)\d{2}\b)(\d{1,4})\s*(?:[-–.\s]|$)/);
     if (dashMatch) return { season: dirSeason, episode: parseInt(dashMatch[1], 10) };
     // Try "Episode 5" pattern
     const epMatch = base.match(/Episode\s*(\d+)/i);
@@ -441,7 +385,8 @@ class LibraryManager {
     if (match) return match[1].replace(/[-–\s]+$/, '').trim() || null;
 
     // Try "- 001" anime convention (e.g., "Naruto Shippuden - 001")
-    match = base.match(/^(.+?)\s*[-–]\s*\d{2,4}\b/);
+    // Negative lookahead prevents matching year-like numbers (1900-2099)
+    match = base.match(/^(.+?)\s*[-–]\s*(?!(?:19|20)\d{2}\b)\d{2,4}\b/);
     if (match) return match[1].replace(/[-–\s]+$/, '').trim() || null;
 
     // Try E05 pattern (without season)
@@ -455,6 +400,77 @@ class LibraryManager {
     return null;
   }
 
+  /**
+   * Shared progress tracking for pack downloads (used by both addSeasonPack and _resumePackDownload).
+   * Polls file sizes every 2s to track progress, marks items complete when stable, and tears down
+   * the engine when all items finish.
+   */
+  _trackPackProgress(packId, engine) {
+    const lastSizeMap = new Map();
+    const progressTimer = setInterval(() => {
+      if (!this._engines.has(packId)) {
+        clearInterval(progressTimer);
+        return;
+      }
+
+      const sw = engine.swarm;
+      const speed = sw ? sw.downloadSpeed() : 0;
+      const peers = sw ? sw.wires.length : 0;
+      let allComplete = true;
+
+      for (const [itemId, item] of this._items) {
+        if (item.packId !== packId || item.status !== 'downloading') continue;
+
+        item.downloadSpeed = speed;
+        item.numPeers = peers;
+
+        const fullPath = path.join(this._libraryPath, item.filePath);
+        let currentSize = 0;
+        try {
+          if (fs.existsSync(fullPath)) {
+            const stat = fs.statSync(fullPath);
+            currentSize = stat.size;
+            item.progress = item.fileSize > 0 ? Math.min(100, Math.round((currentSize / item.fileSize) * 100)) : 0;
+          }
+        } catch { /* file might not exist yet */ }
+
+        if (item.progress >= 100) {
+          const prevSize = lastSizeMap.get(itemId) || 0;
+          lastSizeMap.set(itemId, currentSize);
+
+          if (currentSize < item.fileSize - 1024) {
+            item.progress = item.fileSize > 0 ? Math.round((currentSize / item.fileSize) * 100) : 0;
+            allComplete = false;
+            continue;
+          }
+
+          if (currentSize !== prevSize) {
+            allComplete = false;
+            continue;
+          }
+
+          item.status = 'complete';
+          item.completedAt = Date.now();
+          item.downloadSpeed = 0;
+          console.log(`[Library] Pack episode complete: "${item.fileName}"`);
+          this._checkAndConvert(itemId);
+        } else {
+          lastSizeMap.set(itemId, currentSize);
+          allComplete = false;
+        }
+      }
+
+      if (allComplete) {
+        clearInterval(progressTimer);
+        this._stopPackEngine(packId);
+        this._saveMetadata();
+        this._processQueue();
+      }
+    }, 2000);
+
+    this._progressTimers.set(packId, progressTimer);
+  }
+
   _stopPackEngine(packId) {
     const timer = this._progressTimers.get(packId);
     if (timer) {
@@ -464,9 +480,8 @@ class LibraryManager {
     const engine = this._engines.get(packId);
     if (engine) {
       try { engine.destroy(); } catch { /* ignore */ }
-      this._engines.delete(engine);
+      this._engines.delete(packId);
     }
-    this._engines.delete(packId);
 
     if (this._engines.size === 0 && this._convertProcesses.size === 0) {
       this._stopPeriodicSave();
@@ -550,70 +565,7 @@ class LibraryManager {
       this._engines.set(packId, engine);
       this._startPeriodicSave();
 
-      // Set up shared progress tracking (mirrors addSeasonPack)
-      const lastSizeMap = new Map();
-      const progressTimer = setInterval(() => {
-        if (!this._engines.has(packId)) {
-          clearInterval(progressTimer);
-          return;
-        }
-
-        const sw = engine.swarm;
-        const speed = sw ? sw.downloadSpeed() : 0;
-        const peers = sw ? sw.wires.length : 0;
-        let allComplete = true;
-
-        for (const [itemId, item] of this._items) {
-          if (item.packId !== packId || item.status !== 'downloading') continue;
-
-          item.downloadSpeed = speed;
-          item.numPeers = peers;
-
-          const fullPath = path.join(this._libraryPath, item.filePath);
-          let currentSize = 0;
-          try {
-            if (fs.existsSync(fullPath)) {
-              const stat = fs.statSync(fullPath);
-              currentSize = stat.size;
-              item.progress = Math.min(100, Math.round((currentSize / item.fileSize) * 100));
-            }
-          } catch { /* file might not exist yet */ }
-
-          if (item.progress >= 100) {
-            const prevSize = lastSizeMap.get(itemId) || 0;
-            lastSizeMap.set(itemId, currentSize);
-
-            if (currentSize < item.fileSize - 1024) {
-              item.progress = Math.round((currentSize / item.fileSize) * 100);
-              allComplete = false;
-              continue;
-            }
-
-            if (currentSize !== prevSize) {
-              allComplete = false;
-              continue;
-            }
-
-            item.status = 'complete';
-            item.completedAt = Date.now();
-            item.downloadSpeed = 0;
-            console.log(`[Library] Pack episode complete: "${item.fileName}"`);
-            this._checkAndConvert(itemId);
-          } else {
-            lastSizeMap.set(itemId, currentSize);
-            allComplete = false;
-          }
-        }
-
-        if (allComplete) {
-          clearInterval(progressTimer);
-          this._stopPackEngine(packId);
-          this._saveMetadata();
-          this._processQueue();
-        }
-      }, 2000);
-
-      this._progressTimers.set(packId, progressTimer);
+      this._trackPackProgress(packId, engine);
       this._saveMetadata();
     });
   }
@@ -623,8 +575,12 @@ class LibraryManager {
    */
   getAll() {
     const tracked = [...this._items.values()];
-    const discovered = this._discoverUntrackedFiles();
-    const all = [...tracked, ...discovered].sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+    const now = Date.now();
+    if (!this._discoveryCache || now - this._discoveryCacheTs > 10000) {
+      this._discoveryCache = this._discoverUntrackedFiles();
+      this._discoveryCacheTs = now;
+    }
+    const all = [...tracked, ...this._discoveryCache].sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
     return all.map(i => this._sanitizeItem(i));
   }
 
@@ -639,6 +595,7 @@ class LibraryManager {
     if (id.startsWith('disk_')) {
       const relPath = id.slice(5);
       const fullPath = path.join(this._libraryPath, relPath);
+      if (!this._isPathSafe(fullPath)) return null;
       try {
         if (!fs.existsSync(fullPath)) return null;
         const stat = fs.statSync(fullPath);
@@ -769,7 +726,7 @@ class LibraryManager {
           infoHash: first.infoHash,
           magnetUri: first.magnetUri,
           packId,
-          status: fileSize >= (fileSize - 1024) ? 'complete' : 'downloading',
+          status: 'complete',
           progress: 100,
           downloadSpeed: 0,
           numPeers: 0,
@@ -836,17 +793,20 @@ class LibraryManager {
     // seasons from filenames/directories rather than assuming a single season
     const season = 0;
 
-    // Stop engine and remove all pack items from metadata (keep files on disk)
+    // Stop engine but only remove non-complete items (preserve already downloaded episodes)
     this._stopPackEngine(packId);
+    const completedCount = packItems.filter(i => i.status === 'complete' || i.status === 'converting').length;
     for (const item of packItems) {
+      if (item.status === 'complete' || item.status === 'converting') continue;
       this._stopDownload(item.id);
       this._items.delete(item.id);
     }
     this._saveMetadata();
 
-    console.log(`[Library] Restarting pack "${showName || first.name}" (${packItems.length} items cleared)`);
+    console.log(`[Library] Restarting pack "${showName || first.name}" (${packItems.length - completedCount} items to retry, ${completedCount} already complete)`);
 
-    // Re-add with corrected season parsing
+    // Re-add with corrected season parsing — addSeasonPack will skip items
+    // that still exist in this._items (the completed ones we preserved)
     return this.addSeasonPack({
       imdbId,
       name: showName || first.name,
@@ -867,22 +827,25 @@ class LibraryManager {
   pauseItem(id) {
     const item = this._items.get(id);
     if (!item) return false;
-    if (item.status !== 'downloading') return false;
+    if (item.status !== 'downloading' && item.status !== 'queued') return false;
 
+    const wasDownloading = item.status === 'downloading';
     item.status = 'paused';
     item.downloadSpeed = 0;
     item.numPeers = 0;
 
-    if (item.packId) {
-      // For pack items, only stop the shared engine if no other items are still downloading
-      const remainingActive = [...this._items.values()].filter(
-        i => i.packId === item.packId && i.id !== id && i.status === 'downloading'
-      );
-      if (remainingActive.length === 0) {
-        this._stopPackEngine(item.packId);
+    if (wasDownloading) {
+      if (item.packId) {
+        // For pack items, only stop the shared engine if no other items are still downloading
+        const remainingActive = [...this._items.values()].filter(
+          i => i.packId === item.packId && i.id !== id && i.status === 'downloading'
+        );
+        if (remainingActive.length === 0) {
+          this._stopPackEngine(item.packId);
+        }
+      } else {
+        this._stopDownload(id);
       }
-    } else {
-      this._stopDownload(id);
     }
 
     this._saveMetadata();
@@ -899,8 +862,16 @@ class LibraryManager {
     if (!item) return false;
     if (item.status !== 'paused') return false;
 
-    const activeDownloads = [...this._items.values()].filter(i => i.status === 'downloading').length;
-    if (activeDownloads >= this._maxConcurrentDownloads) {
+    // For pack items, don't count sibling pack items individually — they share one engine.
+    // Count each active pack as 1 slot, plus individual (non-pack) downloads.
+    const activeItems = [...this._items.values()].filter(i => i.status === 'downloading');
+    const activePacks = new Set(activeItems.filter(i => i.packId).map(i => i.packId));
+    const activeSingles = activeItems.filter(i => !i.packId).length;
+    const effectiveActive = activePacks.size + activeSingles;
+
+    // If this item's pack already has an active engine, it doesn't consume an extra slot
+    const packAlreadyActive = item.packId && activePacks.has(item.packId);
+    if (!packAlreadyActive && effectiveActive >= this._maxConcurrentDownloads) {
       item.status = 'queued';
       this._saveMetadata();
       console.log(`[Library] Resume queued (at capacity): "${item.name}"`);
@@ -936,8 +907,14 @@ class LibraryManager {
     if (!item) return false;
     if (item.status !== 'failed') return false;
 
-    const activeDownloads = [...this._items.values()].filter(i => i.status === 'downloading').length;
-    if (activeDownloads >= this._maxConcurrentDownloads) {
+    // Same pack-aware concurrent limit as resumeItem
+    const activeItems = [...this._items.values()].filter(i => i.status === 'downloading');
+    const activePacks = new Set(activeItems.filter(i => i.packId).map(i => i.packId));
+    const activeSingles = activeItems.filter(i => !i.packId).length;
+    const effectiveActive = activePacks.size + activeSingles;
+    const packAlreadyActive = item.packId && activePacks.has(item.packId);
+
+    if (!packAlreadyActive && effectiveActive >= this._maxConcurrentDownloads) {
       item.status = 'queued';
       item.error = null;
       this._saveMetadata();
@@ -947,7 +924,8 @@ class LibraryManager {
 
     item.status = 'downloading';
     item.error = null;
-    item.progress = 0;
+    // Don't reset progress — torrent engine uses verify:true to skip existing data,
+    // and progress will be recalculated from disk size on the next poll cycle.
     item.downloadSpeed = 0;
     item.numPeers = 0;
 
@@ -1029,6 +1007,8 @@ class LibraryManager {
     if (id.startsWith('disk_') && !this._items.has(id)) {
       const relPath = id.slice(5);
       const fullPath = path.join(this._libraryPath, relPath);
+      if (!this._isPathSafe(fullPath)) return false;
+      this._discoveryCache = null;
       try {
         if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
         const dir = path.dirname(fullPath);
@@ -1091,6 +1071,7 @@ class LibraryManager {
     }
 
     this._items.delete(id);
+    this._discoveryCache = null; // invalidate discovery cache after deletion
     this._saveMetadata();
     this._processQueue();
     return true;
@@ -1106,6 +1087,7 @@ class LibraryManager {
     if (!item && id.startsWith('disk_')) {
       const relPath = id.slice(5); // strip 'disk_' prefix
       const fullPath = path.join(this._libraryPath, relPath);
+      if (!this._isPathSafe(fullPath)) return null;
       if (fs.existsSync(fullPath)) return fullPath;
       return null;
     }
@@ -1113,6 +1095,7 @@ class LibraryManager {
     if (!item || (item.status !== 'complete' && item.status !== 'converting') || !item.filePath) return null;
 
     const fullPath = path.join(this._libraryPath, item.filePath);
+    if (!this._isPathSafe(fullPath)) return null;
     if (!fs.existsSync(fullPath)) {
       // File was deleted externally
       item.status = 'failed';
@@ -1137,7 +1120,7 @@ class LibraryManager {
       clearInterval(this._metadataSaveTimer);
       this._metadataSaveTimer = null;
     }
-    for (const [id] of this._engines) {
+    for (const id of [...this._engines.keys()]) {
       this._stopDownload(id);
     }
     // Kill active conversions — they keep status='converting' for auto-resume on restart
@@ -1415,22 +1398,13 @@ class LibraryManager {
     const backupFile = this._metadataFile + '.bak';
     const filesToTry = [this._metadataFile, backupFile];
 
-    console.log(`[Debug] _loadMetadata: looking for ${this._metadataFile}`);
-    console.log(`[Debug] _loadMetadata: file exists: ${fs.existsSync(this._metadataFile)}, backup exists: ${fs.existsSync(backupFile)}`);
-
     for (const file of filesToTry) {
       try {
         if (!fs.existsSync(file)) continue;
         const raw = fs.readFileSync(file, 'utf8');
-        if (!raw.trim()) {
-          console.log(`[Debug] _loadMetadata: ${path.basename(file)} exists but is empty`);
-          continue;
-        }
+        if (!raw.trim()) continue;
         const data = JSON.parse(raw);
-        if (!Array.isArray(data)) {
-          console.log(`[Debug] _loadMetadata: ${path.basename(file)} parsed but is not an array`);
-          continue;
-        }
+        if (!Array.isArray(data)) continue;
 
         for (const item of data) {
           // Mark interrupted downloads for auto-resume instead of failing them
@@ -1447,7 +1421,6 @@ class LibraryManager {
           this._items.set(item.id, item);
         }
 
-        console.log(`[Debug] _loadMetadata: loaded ${this._items.size} items from ${path.basename(file)}`);
         if (file === backupFile) {
           console.warn(`[Library] Primary metadata was corrupted — recovered from backup (${data.length} items)`);
         }
@@ -1461,7 +1434,6 @@ class LibraryManager {
       }
     }
 
-    console.log(`[Debug] _loadMetadata: no metadata loaded — _items.size = ${this._items.size}`);
   }
 
   _resumeInterruptedDownloads() {
@@ -1586,7 +1558,7 @@ class LibraryManager {
   _saveMetadata() {
     try {
       const data = [...this._items.values()].map(item => {
-        const { _needsResume, _needsConversion, ...clean } = item;
+        const { _needsResume, _needsConversion, _pendingConversion, _probeDuration, ...clean } = item;
         return clean;
       });
       const json = JSON.stringify(data, null, 2);
@@ -1622,12 +1594,8 @@ class LibraryManager {
         .map(i => i.filePath)
     );
 
-    console.log(`[Debug] _discoverUntrackedFiles: scanning ${this._libraryPath}`);
-    console.log(`[Debug] _discoverUntrackedFiles: ${trackedPaths.size} tracked paths`);
-
     try {
       const entries = fs.readdirSync(this._libraryPath, { withFileTypes: true });
-      console.log(`[Debug] _discoverUntrackedFiles: found ${entries.length} entries: ${entries.map(e => `${e.name} (${e.isFile() ? 'file' : 'dir'})`).join(', ')}`);
 
       for (const entry of entries) {
         if (entry.name.startsWith('_metadata')) continue;
@@ -1637,10 +1605,7 @@ class LibraryManager {
 
         if (entry.isFile()) {
           const ext = path.extname(entry.name).toLowerCase();
-          if (!VIDEO_EXTENSIONS.has(ext)) {
-            console.log(`[Debug] _discoverUntrackedFiles: skipping "${entry.name}" — ext "${ext}" not in VIDEO_EXTENSIONS`);
-            continue;
-          }
+          if (!VIDEO_EXTENSIONS.has(ext)) continue;
           if (trackedPaths.has(entry.name)) continue;
 
           const stat = fs.statSync(entryPath);
@@ -1689,7 +1654,7 @@ class LibraryManager {
         }
       }
     } catch (err) {
-      console.error(`[Debug] _discoverUntrackedFiles: disk scan error: ${err.message} (code: ${err.code})`);
+      console.error(`[Library] Disk scan error: ${err.message}`);
     }
 
     if (discovered.length > 0) {

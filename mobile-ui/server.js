@@ -5,6 +5,7 @@ const http = require('http');
 const https = require('https');
 const { URL } = require('url');
 const dns = require('dns');
+const { spawn } = require('child_process');
 // http-proxy-middleware removed — Stremio server proxy no longer needed
 const { getMovieStreams, getSeriesStreams, getSeasonPackStreams, getCompleteStreams, diagnoseProviders } = require('./lib/stream-providers');
 const TorrentEngine = require('./lib/torrent-engine');
@@ -74,9 +75,6 @@ function getEngine() {
 
 // ─── Library Manager (initialized on startup) ─────────────────────────
 const library = new LibraryManager({ libraryPath: LIBRARY_PATH, maxConcurrentDownloads: MAX_CONCURRENT_STREAMS });
-console.log(`[Debug] LIBRARY_PATH resolved to: ${LIBRARY_PATH}`);
-console.log(`[Debug] LIBRARY_PATH exists: ${fs.existsSync(LIBRARY_PATH)}`);
-console.log(`[Debug] TORRENT_CACHE_PATH: ${TORRENT_CACHE_PATH}`);
 
 // Security headers
 app.use((req, res, next) => {
@@ -106,7 +104,7 @@ function tmdbFetch(endpoint, params = {}) {
   const url = `${TMDB_BASE}${endpoint}?${qs}`;
   return new Promise((resolve, reject) => {
     https.get(url, { timeout: 8000 }, (res) => {
-      if (res.statusCode !== 200) return reject(new Error(`TMDB HTTP ${res.statusCode}`));
+      if (res.statusCode !== 200) { res.resume(); return reject(new Error(`TMDB HTTP ${res.statusCode}`)); }
       let body = '';
       res.on('data', chunk => body += chunk);
       res.on('end', () => {
@@ -632,6 +630,13 @@ app.get('/api/collections/:collectionId', rateLimit, async (req, res) => {
       movies,
     };
 
+    // Evict stale entries to prevent unbounded cache growth
+    if (collectionDetailCache.size > 200) {
+      const now = Date.now();
+      for (const [key, val] of collectionDetailCache) {
+        if (now - val.ts > COLLECTION_DETAIL_TTL) collectionDetailCache.delete(key);
+      }
+    }
     collectionDetailCache.set(collectionId, { ts: Date.now(), data });
     res.json(data);
   } catch (err) {
@@ -719,32 +724,48 @@ async function resolveTmdbToImdb(tmdbId, type) {
 
 /**
  * Search TMDB for a TV show by name and return the best match's metadata.
+ * If the full name doesn't produce a good match, progressively drops trailing
+ * words and retries (e.g. "Naruto Shippuden Cuarta Guerra Mundial Shinobi"
+ * -> "Naruto Shippuden Cuarta Guerra Mundial" -> ... -> "Naruto Shippuden").
  * Returns { imdbId, poster, year, name } or null if not found.
  */
 async function lookupShowByName(showName) {
   if (!TMDB_API_KEY || !showName) return null;
-  try {
-    const data = await tmdbFetch('/search/tv', { query: showName, include_adult: 'false' });
-    const results = data.results || [];
-    if (results.length === 0) return null;
 
-    // Pick the best match by relevance score
-    results.sort((a, b) => relevanceScore(b.name || '', showName) - relevanceScore(a.name || '', showName));
-    const best = results[0];
+  // Strip trailing year in parentheses e.g. "Mad Men (2007)" -> "Mad Men"
+  const cleaned = showName.trim().replace(/\s*\(\d{4}\)\s*$/, '').replace(/\s+\d{4}\s*$/, '');
+  const words = cleaned.split(/\s+/);
+  // Try the full name first, then progressively shorter (minimum 2 words)
+  for (let len = words.length; len >= Math.min(2, words.length); len--) {
+    const query = words.slice(0, len).join(' ');
+    try {
+      const data = await tmdbFetch('/search/tv', { query, include_adult: 'false' });
+      const results = data.results || [];
+      if (results.length === 0) continue;
 
-    // Resolve IMDB ID
-    const ext = await tmdbFetch(`/tv/${best.id}/external_ids`);
-    const imdbId = ext.imdb_id || null;
-    const poster = best.poster_path
-      ? `https://image.tmdb.org/t/p/w342${best.poster_path}`
-      : null;
-    const year = (best.first_air_date || '').slice(0, 4);
+      // Pick the best match by relevance score against the query used
+      results.sort((a, b) => relevanceScore(b.name || '', query) - relevanceScore(a.name || '', query));
+      const best = results[0];
 
-    return { imdbId, poster, year, name: best.name || showName };
-  } catch (err) {
-    console.warn(`[TMDB] lookupShowByName("${showName}") failed:`, err.message);
-    return null;
+      // Require a minimum relevance to avoid false matches on short queries
+      const score = relevanceScore(best.name || '', query);
+      if (score < 0.3 && len < words.length) continue;
+
+      // Resolve IMDB ID
+      const ext = await tmdbFetch(`/tv/${best.id}/external_ids`);
+      const imdbId = ext.imdb_id || null;
+      const poster = best.poster_path
+        ? `https://image.tmdb.org/t/p/w342${best.poster_path}`
+        : null;
+      const year = (best.first_air_date || '').slice(0, 4);
+
+      console.log(`[TMDB] lookupShowByName("${showName}") matched "${best.name}" using query "${query}"`);
+      return { imdbId, poster, year, name: best.name || showName };
+    } catch (err) {
+      console.warn(`[TMDB] lookupShowByName query="${query}" failed:`, err.message);
+    }
   }
+  return null;
 }
 
 // GET /api/streams/movie/:imdbId
@@ -985,13 +1006,28 @@ app.get('/api/torrent-status/:infoHash', (req, res) => {
   res.json(status);
 });
 
+// GET /api/torrent-status/:infoHash/bottleneck — diagnose speed bottleneck
+// Compares torrent swarm download speed vs client egress rate to determine
+// whether the torrent or the server/network is the limiting factor.
+app.get('/api/torrent-status/:infoHash/bottleneck', (req, res) => {
+  const { infoHash } = req.params;
+  if (!/^[0-9a-f]{40}$/i.test(infoHash)) {
+    return res.status(400).json({ error: 'Invalid infoHash' });
+  }
+  const eng = getEngine();
+  const diag = eng.getBottleneckDiag(infoHash);
+  if (!diag) {
+    return res.status(404).json({ error: 'Torrent not active' });
+  }
+  res.json(diag);
+});
+
 // ─── Library API Routes ───────────────────────────────────────────────
 
 // GET /api/library — list all library items
 app.get('/api/library', (req, res) => {
   try {
     const items = library.getAll();
-    console.log(`[Debug] GET /api/library: returning ${items.length} items`);
     res.json({ items });
   } catch (err) {
     console.error('[Library] getAll() failed:', err.message);
@@ -1166,7 +1202,7 @@ app.post('/api/library/add-pack', rateLimit, async (req, res) => {
         } catch (err) {
           console.warn('[Library] Background metadata resolution failed:', err.message);
         }
-      })();
+      })().catch(err => console.warn('[Library] Background metadata error:', err.message));
     }
 
     res.json(result);
@@ -1228,6 +1264,77 @@ app.post('/api/library/repair-metadata', rateLimit, async (req, res) => {
   } catch (err) {
     console.error('[API] Repair metadata error:', err.message);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/library/add-manual — add a torrent by magnet URI or info hash
+app.post('/api/library/add-manual', rateLimit, (req, res) => {
+  const { TRACKERS } = require('./lib/file-safety');
+  let { magnetUri, infoHash, name, type, quality } = req.body;
+
+  // Accept either a magnet URI or a bare info hash
+  if (!magnetUri && !infoHash) {
+    return res.status(400).json({ error: 'Provide a magnet URI or info hash' });
+  }
+
+  // Extract info hash from magnet URI
+  if (magnetUri && !infoHash) {
+    // Try hex (40 chars) then Base32 (32 chars) encoded info hashes
+    const hexMatch = magnetUri.match(/xt=urn:btih:([a-f0-9]{40})/i);
+    if (hexMatch) {
+      infoHash = hexMatch[1].toLowerCase();
+    } else {
+      const b32Match = magnetUri.match(/xt=urn:btih:([A-Za-z2-7]{32})/);
+      if (b32Match) {
+        try { infoHash = Buffer.from(b32Match[1], 'base32').toString('hex').toLowerCase(); } catch {}
+      }
+      if (!infoHash) {
+        return res.status(400).json({ error: 'Could not extract info hash from magnet URI' });
+      }
+    }
+  }
+
+  // Also accept Base32 bare info hashes
+  if (infoHash && /^[A-Za-z2-7]{32}$/.test(infoHash)) {
+    try { infoHash = Buffer.from(infoHash, 'base32').toString('hex').toLowerCase(); } catch {}
+  }
+
+  if (!/^[0-9a-f]{40}$/i.test(infoHash)) {
+    return res.status(400).json({ error: 'Invalid info hash — must be 40 hex characters or 32 Base32 characters' });
+  }
+  infoHash = infoHash.toLowerCase();
+
+  // Build a magnet URI from info hash if only hash was provided
+  if (!magnetUri) {
+    const trackerParams = TRACKERS.map(t => `&tr=${encodeURIComponent(t)}`).join('');
+    magnetUri = `magnet:?xt=urn:btih:${infoHash}${trackerParams}`;
+  }
+
+  if (!magnetUri.startsWith('magnet:?')) {
+    return res.status(400).json({ error: 'Invalid magnet URI' });
+  }
+
+  // Extract display name from magnet URI dn= param if no name provided
+  if (!name) {
+    const dnMatch = magnetUri.match(/[?&]dn=([^&]+)/);
+    name = dnMatch ? decodeURIComponent(dnMatch[1]).replace(/\+/g, ' ') : `Torrent ${infoHash.slice(0, 8)}`;
+  }
+
+  try {
+    const result = library.addItem({
+      imdbId: null,
+      type: ['movie', 'series'].includes(type) ? type : 'movie',
+      name,
+      poster: '',
+      year: '',
+      magnetUri,
+      infoHash,
+      quality: quality || '',
+      size: '',
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
   }
 });
 
@@ -1309,7 +1416,8 @@ app.post('/api/library/bulk-relink', rateLimit, async (req, res) => {
   }
 
   const allItems = library.getAll();
-  const matches = allItems.filter(i => i.showName === matchShowName);
+  const matchLower = matchShowName.toLowerCase();
+  const matches = allItems.filter(i => (i.showName || '').toLowerCase() === matchLower);
   let updated = 0;
 
   for (const item of matches) {
@@ -1357,7 +1465,7 @@ app.get('/api/library/:id/stream', async (req, res) => {
 
   const fileSize = stat.size;
   const mimeType = library.getMimeType(filePath);
-  const safeFilename = path.basename(filePath).replace(/[^\w\s.\-()[\]]/g, '_').substring(0, 200);
+  const safeFilename = path.basename(filePath).replace(/[^\w\s.\-()[\]]/g, '_').replace(/["\\]/g, '_').substring(0, 200);
 
   const headers = {
     'Content-Type': mimeType,
@@ -1373,7 +1481,7 @@ app.get('/api/library/:id/stream', async (req, res) => {
     const start = parseInt(parts[0], 10);
     const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
 
-    if (start >= fileSize || end >= fileSize || start > end) {
+    if (isNaN(start) || isNaN(end) || start >= fileSize || end >= fileSize || start > end) {
       res.status(416).set('Content-Range', `bytes */${fileSize}`).end();
       return;
     }
@@ -1416,7 +1524,6 @@ app.get('/api/library/:id/stream/remux', async (req, res) => {
   }
 
   const safeFilename = path.basename(filePath).replace(/[^\w\s.\-()[\]]/g, '_').replace(/\.(mkv|avi|wmv|mp4)$/i, '.mp4').substring(0, 200);
-  const { spawn } = require('child_process');
 
   res.status(200);
   res.set({
@@ -1496,7 +1603,6 @@ app.get('/api/library/:id/probe', async (req, res) => {
   if (!filePath) return res.status(404).json({ error: 'File not found' });
 
   const ext = path.extname(filePath).toLowerCase();
-  const { spawn } = require('child_process');
 
   // Use ffprobe to check container and codec info
   const ffprobe = spawn('ffprobe', [
@@ -1508,9 +1614,13 @@ app.get('/api/library/:id/probe', async (req, res) => {
   ]);
 
   let output = '';
+  let responded = false;
   ffprobe.stdout.on('data', (d) => { output += d.toString(); });
 
   ffprobe.on('close', (code) => {
+    if (responded) return;
+    responded = true;
+
     if (code !== 0) {
       return res.json({ directPlay: false, reason: 'ffprobe failed' });
     }
@@ -1548,6 +1658,8 @@ app.get('/api/library/:id/probe', async (req, res) => {
   });
 
   ffprobe.on('error', () => {
+    if (responded) return;
+    responded = true;
     res.json({ directPlay: false, reason: 'ffprobe not available' });
   });
 });
@@ -1625,6 +1737,8 @@ async function validateUrlNotSSRF(urlStr) {
 
 const MAX_REDIRECTS = 5;
 
+const MAX_FETCH_BODY = 10 * 1024 * 1024; // 10 MB max response body
+
 function fetchUrl(url, redirectCount = 0) {
   if (redirectCount > MAX_REDIRECTS) {
     return Promise.reject(new Error('Too many redirects'));
@@ -1633,12 +1747,20 @@ function fetchUrl(url, redirectCount = 0) {
     const mod = url.startsWith('https') ? https : http;
     const req = mod.get(url, { headers: { 'User-Agent': 'Albatross/1.0' }, timeout: 8000 }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return fetchUrl(res.headers.location, redirectCount + 1).then(resolve, reject);
+        // Validate redirect target against SSRF to prevent redirect-based bypass
+        const redirectUrl = res.headers.location;
+        res.resume();
+        return validateUrlNotSSRF(redirectUrl)
+          .then(() => fetchUrl(redirectUrl, redirectCount + 1))
+          .then(resolve, reject);
       }
-      if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
+      if (res.statusCode !== 200) { res.resume(); return reject(new Error(`HTTP ${res.statusCode}`)); }
       let body = '';
       res.setEncoding('utf8');
-      res.on('data', chunk => body += chunk);
+      res.on('data', chunk => {
+        body += chunk;
+        if (body.length > MAX_FETCH_BODY) { res.destroy(); reject(new Error('Response too large')); }
+      });
       res.on('end', () => resolve(body));
     });
     req.on('error', reject);
@@ -1959,6 +2081,11 @@ app.use(express.static(path.join(__dirname, 'public'), {
     }
   },
 }));
+
+// Lightweight health endpoint for Docker HEALTHCHECK
+app.get('/health', (req, res) => {
+  res.status(200).send('ok');
+});
 
 // Health endpoint for VPN detection (if the client can reach this, the server is accessible)
 app.get('/api/stats', (req, res) => {

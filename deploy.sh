@@ -6,7 +6,9 @@ cd "$(dirname "$0")"
 
 # Load secrets from .env file (not tracked in git)
 if [ -f .env ]; then
-  export $(grep -v '^#' .env | xargs)
+  set -a
+  . .env
+  set +a
 fi
 
 if [ -z "$TMDB_API_KEY" ]; then
@@ -30,8 +32,8 @@ echo "==> Stopping container..."
 sudo docker stop alabtross-mobile 2>/dev/null || true
 sudo docker rm   alabtross-mobile 2>/dev/null || true
 
-echo "==> Building (no cache)..."
-sudo docker build --no-cache -t alabtross-mobile ./mobile-ui
+echo "==> Building..."
+sudo docker build -t alabtross-mobile ./mobile-ui
 
 BIND_IP=$(ip route get 8.8.8.8 | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')
 
@@ -44,7 +46,7 @@ sudo docker run -d \
   -e STREMIO_SERVER="http://${BIND_IP}:11470" \
   -e TORRENT_CACHE="/app/torrent-cache" \
   -e LIBRARY_PATH="/app/torrent-cache/library" \
-  -e TMDB_API_KEY="${TMDB_API_KEY}" \
+  -e TMDB_API_KEY="${TMDB_API_KEY:?Set TMDB_API_KEY env var before deploying}" \
   -v "/mnt/movies/torrent-cache:/app/torrent-cache" \
   alabtross-mobile
 

@@ -178,14 +178,14 @@
 #   HEADLESS=1                          — enable unattended mode
 #   DRIVE_PARTITION=sda1                — external drive partition (or "none")
 #   FORMAT_DRIVE=yes                    — auto-format unformatted drives
-#   DUCKDNS_SUBDOMAIN=albatrossburt    — DuckDNS subdomain (or empty to skip)
+#   DUCKDNS_SUBDOMAIN=myalbatross    — DuckDNS subdomain (or empty to skip)
 #   DUCKDNS_AUTH_TOKEN=xxx             — DuckDNS token
 #   ENABLE_HEALTH=yes                  — auto-restart crashed services (default: yes)
 #   DISABLE_GUI=yes                    — disable desktop for headless (default: yes)
 #
 # Example (fully headless over SSH):
 #   sudo HEADLESS=1 DRIVE_PARTITION=sda1 \
-#        DUCKDNS_SUBDOMAIN=albatrossburt \
+#        DUCKDNS_SUBDOMAIN=myalbatross \
 #        DUCKDNS_AUTH_TOKEN=your-token \
 #        bash jetson_setup.sh
 #
@@ -269,6 +269,22 @@ ok "Internet connection confirmed"
 # STEP 1 — Collect info upfront
 # ---------------------------------------------------------------
 hdr "Configuration"
+
+# TMDB_API_KEY is required for movie/show metadata — check early to avoid late failure
+if [[ -z "${TMDB_API_KEY:-}" ]]; then
+  echo ""
+  echo "  TMDB_API_KEY is required for movie/TV metadata lookups."
+  echo "  Get a free key at: https://www.themoviedb.org/settings/api"
+  echo ""
+  if [[ "${HEADLESS:-0}" == "1" ]]; then
+    die "Set TMDB_API_KEY env var before running setup in headless mode."
+  else
+    read -rp "  Enter your TMDB API key: " TMDB_API_KEY
+    [[ -z "$TMDB_API_KEY" ]] && die "TMDB_API_KEY is required. Exiting."
+    export TMDB_API_KEY
+    ok "TMDB API key set"
+  fi
+fi
 
 DRIVE_PART=""
 MOUNT_POINT=""
@@ -384,7 +400,7 @@ else
   [[ "$HAS_DUCKDNS" == "n" ]] && HAS_DUCKDNS="no"
 
   if [[ "$HAS_DUCKDNS" == "yes" ]]; then
-    read -p  "Enter your DuckDNS subdomain (e.g. albatrossburt): " DUCKDNS_DOMAIN
+    read -p  "Enter your DuckDNS subdomain (e.g. myalbatross): " DUCKDNS_DOMAIN
     echo ""
     echo -e "${YELLOW}  Your token is the long string at the top of duckdns.org"
     echo -e "  It looks like: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx${NC}"
@@ -794,7 +810,7 @@ if [[ "$MOBILE_ALREADY_OK" != "true" ]]; then
       -e STREMIO_SERVER="http://${STREMIO_BIND_IP}:11470" \
       -e TORRENT_CACHE="/app/torrent-cache" \
       -e LIBRARY_PATH="/app/torrent-cache/library" \
-      -e TMDB_API_KEY="${TMDB_API_KEY}" \
+      -e TMDB_API_KEY="${TMDB_API_KEY:?Set TMDB_API_KEY env var before running setup}" \
       -v "${TORRENT_CACHE_HOST_DIR}:/app/torrent-cache" \
       alabtross-mobile \
       || die "Failed to start Mobile UI container."

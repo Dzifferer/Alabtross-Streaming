@@ -42,6 +42,9 @@ class LibraryManager {
     this._loadMetadata();
     console.log(`[Library] Initialized at ${this._libraryPath}, ${this._items.size} items loaded`);
 
+    // Auto-repair season metadata for packs saved with incorrect season tags
+    this.repairPackMetadata();
+
     // Auto-resume any downloads/conversions that were interrupted (power loss, crash, restart)
     this._resumeInterruptedDownloads();
     this._resumeInterruptedConversions();

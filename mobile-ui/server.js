@@ -1944,8 +1944,10 @@ app.get('/api/library/:id/probe', async (req, res) => {
   } else {
     console.log(
       `[Library] Probe ${decision.action}: "${item.name}" ` +
-      `video=${decision.videoCodec || '?'} audio=${decision.audioCodec || '?'} ` +
-      `ext=${decision.ext} caps=${req.query.caps || '(none)'}`
+      `video=${decision.videoCodec || '?'} profile=${decision.videoProfile || '?'} ` +
+      `pix=${decision.pixFmt || '?'} audio=${decision.audioCodec || '?'} ` +
+      `ext=${decision.ext} caps=${req.query.caps || '(none)'} ` +
+      `${decision.reason ? 'reason=' + decision.reason : ''}`
     );
   }
 
@@ -1965,6 +1967,8 @@ app.get('/api/library/:id/probe', async (req, res) => {
     container: decision.container,
     ext: decision.ext,
     videoCodec: decision.videoCodec,
+    videoProfile: decision.videoProfile,
+    pixFmt: decision.pixFmt,
     audioCodec: decision.audioCodec,
     duration: decision.duration,
     // Legacy flag kept so older clients still get a sensible answer while

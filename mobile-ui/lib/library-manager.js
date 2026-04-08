@@ -19,6 +19,53 @@ const { VIDEO_EXTENSIONS, TRACKERS, isFileNameSafe, getMimeType } = require('./f
 
 const DEFAULT_MAX_CONCURRENT_DOWNLOADS = 5;
 const METADATA_SAVE_INTERVAL = 30 * 1000; // Save metadata every 30s during active downloads
+const PROGRESS_POLL_INTERVAL = 3000; // 3s — matches frontend poll cadence
+
+/**
+ * Compute file download progress from torrent-stream's bitfield.
+ *
+ * This is the source of truth — we cannot use fs.statSync on the output
+ * file because torrent-stream writes pieces in-place at their byte offsets,
+ * creating a sparse file whose stat.size reflects the highest-offset piece
+ * written, not the actual amount of downloaded data. Symptom: a torrent
+ * stuck at 79% with non-zero download speed because rare pieces are landing
+ * at offsets below the highest piece already written.
+ *
+ * The bitfield is set only after a piece is hash-verified, so it's also
+ * authoritative for completion detection — no need for the old "wait for
+ * file size to stabilize" hack.
+ */
+function computeFileProgress(engine, file) {
+  if (!engine || !engine.bitfield || !engine.torrent || !file || file.length <= 0) {
+    return { downloadedBytes: 0, progressPct: 0, isComplete: false };
+  }
+  const pieceLength = engine.torrent.pieceLength;
+  const torrentLength = engine.torrent.length;
+  const fileStart = file.offset;
+  const fileEnd = file.offset + file.length;
+  const firstPiece = Math.floor(fileStart / pieceLength);
+  const lastPiece = Math.floor((fileEnd - 1) / pieceLength);
+
+  let downloadedBytes = 0;
+  let allPiecesPresent = true;
+  for (let i = firstPiece; i <= lastPiece; i++) {
+    if (engine.bitfield.get(i)) {
+      const pieceStart = i * pieceLength;
+      const pieceEnd = Math.min(pieceStart + pieceLength, torrentLength);
+      const overlapStart = Math.max(pieceStart, fileStart);
+      const overlapEnd = Math.min(pieceEnd, fileEnd);
+      if (overlapEnd > overlapStart) downloadedBytes += overlapEnd - overlapStart;
+    } else {
+      allPiecesPresent = false;
+    }
+  }
+
+  return {
+    downloadedBytes,
+    progressPct: Math.min(100, Math.round((downloadedBytes / file.length) * 100)),
+    isComplete: allPiecesPresent,
+  };
+}
 
 class LibraryManager {
   constructor(opts = {}) {
@@ -163,12 +210,10 @@ class LibraryManager {
 
     return new Promise((resolve, reject) => {
       // See torrent-engine.js for rationale on connections/uploads values.
-      // TL;DR: uploads:0 triggers BT choking (peers stop sending us data),
-      // and connections:500 overwhelms low-power hardware when multiple
-      // torrents run concurrently.
+      // uploads:0 is intentional leech-only mode (legal/privacy).
       const engine = torrentStream(magnetUri, {
         connections: 100,
-        uploads: 4,
+        uploads: 0,
         dht: true,
         verify: true,
         path: packDir,
@@ -410,7 +455,12 @@ class LibraryManager {
    * the engine when all items finish.
    */
   _trackPackProgress(packId, engine) {
-    const lastSizeMap = new Map();
+    // Build basename → file map once. engine.files is stable after 'ready'.
+    const filesByName = new Map();
+    for (const f of engine.files) {
+      filesByName.set(path.basename(f.name), f);
+    }
+
     const progressTimer = setInterval(() => {
       if (!this._engines.has(packId)) {
         clearInterval(progressTimer);
@@ -428,38 +478,24 @@ class LibraryManager {
         item.downloadSpeed = speed;
         item.numPeers = peers;
 
-        const fullPath = path.join(this._libraryPath, item.filePath);
-        let currentSize = 0;
-        try {
-          if (fs.existsSync(fullPath)) {
-            const stat = fs.statSync(fullPath);
-            currentSize = stat.size;
-            item.progress = item.fileSize > 0 ? Math.min(100, Math.round((currentSize / item.fileSize) * 100)) : 0;
-          }
-        } catch { /* file might not exist yet */ }
+        const file = filesByName.get(item.fileName);
+        if (!file) {
+          // File not in this engine — leave alone, allComplete stays false
+          allComplete = false;
+          continue;
+        }
 
-        if (item.progress >= 100) {
-          const prevSize = lastSizeMap.get(itemId) || 0;
-          lastSizeMap.set(itemId, currentSize);
+        // Bitfield-based progress (see computeFileProgress for rationale)
+        const { progressPct, isComplete } = computeFileProgress(engine, file);
+        item.progress = progressPct;
 
-          if (currentSize < item.fileSize - 1024) {
-            item.progress = item.fileSize > 0 ? Math.round((currentSize / item.fileSize) * 100) : 0;
-            allComplete = false;
-            continue;
-          }
-
-          if (currentSize !== prevSize) {
-            allComplete = false;
-            continue;
-          }
-
+        if (isComplete) {
           item.status = 'complete';
           item.completedAt = Date.now();
           item.downloadSpeed = 0;
           console.log(`[Library] Pack episode complete: "${item.fileName}"`);
           this._checkAndConvert(itemId);
         } else {
-          lastSizeMap.set(itemId, currentSize);
           allComplete = false;
         }
       }
@@ -470,7 +506,7 @@ class LibraryManager {
         this._saveMetadata();
         this._processQueue();
       }
-    }, 2000);
+    }, PROGRESS_POLL_INTERVAL);
 
     this._progressTimers.set(packId, progressTimer);
   }
@@ -516,7 +552,7 @@ class LibraryManager {
     // See torrent-engine.js for rationale on connections/uploads values.
     const engine = torrentStream(first.magnetUri, {
       connections: 100,
-      uploads: 4,
+      uploads: 0,
       dht: true,
       verify: true,
       path: packDir,
@@ -1364,7 +1400,7 @@ class LibraryManager {
     // See torrent-engine.js for rationale on connections/uploads values.
     const engine = torrentStream(item.magnetUri, {
       connections: 100,
-      uploads: 4,
+      uploads: 0,
       dht: true,
       verify: true,
       path: itemDir,
@@ -1423,7 +1459,6 @@ class LibraryManager {
         console.warn(`[Library] Suspiciously small file size (${(expectedSize / 1e6).toFixed(1)} MB) — may be corrupt torrent metadata`);
       }
 
-      let lastObservedSize = 0;
       const progressTimer = setInterval(() => {
         if (!this._engines.has(id)) {
           clearInterval(progressTimer);
@@ -1433,36 +1468,13 @@ class LibraryManager {
         item.downloadSpeed = sw ? sw.downloadSpeed() : 0;
         item.numPeers = sw ? sw.wires.length : 0;
 
-        // Calculate progress from on-disk file size vs expected torrent file size
-        const fullPath = path.join(this._libraryPath, item.filePath);
-        let currentSize = 0;
-        try {
-          if (fs.existsSync(fullPath)) {
-            const stat = fs.statSync(fullPath);
-            currentSize = stat.size;
-            item.progress = Math.min(100, Math.round((currentSize / expectedSize) * 100));
-          }
-        } catch {
-          // File might not exist yet
-        }
+        // Use bitfield for progress, NOT fs.statSync — see computeFileProgress()
+        // for why. Briefly: torrent-stream writes pieces in-place at their byte
+        // offsets, so the on-disk file size is unrelated to actual progress.
+        const { progressPct, isComplete } = computeFileProgress(engine, file);
+        item.progress = progressPct;
 
-        // Check if download is complete — require file size within 1KB of expected
-        // AND stable since last poll (no active writes)
-        if (item.progress >= 100) {
-          if (currentSize < expectedSize - 1024) {
-            // File is not actually complete despite rounding to 100%
-            console.warn(`[Library] Progress shows 100% but file size ${currentSize} < expected ${expectedSize} — continuing download`);
-            item.progress = Math.round((currentSize / expectedSize) * 100);
-            lastObservedSize = currentSize;
-            return;
-          }
-
-          if (currentSize !== lastObservedSize) {
-            // File is still being written — wait for next poll
-            lastObservedSize = currentSize;
-            return;
-          }
-
+        if (isComplete) {
           item.status = 'complete';
           item.completedAt = Date.now();
           item.downloadSpeed = 0;
@@ -1473,10 +1485,8 @@ class LibraryManager {
 
           // Check if conversion to browser-compatible MP4 is needed
           this._checkAndConvert(id);
-        } else {
-          lastObservedSize = currentSize;
         }
-      }, 2000);
+      }, PROGRESS_POLL_INTERVAL);
 
       this._progressTimers.set(id, progressTimer);
       this._saveMetadata();

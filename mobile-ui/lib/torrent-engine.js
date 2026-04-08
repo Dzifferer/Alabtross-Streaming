@@ -18,6 +18,7 @@
 
 const torrentStream = require('torrent-stream');
 const { spawn } = require('child_process');
+const { Transform } = require('stream');
 const fs = require('fs');
 const path = require('path');
 const { TRACKERS, isFileNameSafe, getMimeType, sanitizeFilename } = require('./file-safety');
@@ -42,6 +43,7 @@ const VIDEO_SIGNATURES = [
 class TorrentEngine {
   constructor(opts = {}) {
     this._active = new Map(); // infoHash -> { engine, files, lastAccess, timer }
+    this._streamStats = new Map(); // infoHash -> { bytesSent, startTime, lastBytes, lastTime, egressRate, mode }
     this._downloadPath = opts.downloadPath || path.join(process.cwd(), '.torrent-cache');
     this._maxFileSize = opts.maxFileSize || MAX_FILE_SIZE;
     this._maxConcurrent = opts.maxConcurrent || DEFAULT_MAX_CONCURRENT;
@@ -269,9 +271,10 @@ class TorrentEngine {
       });
 
       const stream = file.createReadStream({ start, end });
-      stream.pipe(res);
-      stream.on('error', () => res.end());
-      res.on('close', () => stream.destroy());
+      const meter = this._createMeter(hash, 'direct');
+      stream.pipe(meter).pipe(res);
+      stream.on('error', () => { meter.destroy(); res.end(); });
+      res.on('close', () => { stream.destroy(); meter.destroy(); });
     } else {
       res.status(200);
       res.set({
@@ -281,9 +284,10 @@ class TorrentEngine {
       });
 
       const stream = file.createReadStream();
-      stream.pipe(res);
-      stream.on('error', () => res.end());
-      res.on('close', () => stream.destroy());
+      const meter = this._createMeter(hash, 'direct');
+      stream.pipe(meter).pipe(res);
+      stream.on('error', () => { meter.destroy(); res.end(); });
+      res.on('close', () => { stream.destroy(); meter.destroy(); });
     }
   }
 
@@ -364,7 +368,8 @@ class TorrentEngine {
     const source = file.createReadStream();
     source.pipe(ffmpeg.stdin);
 
-    ffmpeg.stdout.pipe(res);
+    const meter = this._createMeter(hash, 'remux');
+    ffmpeg.stdout.pipe(meter).pipe(res);
 
     source.on('error', (err) => {
       console.error(`[TorrentEngine] Source stream error during remux: ${err.message}`);
@@ -396,6 +401,7 @@ class TorrentEngine {
 
     res.on('close', () => {
       source.destroy();
+      meter.destroy();
       ffmpeg.kill('SIGTERM');
     });
   }
@@ -447,6 +453,110 @@ class TorrentEngine {
       if (entry.engine) entry.engine.destroy();
     }
     this._active.clear();
+  }
+
+  // ─── Throughput Metering ───────────────────────────
+
+  /**
+   * Create a pass-through transform that meters bytes flowing to the client.
+   * Returns the transform stream (pipe source → meter → res).
+   */
+  _createMeter(hash, mode) {
+    const now = Date.now();
+    const stat = { bytesSent: 0, startTime: now, lastBytes: 0, lastTime: now, egressRate: 0, mode };
+    this._streamStats.set(hash, stat);
+
+    const meter = new Transform({
+      transform(chunk, _enc, cb) {
+        stat.bytesSent += chunk.length;
+        // Update rolling egress rate every second
+        const elapsed = Date.now() - stat.lastTime;
+        if (elapsed >= 1000) {
+          stat.egressRate = ((stat.bytesSent - stat.lastBytes) / elapsed) * 1000;
+          stat.lastBytes = stat.bytesSent;
+          stat.lastTime = Date.now();
+        }
+        cb(null, chunk);
+      },
+    });
+
+    meter.on('close', () => this._streamStats.delete(hash));
+    meter.on('error', () => this._streamStats.delete(hash));
+    return meter;
+  }
+
+  /**
+   * Diagnose whether the torrent or the server/network is the bottleneck.
+   */
+  getBottleneckDiag(infoHash) {
+    const hash = infoHash.toLowerCase();
+    const entry = this._active.get(hash);
+    if (!entry || !entry.files) return null;
+
+    const sw = entry.engine.swarm;
+    const torrentSpeed = sw ? sw.downloadSpeed() : 0; // bytes/sec from peers
+    const numPeers = sw ? sw.wires.length : 0;
+    const stat = this._streamStats.get(hash);
+
+    // Check if any file is still incomplete
+    let progress = null;
+    const videoFile = entry.files.find(f => isFileNameSafe(f.name));
+    if (videoFile) {
+      try {
+        const fullPath = path.join(this._downloadPath, videoFile.path);
+        const diskSize = fs.existsSync(fullPath) ? fs.statSync(fullPath).size : 0;
+        progress = { downloaded: diskSize, total: videoFile.length, pct: +(diskSize / videoFile.length * 100).toFixed(1) };
+      } catch {}
+    }
+
+    const clientEgress = stat ? stat.egressRate : 0;
+    const clientMode = stat ? stat.mode : null;
+    const clientBytesSent = stat ? stat.bytesSent : 0;
+    const clientUptime = stat ? Date.now() - stat.startTime : 0;
+
+    // Determine bottleneck
+    let bottleneck = 'unknown';
+    let explanation = '';
+
+    if (!stat) {
+      bottleneck = 'no_active_stream';
+      explanation = 'No client is currently streaming this torrent. Cannot compare throughput.';
+    } else if (progress && progress.pct >= 100) {
+      bottleneck = 'none';
+      explanation = 'File is fully downloaded. Serving from disk — torrent speed is irrelevant.';
+    } else if (torrentSpeed < 50 * 1024 && numPeers < 3) {
+      bottleneck = 'torrent';
+      explanation = `Torrent is slow: ${(torrentSpeed / 1024).toFixed(0)} KB/s from ${numPeers} peers. Few seeders or bad connectivity.`;
+    } else if (clientEgress > 0 && torrentSpeed > clientEgress * 1.5) {
+      bottleneck = 'server_or_network';
+      explanation = `Torrent pulls ${(torrentSpeed / 1024).toFixed(0)} KB/s but client only receives ${(clientEgress / 1024).toFixed(0)} KB/s. Server processing or network to client is the bottleneck.`;
+    } else if (clientEgress > 0 && clientEgress >= torrentSpeed * 0.8) {
+      bottleneck = 'torrent';
+      explanation = `Client egress (${(clientEgress / 1024).toFixed(0)} KB/s) keeps up with torrent (${(torrentSpeed / 1024).toFixed(0)} KB/s). Torrent download speed is the limiting factor.`;
+    } else if (torrentSpeed > 0 && clientEgress === 0) {
+      bottleneck = 'server_or_network';
+      explanation = `Torrent is downloading at ${(torrentSpeed / 1024).toFixed(0)} KB/s but no bytes are reaching the client. Possible backpressure or FFmpeg stall.`;
+    } else {
+      explanation = 'Not enough data to determine bottleneck yet. Try again in a few seconds.';
+    }
+
+    return {
+      bottleneck,
+      explanation,
+      torrent: {
+        downloadSpeed: torrentSpeed,
+        downloadSpeedKBs: +(torrentSpeed / 1024).toFixed(1),
+        numPeers,
+        progress,
+      },
+      client: {
+        egressRate: clientEgress,
+        egressRateKBs: +(clientEgress / 1024).toFixed(1),
+        mode: clientMode,
+        bytesSent: clientBytesSent,
+        streamingFor: clientUptime ? `${(clientUptime / 1000).toFixed(0)}s` : null,
+      },
+    };
   }
 
   // ─── Security ─────────────────────────────────────

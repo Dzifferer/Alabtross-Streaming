@@ -985,6 +985,22 @@ app.get('/api/torrent-status/:infoHash', (req, res) => {
   res.json(status);
 });
 
+// GET /api/torrent-status/:infoHash/bottleneck — diagnose speed bottleneck
+// Compares torrent swarm download speed vs client egress rate to determine
+// whether the torrent or the server/network is the limiting factor.
+app.get('/api/torrent-status/:infoHash/bottleneck', (req, res) => {
+  const { infoHash } = req.params;
+  if (!/^[0-9a-f]{40}$/i.test(infoHash)) {
+    return res.status(400).json({ error: 'Invalid infoHash' });
+  }
+  const eng = getEngine();
+  const diag = eng.getBottleneckDiag(infoHash);
+  if (!diag) {
+    return res.status(404).json({ error: 'Torrent not active' });
+  }
+  res.json(diag);
+});
+
 // ─── Library API Routes ───────────────────────────────────────────────
 
 // GET /api/library — list all library items

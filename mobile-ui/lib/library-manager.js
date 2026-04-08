@@ -389,6 +389,151 @@ class LibraryManager {
   }
 
   /**
+   * Resume a pack download with a single shared torrent engine.
+   * Selects each item's specific file by matching fileName.
+   */
+  _resumePackDownload(packId, items) {
+    if (items.length === 0) return;
+
+    const first = items[0];
+
+    // Derive pack directory from the first item's filePath
+    // filePath is relative, e.g., "ShowName_S01_hash/path/to/episode.mkv"
+    const packDirName = first.filePath ? first.filePath.split(path.sep)[0] : null;
+    const packDir = packDirName
+      ? path.join(this._libraryPath, packDirName)
+      : path.join(this._libraryPath, this._safeDirectoryName({ name: first.showName || first.name, infoHash: first.infoHash }));
+
+    console.log(`[Library] Resuming pack "${first.showName || first.name}" (${items.length} episodes) in ${packDir}`);
+
+    const engine = torrentStream(first.magnetUri, {
+      connections: 500,
+      uploads: 0,
+      dht: true,
+      verify: true,
+      path: packDir,
+      trackers: TRACKERS,
+    });
+
+    const timeout = setTimeout(() => {
+      for (const item of items) {
+        if (item.status === 'downloading') {
+          item.status = 'failed';
+          item.error = 'Torrent metadata timeout (90s) on resume';
+        }
+      }
+      try { engine.destroy(); } catch {}
+      this._saveMetadata();
+      this._processQueue();
+    }, 90000);
+
+    engine.on('error', (err) => {
+      clearTimeout(timeout);
+      for (const item of items) {
+        if (item.status === 'downloading') {
+          item.status = 'failed';
+          item.error = err.message;
+        }
+      }
+      try { engine.destroy(); } catch {}
+      this._saveMetadata();
+      this._processQueue();
+    });
+
+    engine.on('ready', () => {
+      clearTimeout(timeout);
+
+      // Deselect all files first
+      for (const f of engine.files) f.deselect();
+
+      // For each pack item, find and select the matching file by fileName
+      for (const item of items) {
+        if (item.status !== 'downloading') continue;
+
+        const file = engine.files.find(f => path.basename(f.name) === item.fileName);
+        if (file) {
+          file.select();
+          console.log(`[Library] Pack resume: selected "${file.name}" for "${item.name}"`);
+        } else {
+          console.error(`[Library] Pack resume: could not find file "${item.fileName}" in torrent`);
+          item.status = 'failed';
+          item.error = 'File not found in torrent on resume';
+        }
+      }
+
+      // Store the shared engine
+      this._engines.set(packId, engine);
+      this._startPeriodicSave();
+
+      // Set up shared progress tracking (mirrors addSeasonPack)
+      const lastSizeMap = new Map();
+      const progressTimer = setInterval(() => {
+        if (!this._engines.has(packId)) {
+          clearInterval(progressTimer);
+          return;
+        }
+
+        const sw = engine.swarm;
+        const speed = sw ? sw.downloadSpeed() : 0;
+        const peers = sw ? sw.wires.length : 0;
+        let allComplete = true;
+
+        for (const [itemId, item] of this._items) {
+          if (item.packId !== packId || item.status !== 'downloading') continue;
+
+          item.downloadSpeed = speed;
+          item.numPeers = peers;
+
+          const fullPath = path.join(this._libraryPath, item.filePath);
+          let currentSize = 0;
+          try {
+            if (fs.existsSync(fullPath)) {
+              const stat = fs.statSync(fullPath);
+              currentSize = stat.size;
+              item.progress = Math.min(100, Math.round((currentSize / item.fileSize) * 100));
+            }
+          } catch { /* file might not exist yet */ }
+
+          if (item.progress >= 100) {
+            const prevSize = lastSizeMap.get(itemId) || 0;
+            lastSizeMap.set(itemId, currentSize);
+
+            if (currentSize < item.fileSize - 1024) {
+              item.progress = Math.round((currentSize / item.fileSize) * 100);
+              allComplete = false;
+              continue;
+            }
+
+            if (currentSize !== prevSize) {
+              allComplete = false;
+              continue;
+            }
+
+            item.status = 'complete';
+            item.completedAt = Date.now();
+            item.downloadSpeed = 0;
+            console.log(`[Library] Pack episode complete: "${item.fileName}"`);
+            this._checkAndConvert(itemId);
+          } else {
+            lastSizeMap.set(itemId, currentSize);
+            allComplete = false;
+          }
+        }
+
+        if (allComplete) {
+          clearInterval(progressTimer);
+          this._stopPackEngine(packId);
+          this._saveMetadata();
+          this._processQueue();
+        }
+      }, 2000);
+
+      this._progressTimers.set(packId, progressTimer);
+      this._saveMetadata();
+    });
+  }
+
+  /**
    * Get all library items, including untracked video files found on disk.
    */
   getAll() {
@@ -439,10 +584,22 @@ class LibraryManager {
     if (!item) return false;
     if (item.status !== 'downloading') return false;
 
-    this._stopDownload(id);
     item.status = 'paused';
     item.downloadSpeed = 0;
     item.numPeers = 0;
+
+    if (item.packId) {
+      // For pack items, only stop the shared engine if no other items are still downloading
+      const remainingActive = [...this._items.values()].filter(
+        i => i.packId === item.packId && i.id !== id && i.status === 'downloading'
+      );
+      if (remainingActive.length === 0) {
+        this._stopPackEngine(item.packId);
+      }
+    } else {
+      this._stopDownload(id);
+    }
+
     this._saveMetadata();
     this._processQueue();
     console.log(`[Library] Paused: "${item.name}"`);
@@ -467,7 +624,20 @@ class LibraryManager {
 
     item.status = 'downloading';
     item.error = null;
-    this._startDownload(id);
+
+    if (item.packId) {
+      if (!this._engines.has(item.packId)) {
+        // No pack engine running — restart it with all downloading items in this pack
+        const packItems = [...this._items.values()].filter(
+          i => i.packId === item.packId && i.status === 'downloading'
+        );
+        this._resumePackDownload(item.packId, packItems);
+      }
+      // If engine already exists, the progress timer will pick up this item
+    } else {
+      this._startDownload(id);
+    }
+
     this._saveMetadata();
     console.log(`[Library] Resumed: "${item.name}"`);
     return true;
@@ -495,7 +665,18 @@ class LibraryManager {
     item.progress = 0;
     item.downloadSpeed = 0;
     item.numPeers = 0;
-    this._startDownload(id);
+
+    if (item.packId) {
+      if (!this._engines.has(item.packId)) {
+        const packItems = [...this._items.values()].filter(
+          i => i.packId === item.packId && i.status === 'downloading'
+        );
+        this._resumePackDownload(item.packId, packItems);
+      }
+    } else {
+      this._startDownload(id);
+    }
+
     this._saveMetadata();
     console.log(`[Library] Retrying: "${item.name}"`);
     return true;
@@ -693,15 +874,45 @@ class LibraryManager {
       .filter(i => i.status === 'queued')
       .sort((a, b) => a.addedAt - b.addedAt);
 
-    const toStart = queued.slice(0, available);
-    for (const item of toStart) {
+    // Group queued pack items so they start together with one engine
+    const packGroups = new Map();
+    const singles = [];
+    for (const item of queued) {
+      if (item.packId) {
+        if (!packGroups.has(item.packId)) packGroups.set(item.packId, []);
+        packGroups.get(item.packId).push(item);
+      } else {
+        singles.push(item);
+      }
+    }
+
+    let started = 0;
+
+    // Start individual items
+    for (const item of singles) {
+      if (started >= available) break;
       item.status = 'downloading';
       item.progress = 0;
       console.log(`[Library] Dequeuing: "${item.name}"`);
       this._startDownload(item.id);
+      started++;
     }
 
-    if (toStart.length > 0) {
+    // Start pack groups
+    for (const [packId, items] of packGroups) {
+      if (started >= available) break;
+      for (const item of items) {
+        item.status = 'downloading';
+      }
+      if (this._engines.has(packId)) {
+        // Engine already running, items will be picked up by progress timer
+      } else {
+        this._resumePackDownload(packId, items);
+      }
+      started++;
+    }
+
+    if (started > 0) {
       this._saveMetadata();
     }
   }
@@ -972,11 +1183,23 @@ class LibraryManager {
 
     console.log(`[Library] Found ${toResume.length} interrupted download(s) — resuming...`);
 
-    let started = 0;
+    // Separate pack items from individual items
+    const packGroups = new Map(); // packId -> [items]
+    const singles = [];
     for (const item of toResume) {
       delete item._needsResume;
+      if (item.packId) {
+        if (!packGroups.has(item.packId)) packGroups.set(item.packId, []);
+        packGroups.get(item.packId).push(item);
+      } else {
+        singles.push(item);
+      }
+    }
 
-      // Respect concurrent download limit — queue excess
+    let started = 0;
+
+    // Resume individual downloads
+    for (const item of singles) {
       if (started >= this._maxConcurrentDownloads) {
         console.log(`[Library] Queued "${item.name}" — concurrent limit reached during restart`);
         item.status = 'queued';
@@ -984,7 +1207,6 @@ class LibraryManager {
         continue;
       }
 
-      // Check if partial file exists on disk to log resume progress
       if (item.filePath) {
         const fullPath = path.join(this._libraryPath, item.filePath);
         try {
@@ -1006,6 +1228,22 @@ class LibraryManager {
       }
 
       this._startDownload(item.id);
+      started++;
+    }
+
+    // Resume pack downloads — one shared engine per pack
+    for (const [packId, items] of packGroups) {
+      if (started >= this._maxConcurrentDownloads) {
+        for (const item of items) {
+          console.log(`[Library] Queued "${item.name}" — concurrent limit reached during restart`);
+          item.status = 'queued';
+          item.error = null;
+        }
+        continue;
+      }
+
+      console.log(`[Library] Resuming pack ${packId} with ${items.length} episodes`);
+      this._resumePackDownload(packId, items);
       started++;
     }
 

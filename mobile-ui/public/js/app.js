@@ -916,19 +916,23 @@
   }
 
   function attachChannelListeners(container) {
-    container.addEventListener('click', (e) => {
-      const card = e.target.closest('.channel-card');
-      if (card) {
-        const channel = {
-          url: card.dataset.url || '',
-          name: card.dataset.name || 'Channel',
-          _sourceType: card.dataset.sourceType || 'playlist',
-          _addonUrl: card.dataset.addonUrl || '',
-          _stremioId: card.dataset.stremioId || '',
-        };
-        playChannel(channel);
-      }
-    });
+    // Only attach click delegation once per container to prevent stacking
+    if (!container._channelClickDelegated) {
+      container._channelClickDelegated = true;
+      container.addEventListener('click', (e) => {
+        const card = e.target.closest('.channel-card');
+        if (card) {
+          const channel = {
+            url: card.dataset.url || '',
+            name: card.dataset.name || 'Channel',
+            _sourceType: card.dataset.sourceType || 'playlist',
+            _addonUrl: card.dataset.addonUrl || '',
+            _stremioId: card.dataset.stremioId || '',
+          };
+          playChannel(channel);
+        }
+      });
+    }
 
     container.querySelectorAll('.channel-poster img.loading').forEach(img => {
       img.addEventListener('load', () => img.classList.remove('loading'));
@@ -1042,7 +1046,11 @@
         );
       }
       grid.innerHTML = filtered.slice(0, 100).map(ch => channelCardHTML(ch)).join('');
-      attachChannelListeners(grid);
+      // Only re-attach image load/error handlers; click delegation is on the grid once
+      grid.querySelectorAll('.channel-poster img.loading').forEach(img => {
+        img.addEventListener('load', () => img.classList.remove('loading'));
+        img.addEventListener('error', () => { img.style.display = 'none'; });
+      });
     }
 
     if (searchInput) {
@@ -1509,38 +1517,45 @@
     attachEpisodeHandlers();
   }
 
+  // Episode click handler — uses event delegation to avoid stacking listeners
+  let _episodeDelegationAttached = false;
   function attachEpisodeHandlers() {
-    document.querySelectorAll('.episode-item').forEach(ep => {
-      ep.addEventListener('click', () => {
-        const id = ep.dataset.id;
-        const season = parseInt(ep.dataset.season, 10);
-        const episode = parseInt(ep.dataset.episode, 10);
-        const sc = document.getElementById('stream-container');
-        if (sc) {
-          sc.classList.remove('hidden');
-          sc.innerHTML = `<div class="loading-state"><div class="spinner"></div><p>Finding streams & testing speeds...</p></div>`;
-          sc.scrollIntoView({ behavior: 'smooth' });
-        }
-        // In custom mode, we need the show's IMDB ID + season/episode
-        const showId = state.currentMeta
-          ? (state.currentMeta.imdb_id || state.currentMeta.id)
-          : id;
+    const episodeList = document.getElementById('episode-list');
+    if (!episodeList || _episodeDelegationAttached) return;
+    _episodeDelegationAttached = true;
 
-        // Compute absolute episode number for anime (fansubs use absolute numbering)
-        let absoluteEpisode;
-        if (state.currentMeta && state.currentMeta.videos) {
-          const allEps = state.currentMeta.videos
-            .filter(v => v.season != null && v.episode != null)
-            .sort((a, b) => a.season - b.season || a.episode - b.episode);
-          const absIndex = allEps.findIndex(v => v.season === season && v.episode === episode);
-          if (absIndex >= 0) absoluteEpisode = absIndex + 1;
-        }
+    episodeList.addEventListener('click', (e) => {
+      const ep = e.target.closest('.episode-item');
+      if (!ep) return;
 
-        const genres = state.currentMeta && state.currentMeta.genres
-          ? state.currentMeta.genres : undefined;
+      const id = ep.dataset.id;
+      const season = parseInt(ep.dataset.season, 10);
+      const episode = parseInt(ep.dataset.episode, 10);
+      const sc = document.getElementById('stream-container');
+      if (sc) {
+        sc.classList.remove('hidden');
+        sc.innerHTML = `<div class="loading-state"><div class="spinner"></div><p>Finding streams & testing speeds...</p></div>`;
+        sc.scrollIntoView({ behavior: 'smooth' });
+      }
+      // In custom mode, we need the show's IMDB ID + season/episode
+      const showId = state.currentMeta
+        ? (state.currentMeta.imdb_id || state.currentMeta.id)
+        : id;
 
-        loadStreams('series', showId, { season, episode, absoluteEpisode, genres });
-      });
+      // Compute absolute episode number for anime (fansubs use absolute numbering)
+      let absoluteEpisode;
+      if (state.currentMeta && state.currentMeta.videos) {
+        const allEps = state.currentMeta.videos
+          .filter(v => v.season != null && v.episode != null)
+          .sort((a, b) => a.season - b.season || a.episode - b.episode);
+        const absIndex = allEps.findIndex(v => v.season === season && v.episode === episode);
+        if (absIndex >= 0) absoluteEpisode = absIndex + 1;
+      }
+
+      const genres = state.currentMeta && state.currentMeta.genres
+        ? state.currentMeta.genres : undefined;
+
+      loadStreams('series', showId, { season, episode, absoluteEpisode, genres });
     });
   }
 
@@ -1553,9 +1568,15 @@
     if (!container) return;
 
     // Use pre-fetched streams if available (from parallel fetch in openDetail)
-    const streams = prefetchedStreamsPromise
-      ? await prefetchedStreamsPromise
-      : await api.getStreams(type, id, seasonEpisode);
+    let streams;
+    try {
+      streams = prefetchedStreamsPromise
+        ? await prefetchedStreamsPromise
+        : await api.getStreams(type, id, seasonEpisode);
+    } catch (e) {
+      console.warn('[loadStreams] Failed to fetch streams:', e.message);
+      streams = [];
+    }
 
     // If user navigated to a different title while we were fetching, discard results
     if (generation !== _streamLoadGeneration) return;
@@ -1609,7 +1630,7 @@
               const resultsDiv = document.getElementById('diagnose-results');
               if (resultsDiv) {
                 resultsDiv.style.display = 'block';
-                resultsDiv.innerHTML = `<div style="color:var(--accent-red)">Diagnostics failed: ${e.message}</div>`;
+                resultsDiv.innerHTML = `<div style="color:var(--accent-red)">Diagnostics failed: ${escapeHTML(e.message)}</div>`;
               }
             }
             diagBtn.textContent = 'Re-run Diagnostics';
@@ -2062,7 +2083,12 @@
     document.getElementById('player-go-back').addEventListener('click', () => goBack());
   }
 
+  // Clean up stale video event listeners from previous playStream calls
+  let _playStreamCleanup = null;
+
   async function playStream(stream) {
+    if (_playStreamCleanup) { _playStreamCleanup(); _playStreamCleanup = null; }
+
     const url = api.getPlaybackUrl(stream);
     if (!url) {
       showToast('Cannot play this stream');
@@ -2160,6 +2186,11 @@
       dom.videoPlayer.addEventListener('waiting', onStalled);
       dom.videoPlayer.addEventListener('stalled', onStalled);
       dom.videoPlayer.addEventListener('playing', onPlaying);
+      _playStreamCleanup = () => {
+        dom.videoPlayer.removeEventListener('waiting', onStalled);
+        dom.videoPlayer.removeEventListener('stalled', onStalled);
+        dom.videoPlayer.removeEventListener('playing', onPlaying);
+      };
     } catch (e) {
       if (statusInterval) clearInterval(statusInterval);
       let hint = escapeHTML(e.message);
@@ -2167,21 +2198,6 @@
         hint += '<br><span style="font-size:12px">The file format may not be supported by your browser</span>';
       }
       showPlayerError('Playback failed', hint);
-    }
-  }
-
-  async function playFromDetail() {
-    if (!state.currentMeta) return;
-    const type = state.currentType;
-    const id = state.currentMeta.imdb_id || state.currentMeta.id;
-
-    showToast('Finding best stream...');
-
-    const { bestStream } = await api.getStreamsRanked(type, id);
-    if (bestStream) {
-      playStream(bestStream);
-    } else {
-      showToast('No playable streams found');
     }
   }
 
@@ -3257,8 +3273,6 @@
 
   function attachCategorizeHandlers(container) {
     container.querySelectorAll('.card[data-uncategorized="true"]').forEach(card => {
-      // Add a long-press handler to show categorize modal
-      let pressTimer = null;
       const imdbId = card.dataset.imdb;
       const movieName = card.dataset.movieName;
       if (!imdbId) return;
@@ -3353,9 +3367,9 @@
 
   async function playLibraryItem(id) {
     // Grab poster/title from DOM before navigating away
-    const itemEl = dom.libraryContent.querySelector(`.library-item[data-id="${CSS.escape(id)}"]`);
-    const libPoster = itemEl?.querySelector('.library-item-poster img')?.src || '';
-    const libTitle = itemEl?.querySelector('.library-item-title')?.textContent || '';
+    const itemEl = dom.libraryContent.querySelector(`.card[data-id="${CSS.escape(id)}"]`);
+    const libPoster = itemEl?.querySelector('.card-poster img')?.src || '';
+    const libTitle = itemEl?.querySelector('.card-title')?.textContent || '';
 
     navigateTo('player');
     showCurtainOverlay({ poster: libPoster, title: libTitle, status: 'Loading from library...' });
@@ -3541,12 +3555,6 @@
     if (bytes >= 1e6) return (bytes / 1e6).toFixed(1) + ' MB';
     if (bytes >= 1e3) return (bytes / 1e3).toFixed(0) + ' KB';
     return bytes + ' B';
-  }
-
-  // ─── Share / Tailscale VPN ──────────────────────────
-
-  function initShare() {
-    // Tailscale share page is static — no dynamic logic needed
   }
 
   // ─── Settings ────────────────────────────────────
@@ -4524,10 +4532,10 @@
 
   // ─── Utility ─────────────────────────────────────
 
-  const _escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
+  const _escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
   function escapeHTML(str) {
     if (!str) return '';
-    return str.replace(/[&<>"]/g, ch => _escapeMap[ch]);
+    return str.replace(/[&<>"']/g, ch => _escapeMap[ch]);
   }
 
   // ─── Casting ─────────────────────────────────────
@@ -4693,7 +4701,7 @@
         `;
       } else {
         serverList.innerHTML = data.devices.map(device => `
-          <button class="cast-device-item" data-device='${JSON.stringify(device).replace(/'/g, '&#39;')}'>
+          <button class="cast-device-item" data-device='${escapeHTML(JSON.stringify(device))}'>
             <div class="cast-device-icon">
               <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 ${device.type === 'chromecast'
@@ -4874,11 +4882,13 @@
 
     // Auto-fade player controls on touch/mouse inactivity
     const playerContainer = document.getElementById('player-container');
-    ['touchstart', 'touchmove', 'mousemove', 'click'].forEach(evt => {
-      playerContainer.addEventListener(evt, () => {
-        if (state.currentView === 'player') showPlayerControls();
-      }, { passive: true });
-    });
+    if (playerContainer) {
+      ['touchstart', 'touchmove', 'mousemove', 'click'].forEach(evt => {
+        playerContainer.addEventListener(evt, () => {
+          if (state.currentView === 'player') showPlayerControls();
+        }, { passive: true });
+      });
+    }
 
     // Keyboard controls for video player
     document.addEventListener('keydown', (e) => {
@@ -4936,9 +4946,6 @@
 
     // Settings
     initSettings();
-
-    // Share / QR Code
-    initShare();
 
     // Casting (Chromecast / AirPlay)
     initCasting();

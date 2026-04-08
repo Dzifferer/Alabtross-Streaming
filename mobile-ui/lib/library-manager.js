@@ -44,12 +44,12 @@ class LibraryManager {
     this._loadMetadata();
     console.log(`[Library] Initialized at ${this._libraryPath}, ${this._items.size} items loaded`);
 
-    // Auto-repair season metadata for packs saved with incorrect season tags
-    this.repairPackMetadata();
-
     // Auto-resume any downloads/conversions that were interrupted (power loss, crash, restart)
     this._resumeInterruptedDownloads();
     this._resumeInterruptedConversions();
+
+    // Auto-repair season metadata for packs (deferred to avoid blocking startup)
+    setImmediate(() => this.repairPackMetadata());
   }
 
   // ─── Public API ──────────────────────────────────
@@ -269,76 +269,7 @@ class LibraryManager {
         this._engines.set(packId, engine);
         this._startPeriodicSave();
 
-        // Track the last observed file size per item so we can confirm writes have settled
-        const lastSizeMap = new Map();
-
-        // Track progress for each file individually
-        const progressTimer = setInterval(() => {
-          if (!this._engines.has(packId)) {
-            clearInterval(progressTimer);
-            return;
-          }
-
-          const sw = engine.swarm;
-          const speed = sw ? sw.downloadSpeed() : 0;
-          const peers = sw ? sw.wires.length : 0;
-          let allComplete = true;
-
-          for (const [itemId, item] of this._items) {
-            if (item.packId !== packId || item.status !== 'downloading') continue;
-
-            item.downloadSpeed = speed;
-            item.numPeers = peers;
-
-            // Calculate progress from file size on disk
-            const fullPath = path.join(this._libraryPath, item.filePath);
-            let currentSize = 0;
-            try {
-              if (fs.existsSync(fullPath)) {
-                const stat = fs.statSync(fullPath);
-                currentSize = stat.size;
-                item.progress = Math.min(100, Math.round((currentSize / item.fileSize) * 100));
-              }
-            } catch { /* file might not exist yet */ }
-
-            if (item.progress >= 100) {
-              // Require file size to match expected size (allow at most 1KB rounding difference)
-              // AND size must be stable since the last poll to ensure the write has finished
-              const prevSize = lastSizeMap.get(itemId) || 0;
-              lastSizeMap.set(itemId, currentSize);
-
-              if (currentSize < item.fileSize - 1024) {
-                item.progress = Math.round((currentSize / item.fileSize) * 100);
-                allComplete = false;
-                continue;
-              }
-
-              if (currentSize !== prevSize) {
-                // File is still being written — wait for next poll
-                allComplete = false;
-                continue;
-              }
-
-              item.status = 'complete';
-              item.completedAt = Date.now();
-              item.downloadSpeed = 0;
-              console.log(`[Library] Pack episode complete: "${item.fileName}"`);
-              this._checkAndConvert(itemId);
-            } else {
-              lastSizeMap.set(itemId, currentSize);
-              allComplete = false;
-            }
-          }
-
-          // If all pack items are complete, destroy the shared engine
-          if (allComplete) {
-            clearInterval(progressTimer);
-            this._stopPackEngine(packId);
-            this._saveMetadata();
-          }
-        }, 2000);
-
-        this._progressTimers.set(packId, progressTimer);
+        this._trackPackProgress(packId, engine);
         this._saveMetadata();
 
         console.log(`[Library] Season pack started: "${name}" ${isCompletePack ? '(complete pack)' : `S${String(fallbackSeason).padStart(2, '0')}`} — ${videoFiles.length} episodes`);
@@ -458,6 +389,77 @@ class LibraryManager {
     return null;
   }
 
+  /**
+   * Shared progress tracking for pack downloads (used by both addSeasonPack and _resumePackDownload).
+   * Polls file sizes every 2s to track progress, marks items complete when stable, and tears down
+   * the engine when all items finish.
+   */
+  _trackPackProgress(packId, engine) {
+    const lastSizeMap = new Map();
+    const progressTimer = setInterval(() => {
+      if (!this._engines.has(packId)) {
+        clearInterval(progressTimer);
+        return;
+      }
+
+      const sw = engine.swarm;
+      const speed = sw ? sw.downloadSpeed() : 0;
+      const peers = sw ? sw.wires.length : 0;
+      let allComplete = true;
+
+      for (const [itemId, item] of this._items) {
+        if (item.packId !== packId || item.status !== 'downloading') continue;
+
+        item.downloadSpeed = speed;
+        item.numPeers = peers;
+
+        const fullPath = path.join(this._libraryPath, item.filePath);
+        let currentSize = 0;
+        try {
+          if (fs.existsSync(fullPath)) {
+            const stat = fs.statSync(fullPath);
+            currentSize = stat.size;
+            item.progress = Math.min(100, Math.round((currentSize / item.fileSize) * 100));
+          }
+        } catch { /* file might not exist yet */ }
+
+        if (item.progress >= 100) {
+          const prevSize = lastSizeMap.get(itemId) || 0;
+          lastSizeMap.set(itemId, currentSize);
+
+          if (currentSize < item.fileSize - 1024) {
+            item.progress = Math.round((currentSize / item.fileSize) * 100);
+            allComplete = false;
+            continue;
+          }
+
+          if (currentSize !== prevSize) {
+            allComplete = false;
+            continue;
+          }
+
+          item.status = 'complete';
+          item.completedAt = Date.now();
+          item.downloadSpeed = 0;
+          console.log(`[Library] Pack episode complete: "${item.fileName}"`);
+          this._checkAndConvert(itemId);
+        } else {
+          lastSizeMap.set(itemId, currentSize);
+          allComplete = false;
+        }
+      }
+
+      if (allComplete) {
+        clearInterval(progressTimer);
+        this._stopPackEngine(packId);
+        this._saveMetadata();
+        this._processQueue();
+      }
+    }, 2000);
+
+    this._progressTimers.set(packId, progressTimer);
+  }
+
   _stopPackEngine(packId) {
     const timer = this._progressTimers.get(packId);
     if (timer) {
@@ -552,70 +554,7 @@ class LibraryManager {
       this._engines.set(packId, engine);
       this._startPeriodicSave();
 
-      // Set up shared progress tracking (mirrors addSeasonPack)
-      const lastSizeMap = new Map();
-      const progressTimer = setInterval(() => {
-        if (!this._engines.has(packId)) {
-          clearInterval(progressTimer);
-          return;
-        }
-
-        const sw = engine.swarm;
-        const speed = sw ? sw.downloadSpeed() : 0;
-        const peers = sw ? sw.wires.length : 0;
-        let allComplete = true;
-
-        for (const [itemId, item] of this._items) {
-          if (item.packId !== packId || item.status !== 'downloading') continue;
-
-          item.downloadSpeed = speed;
-          item.numPeers = peers;
-
-          const fullPath = path.join(this._libraryPath, item.filePath);
-          let currentSize = 0;
-          try {
-            if (fs.existsSync(fullPath)) {
-              const stat = fs.statSync(fullPath);
-              currentSize = stat.size;
-              item.progress = Math.min(100, Math.round((currentSize / item.fileSize) * 100));
-            }
-          } catch { /* file might not exist yet */ }
-
-          if (item.progress >= 100) {
-            const prevSize = lastSizeMap.get(itemId) || 0;
-            lastSizeMap.set(itemId, currentSize);
-
-            if (currentSize < item.fileSize - 1024) {
-              item.progress = Math.round((currentSize / item.fileSize) * 100);
-              allComplete = false;
-              continue;
-            }
-
-            if (currentSize !== prevSize) {
-              allComplete = false;
-              continue;
-            }
-
-            item.status = 'complete';
-            item.completedAt = Date.now();
-            item.downloadSpeed = 0;
-            console.log(`[Library] Pack episode complete: "${item.fileName}"`);
-            this._checkAndConvert(itemId);
-          } else {
-            lastSizeMap.set(itemId, currentSize);
-            allComplete = false;
-          }
-        }
-
-        if (allComplete) {
-          clearInterval(progressTimer);
-          this._stopPackEngine(packId);
-          this._saveMetadata();
-          this._processQueue();
-        }
-      }, 2000);
-
-      this._progressTimers.set(packId, progressTimer);
+      this._trackPackProgress(packId, engine);
       this._saveMetadata();
     });
   }

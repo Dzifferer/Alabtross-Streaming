@@ -1272,16 +1272,28 @@ app.post('/api/library/add-manual', rateLimit, (req, res) => {
 
   // Extract info hash from magnet URI
   if (magnetUri && !infoHash) {
-    const match = magnetUri.match(/xt=urn:btih:([a-f0-9]{40})/i);
-    if (match) {
-      infoHash = match[1].toLowerCase();
+    // Try hex (40 chars) then Base32 (32 chars) encoded info hashes
+    const hexMatch = magnetUri.match(/xt=urn:btih:([a-f0-9]{40})/i);
+    if (hexMatch) {
+      infoHash = hexMatch[1].toLowerCase();
     } else {
-      return res.status(400).json({ error: 'Could not extract info hash from magnet URI' });
+      const b32Match = magnetUri.match(/xt=urn:btih:([A-Za-z2-7]{32})/);
+      if (b32Match) {
+        try { infoHash = Buffer.from(b32Match[1], 'base32').toString('hex').toLowerCase(); } catch {}
+      }
+      if (!infoHash) {
+        return res.status(400).json({ error: 'Could not extract info hash from magnet URI' });
+      }
     }
   }
 
+  // Also accept Base32 bare info hashes
+  if (infoHash && /^[A-Za-z2-7]{32}$/.test(infoHash)) {
+    try { infoHash = Buffer.from(infoHash, 'base32').toString('hex').toLowerCase(); } catch {}
+  }
+
   if (!/^[0-9a-f]{40}$/i.test(infoHash)) {
-    return res.status(400).json({ error: 'Invalid info hash — must be 40 hex characters' });
+    return res.status(400).json({ error: 'Invalid info hash — must be 40 hex characters or 32 Base32 characters' });
   }
   infoHash = infoHash.toLowerCase();
 
@@ -1445,7 +1457,7 @@ app.get('/api/library/:id/stream', async (req, res) => {
 
   const fileSize = stat.size;
   const mimeType = library.getMimeType(filePath);
-  const safeFilename = path.basename(filePath).replace(/[^\w\s.\-()[\]]/g, '_').substring(0, 200);
+  const safeFilename = path.basename(filePath).replace(/[^\w\s.\-()[\]]/g, '_').replace(/["\\]/g, '_').substring(0, 200);
 
   const headers = {
     'Content-Type': mimeType,

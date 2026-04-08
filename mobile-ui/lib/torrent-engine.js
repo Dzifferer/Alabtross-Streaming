@@ -43,7 +43,8 @@ const VIDEO_SIGNATURES = [
 class TorrentEngine {
   constructor(opts = {}) {
     this._active = new Map(); // infoHash -> { engine, files, lastAccess, timer }
-    this._streamStats = new Map(); // infoHash -> { bytesSent, startTime, lastBytes, lastTime, egressRate, mode }
+    this._streamStats = new Map(); // streamKey -> { bytesSent, startTime, lastBytes, lastTime, egressRate, mode, hash }
+    this._streamIdCounter = 0;
     this._downloadPath = opts.downloadPath || path.join(process.cwd(), '.torrent-cache');
     this._maxFileSize = opts.maxFileSize || MAX_FILE_SIZE;
     this._maxConcurrent = opts.maxConcurrent || DEFAULT_MAX_CONCURRENT;
@@ -227,7 +228,7 @@ class TorrentEngine {
     try {
       const isVideo = await Promise.race([
         this._validateMagicBytes(file),
-        new Promise(resolve => setTimeout(() => resolve(true), 10000)),
+        new Promise(resolve => setTimeout(() => resolve(false), 10000)),
       ]);
       if (!isVideo) {
         console.warn(`[Security] Magic byte check failed for "${file.name}"`);
@@ -235,7 +236,9 @@ class TorrentEngine {
         return;
       }
     } catch (err) {
-      console.warn(`[Security] Magic byte error for "${file.name}": ${err.message} — allowing`);
+      console.warn(`[Security] Magic byte error for "${file.name}": ${err.message} — rejecting`);
+      res.status(403).json({ error: 'File failed video format validation' });
+      return;
     }
 
     this._touchTorrent(hash);
@@ -273,7 +276,7 @@ class TorrentEngine {
       const stream = file.createReadStream({ start, end });
       const meter = this._createMeter(hash, 'direct');
       stream.pipe(meter).pipe(res);
-      stream.on('error', () => { meter.destroy(); res.end(); });
+      stream.on('error', (err) => { console.error(`[TorrentEngine] Stream error: ${err.message}`); meter.destroy(); if (!res.destroyed) res.end(); });
       res.on('close', () => { stream.destroy(); meter.destroy(); });
     } else {
       res.status(200);
@@ -286,7 +289,7 @@ class TorrentEngine {
       const stream = file.createReadStream();
       const meter = this._createMeter(hash, 'direct');
       stream.pipe(meter).pipe(res);
-      stream.on('error', () => { meter.destroy(); res.end(); });
+      stream.on('error', (err) => { console.error(`[TorrentEngine] Stream error: ${err.message}`); meter.destroy(); if (!res.destroyed) res.end(); });
       res.on('close', () => { stream.destroy(); meter.destroy(); });
     }
   }
@@ -323,7 +326,7 @@ class TorrentEngine {
     try {
       const isVideo = await Promise.race([
         this._validateMagicBytes(file),
-        new Promise(resolve => setTimeout(() => resolve(true), 10000)),
+        new Promise(resolve => setTimeout(() => resolve(false), 10000)),
       ]);
       if (!isVideo) {
         console.warn(`[Security] Magic byte check failed for "${file.name}"`);
@@ -331,7 +334,9 @@ class TorrentEngine {
         return;
       }
     } catch (err) {
-      console.warn(`[Security] Magic byte error for "${file.name}": ${err.message} — allowing`);
+      console.warn(`[Security] Magic byte error for "${file.name}": ${err.message} — rejecting`);
+      res.status(403).json({ error: 'File failed video format validation' });
+      return;
     }
 
     this._touchTorrent(hash);
@@ -389,6 +394,8 @@ class TorrentEngine {
       console.error(`[TorrentEngine] FFmpeg spawn error: ${err.message}`);
       if (!res.headersSent) {
         res.status(500).json({ error: 'Remux failed — FFmpeg not available' });
+      } else if (!res.destroyed) {
+        res.destroy();
       }
     });
 
@@ -396,7 +403,7 @@ class TorrentEngine {
       if (code && code !== 0 && code !== 255) {
         console.warn(`[TorrentEngine] FFmpeg exited with code ${code}`);
       }
-      res.end();
+      if (!res.destroyed) res.end();
     });
 
     res.on('close', () => {
@@ -463,8 +470,9 @@ class TorrentEngine {
    */
   _createMeter(hash, mode) {
     const now = Date.now();
-    const stat = { bytesSent: 0, startTime: now, lastBytes: 0, lastTime: now, egressRate: 0, mode };
-    this._streamStats.set(hash, stat);
+    const streamKey = `${hash}-${++this._streamIdCounter}`;
+    const stat = { bytesSent: 0, startTime: now, lastBytes: 0, lastTime: now, egressRate: 0, mode, hash };
+    this._streamStats.set(streamKey, stat);
 
     const meter = new Transform({
       transform(chunk, _enc, cb) {
@@ -480,8 +488,8 @@ class TorrentEngine {
       },
     });
 
-    meter.on('close', () => this._streamStats.delete(hash));
-    meter.on('error', () => this._streamStats.delete(hash));
+    meter.on('close', () => this._streamStats.delete(streamKey));
+    meter.on('error', () => this._streamStats.delete(streamKey));
     return meter;
   }
 
@@ -496,7 +504,11 @@ class TorrentEngine {
     const sw = entry.engine.swarm;
     const torrentSpeed = sw ? sw.downloadSpeed() : 0; // bytes/sec from peers
     const numPeers = sw ? sw.wires.length : 0;
-    const stat = this._streamStats.get(hash);
+    // Find the most recent active stream stat for this hash
+    let stat = null;
+    for (const s of this._streamStats.values()) {
+      if (s.hash === hash && (!stat || s.startTime > stat.startTime)) stat = s;
+    }
 
     // Check if any file is still incomplete
     let progress = null;
@@ -509,7 +521,10 @@ class TorrentEngine {
       } catch {}
     }
 
-    const clientEgress = stat ? stat.egressRate : 0;
+    // Decay egress rate to 0 if no data has flowed for >5 seconds
+    const STALE_THRESHOLD = 5000;
+    let clientEgress = stat ? stat.egressRate : 0;
+    if (stat && Date.now() - stat.lastTime > STALE_THRESHOLD) clientEgress = 0;
     const clientMode = stat ? stat.mode : null;
     const clientBytesSent = stat ? stat.bytesSent : 0;
     const clientUptime = stat ? Date.now() - stat.startTime : 0;
@@ -589,8 +604,16 @@ class TorrentEngine {
 
   _extractHash(input) {
     if (/^[0-9a-f]{40}$/i.test(input)) return input.toLowerCase();
-    const match = input.match(/btih:([a-fA-F0-9]{40})/);
-    if (match) return match[1].toLowerCase();
+    const hexMatch = input.match(/btih:([a-fA-F0-9]{40})/);
+    if (hexMatch) return hexMatch[1].toLowerCase();
+    // Support Base32-encoded info hashes (32 chars)
+    const b32Match = input.match(/btih:([A-Za-z2-7]{32})/);
+    if (b32Match) {
+      try {
+        const hex = Buffer.from(b32Match[1], 'base32').toString('hex').toLowerCase();
+        if (hex.length === 40) return hex;
+      } catch {}
+    }
     return null;
   }
 
@@ -644,9 +667,21 @@ class TorrentEngine {
   }
 
   _evictOldest() {
+    // Prefer evicting torrents with no active client streams
+    const activeStreamHashes = new Set();
+    for (const s of this._streamStats.values()) activeStreamHashes.add(s.hash);
+
     let oldest = null, oldestHash = null;
+    // First pass: try to find a non-streaming torrent to evict
     for (const [hash, entry] of this._active) {
+      if (activeStreamHashes.has(hash)) continue;
       if (!oldest || entry.lastAccess < oldest.lastAccess) { oldest = entry; oldestHash = hash; }
+    }
+    // Fallback: evict the oldest regardless
+    if (!oldestHash) {
+      for (const [hash, entry] of this._active) {
+        if (!oldest || entry.lastAccess < oldest.lastAccess) { oldest = entry; oldestHash = hash; }
+      }
     }
     if (oldestHash) this._removeTorrent(oldestHash);
   }

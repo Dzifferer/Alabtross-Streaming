@@ -11,6 +11,14 @@
 (function () {
   'use strict';
 
+  // Playback event tracing (added in b2f63a5 to diagnose direct playback
+  // stalls on a single problem file). Firehose-style — one console.log
+  // per video element event during load, including 'progress' which
+  // fires many times per second. Gated off by default so it doesn't
+  // pile console I/O onto every failing playback attempt in production.
+  // Flip to true when actively debugging playback.
+  const DEBUG_PLAYBACK = false;
+
   let _streamLoadGeneration = 0; // incremented each loadStreams call to detect stale async completions
 
   // ─── State ───────────────────────────────────────
@@ -4001,7 +4009,12 @@
 
       // Diagnostic: log every significant video element event so we can
       // see exactly what the browser is doing during playback setup.
+      // Gated behind DEBUG_PLAYBACK — 'progress' fires many times per
+      // second during load, and during failing playback attempts the
+      // hard timer lets us accumulate 90+ seconds of log spam per try
+      // across the probe → direct → remux → transcode fallback chain.
       const logEvent = (name) => {
+        if (!DEBUG_PLAYBACK) return;
         if (settled) return;
         const elapsed = Math.round((Date.now() - startedAt) / 1000);
         console.log(`[Library/${action}] +${elapsed}s ${name} readyState=${v.readyState} networkState=${v.networkState} buffered=${v.buffered.length > 0 ? v.buffered.end(0).toFixed(1) + 's' : '0s'}`);

@@ -818,8 +818,8 @@ function needsRemux(name) {
  * - x265/HEVC streams are kept but marked as needing remux
  * - Sort: native-playable first, then remuxable, then by seeds
  */
-function filterAndRank(streams) {
-  console.log(`[FilterRank] Input: ${streams.length} streams`);
+function filterAndRank(streams, expectedTitle) {
+  console.log(`[FilterRank] Input: ${streams.length} streams, expectedTitle: "${expectedTitle || ''}"`);
 
   // Filter confirmed-dead torrents (seeds === 0 and seed count was actually parsed).
   // Keep streams where seed count is unknown (_seedsUnknown) — they may still be alive.
@@ -854,10 +854,34 @@ function filterAndRank(streams) {
     console.log(`[FilterRank] After format filter: ${filtered.length} (removed ${beforeFormat - filtered.length} AVI/WMV)`);
   }
 
-  // Sort: native browser-playable > remuxable > unknown,
-  // then prefer direct sources (TPB/YTS/1337x/EZTV) over Torrentio,
+  // Score title relevance — penalize torrents that don't match the expected title
+  if (expectedTitle) {
+    const normalise = s => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const expectedWords = normalise(expectedTitle).split(/\s+/).filter(w => w.length > 1);
+    for (const s of filtered) {
+      const torrentName = normalise((s.title || '').split('\n')[0]);
+      // Count how many words from the expected title appear in the torrent name
+      const matchCount = expectedWords.filter(w => torrentName.includes(w)).length;
+      s._titleRelevance = expectedWords.length > 0 ? matchCount / expectedWords.length : 1;
+    }
+    const mismatches = filtered.filter(s => s._titleRelevance < 0.5).length;
+    if (mismatches > 0) {
+      console.log(`[FilterRank] Title relevance: ${mismatches} streams have <50% word match with "${expectedTitle}"`);
+    }
+  } else {
+    for (const s of filtered) s._titleRelevance = 1;
+  }
+
+  // Sort: title relevance first (>= 50% match vs < 50%),
+  // then browser-playable > remuxable > unknown,
+  // then prefer direct sources over Torrentio,
   // then by seeds descending
   filtered.sort((a, b) => {
+    // Strong title mismatches sink to the bottom
+    const relA = a._titleRelevance >= 0.5 ? 1 : 0;
+    const relB = b._titleRelevance >= 0.5 ? 1 : 0;
+    if (relA !== relB) return relB - relA;
+
     const scoreA = a.browserPlayable ? 2 : (a.remuxPlayable ? 1 : 0);
     const scoreB = b.browserPlayable ? 2 : (b.remuxPlayable ? 1 : 0);
     if (scoreA !== scoreB) return scoreB - scoreA;
@@ -865,6 +889,8 @@ function filterAndRank(streams) {
     const directA = (a.source && a.source !== 'Torrentio') ? 1 : 0;
     const directB = (b.source && b.source !== 'Torrentio') ? 1 : 0;
     if (directA !== directB) return directB - directA;
+    // Among similar relevance, prefer higher relevance
+    if (Math.abs(a._titleRelevance - b._titleRelevance) > 0.2) return b._titleRelevance - a._titleRelevance;
     return (b.seeds || 0) - (a.seeds || 0);
   });
 
@@ -949,7 +975,7 @@ async function getMovieStreams(imdbId, title) {
 
   console.log(`[Streams] Combined: ${combined.length} unique streams for ${id}`);
 
-  const ranked = filterAndRank(combined);
+  const ranked = filterAndRank(combined, title);
   console.log(`[Streams] Total: ${ranked.length} streams (${ranked.filter(s => s.browserPlayable).length} browser-playable, ${ranked.filter(s => s.remuxPlayable).length} remuxable) for ${id}`);
   if (ranked.length > 0) setCachedStreams(cacheKey, ranked);
   return ranked;
@@ -1088,7 +1114,7 @@ async function getSeriesStreams(imdbId, season, episode, title, opts = {}) {
     }
   }
 
-  const ranked = filterAndRank(combined);
+  const ranked = filterAndRank(combined, title);
   const batchCount = ranked.filter(s => s.isBatch).length;
   console.log(`[Streams] Total: ${ranked.length} streams (${ranked.filter(s => s.browserPlayable).length} browser-playable, ${ranked.filter(s => s.remuxPlayable).length} remuxable, ${batchCount} batch) for ${id} ${seTag}`);
   if (ranked.length > 0) setCachedStreams(cacheKey, ranked);
@@ -1297,7 +1323,7 @@ async function getSeasonPackStreams(title, season, imdbId) {
 
   console.log(`[SeasonPack] After pack filter: ${packs.length} packs`);
 
-  const ranked = filterAndRank(packs);
+  const ranked = filterAndRank(packs, title);
   if (ranked.length > 0) setCachedStreams(cacheKey, ranked);
   return ranked;
 }
@@ -1384,7 +1410,7 @@ async function getCompleteStreams(title, imdbId) {
 
   console.log(`[Complete] After pack filter: ${packs.length} packs`);
 
-  const ranked = filterAndRank(packs);
+  const ranked = filterAndRank(packs, title);
   if (ranked.length > 0) setCachedStreams(cacheKey, ranked);
   return ranked;
 }

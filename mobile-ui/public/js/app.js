@@ -2224,16 +2224,78 @@
       const onPlaying = () => {
         if (!_curtainAnimating) dom.playerOverlay.classList.add('hidden');
       };
-      const onEnded = () => handlePlaybackEnded();
+
+      // End-of-playback detection. Torrent streams often reach the final
+      // frame without the browser firing the native 'ended' event — the
+      // media element's duration metadata can be a hair short of the
+      // actual data, or the final bytes stall, leaving the video paused
+      // on the last frame. We therefore combine the native event with a
+      // near-end fallback driven by timeupdate + pause.
+      let _endFired = false;
+      let _nearEndTimer = null;
+      const fireEnded = (reason) => {
+        if (_endFired) return;
+        _endFired = true;
+        if (_nearEndTimer) { clearTimeout(_nearEndTimer); _nearEndTimer = null; }
+        console.log(`[autoplay] playback ended (${reason})`);
+        handlePlaybackEnded();
+      };
+      const onEnded = () => fireEnded('ended-event');
+      const remainingSecs = () => {
+        const v = dom.videoPlayer;
+        const dur = v.duration;
+        if (!Number.isFinite(dur) || dur <= 0) return Infinity;
+        return Math.max(0, dur - v.currentTime);
+      };
+      // Primary detection: close enough that the native 'ended' event
+      // should be moments away. Used for timeupdate-based fallback.
+      const isAtEnd = () => remainingSecs() <= 0.75;
+      // Conservative detection: the stream visibly stalled in the final
+      // seconds. Used for pause-based fallback so a user pausing during
+      // credits (more than a few seconds from the end) doesn't trigger
+      // autoplay by accident.
+      const isStalledAtEnd = () => remainingSecs() <= 2.5;
+      const onTimeUpdate = () => {
+        if (_endFired || _nearEndTimer) return;
+        if (!isAtEnd()) return;
+        // Give the browser a short window to fire 'ended' on its own.
+        // If it doesn't, trigger autoplay handling ourselves.
+        _nearEndTimer = setTimeout(() => {
+          _nearEndTimer = null;
+          if (_endFired) return;
+          if (isAtEnd()) fireEnded('near-end-timeout');
+        }, 1500);
+      };
+      const onPause = () => {
+        // Torrent streams sometimes stall a few frames before the
+        // native 'ended' fires, leaving the video paused in the final
+        // couple of seconds. Treat that as end-of-playback, but only
+        // within a tight window so ordinary user pauses during credits
+        // don't trigger autoplay by mistake.
+        if (_endFired || _nearEndTimer) return;
+        if (!isStalledAtEnd()) return;
+        _nearEndTimer = setTimeout(() => {
+          _nearEndTimer = null;
+          if (_endFired) return;
+          if (dom.videoPlayer.paused && isStalledAtEnd()) {
+            fireEnded('pause-at-stream-end');
+          }
+        }, 1500);
+      };
       dom.videoPlayer.addEventListener('waiting', onStalled);
       dom.videoPlayer.addEventListener('stalled', onStalled);
       dom.videoPlayer.addEventListener('playing', onPlaying);
       dom.videoPlayer.addEventListener('ended', onEnded);
+      dom.videoPlayer.addEventListener('timeupdate', onTimeUpdate);
+      dom.videoPlayer.addEventListener('pause', onPause);
       _playStreamCleanup = () => {
         dom.videoPlayer.removeEventListener('waiting', onStalled);
         dom.videoPlayer.removeEventListener('stalled', onStalled);
         dom.videoPlayer.removeEventListener('playing', onPlaying);
         dom.videoPlayer.removeEventListener('ended', onEnded);
+        dom.videoPlayer.removeEventListener('timeupdate', onTimeUpdate);
+        dom.videoPlayer.removeEventListener('pause', onPause);
+        if (_nearEndTimer) { clearTimeout(_nearEndTimer); _nearEndTimer = null; }
       };
     } catch (e) {
       if (statusInterval) clearInterval(statusInterval);
@@ -2298,28 +2360,41 @@
     return { ...next, absoluteEpisode };
   }
 
+  // Return shape:
+  //   { status: 'no-collection' }       — movie is not part of a collection
+  //   { status: 'ok', next }             — found the next movie
+  //   { status: 'end' }                  — this is the final movie in the collection
+  //   { status: 'not-found' }            — current movie not present in server response
+  //   { status: 'error', message }       — fetch / parse failure
   async function findNextMovieInCollection(meta) {
-    if (!meta || !meta.collectionId) return null;
+    if (!meta || !meta.collectionId) return { status: 'no-collection' };
     const currentImdb = meta.imdb_id || (typeof meta.id === 'string' && meta.id.startsWith('tt') ? meta.id : null);
-    if (!currentImdb) return null;
+    if (!currentImdb) return { status: 'no-collection' };
 
     try {
       const resp = await fetch(`/api/collections/${encodeURIComponent(meta.collectionId)}`);
-      if (!resp.ok) return null;
+      if (!resp.ok) {
+        return { status: 'error', message: `Collection lookup failed (HTTP ${resp.status})` };
+      }
       const data = await resp.json();
       const movies = Array.isArray(data.movies) ? data.movies : [];
       // Server already sorts by year, but sort again defensively.
       const sorted = movies
         .filter(m => m && m.imdb_id)
         .slice()
-        .sort((a, b) => (a.year || '9999').localeCompare(b.year || '9999'));
+        .sort((a, b) => String(a.year || '9999').localeCompare(String(b.year || '9999')));
+
+      if (sorted.length === 0) {
+        return { status: 'error', message: 'Collection returned no movies' };
+      }
 
       const idx = sorted.findIndex(m => m.imdb_id === currentImdb);
-      if (idx < 0 || idx >= sorted.length - 1) return null;
-      return sorted[idx + 1];
+      if (idx < 0) return { status: 'not-found' };
+      if (idx >= sorted.length - 1) return { status: 'end' };
+      return { status: 'ok', next: sorted[idx + 1] };
     } catch (e) {
       console.warn('[autoplay] collection fetch failed:', e);
-      return null;
+      return { status: 'error', message: e.message || 'Collection lookup failed' };
     }
   }
 
@@ -2422,8 +2497,22 @@
     }
 
     if (state.currentType === 'movie') {
-      const next = await findNextMovieInCollection(meta);
-      if (!next || !next.imdb_id) return; // silent — most movies aren't in a collection
+      const result = await findNextMovieInCollection(meta);
+      if (result.status === 'no-collection') return; // silent — most movies aren't in a collection
+      if (result.status === 'end') {
+        showToast(`End of ${meta.collectionName || 'collection'}`);
+        return;
+      }
+      if (result.status === 'not-found') {
+        showToast('Could not locate this movie in its collection');
+        return;
+      }
+      if (result.status === 'error') {
+        showToast(`Auto-play unavailable: ${result.message}`);
+        return;
+      }
+      const next = result.next;
+      if (!next || !next.imdb_id) return;
       showUpNextOverlay({
         title: next.name || 'Next movie',
         subtitle: next.year ? `${meta.collectionName || 'Next in collection'} · ${next.year}` : (meta.collectionName || ''),

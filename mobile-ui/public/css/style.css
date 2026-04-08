@@ -770,73 +770,6 @@ html, body {
   background: rgba(255,255,255,0.2);
 }
 
-/* Library collection groups */
-.library-collection-group {
-  grid-column: 1 / -1;
-}
-
-.library-collection-header {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text-primary, #fff);
-  padding: 8px 0 4px;
-  border-bottom: 1px solid rgba(255,255,255,0.1);
-  margin-bottom: 8px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.library-collection-header::before {
-  content: '\25BC';
-  font-size: 10px;
-  transition: transform 0.2s;
-}
-
-.library-collection-header.collapsed::before {
-  transform: rotate(-90deg);
-}
-
-.library-collection-movies {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
-  padding: 4px 0;
-}
-
-@media (min-width: 480px) {
-  .library-collection-movies { grid-template-columns: repeat(3, 1fr); }
-}
-@media (min-width: 768px) {
-  .library-collection-movies { grid-template-columns: repeat(4, 1fr); }
-}
-@media (min-width: 1024px) {
-  .library-collection-movies { grid-template-columns: repeat(5, 1fr); }
-}
-
-.library-collection-movies .card {
-  width: 100%;
-}
-
-.library-collection-movies .card-poster {
-  width: 100%;
-  height: 0;
-  padding-bottom: 150%;
-}
-
-.library-collection-movies .card-poster img {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.library-collection-movies.collapsed {
-  display: none;
-}
-
 /* ===== Library Group Tiles ===== */
 .library-group-tile {
   cursor: pointer;
@@ -892,6 +825,146 @@ html, body {
 
 .library-group-overlay-grid {
   padding: 16px;
+}
+
+/* ===== Library Show Overlay (seasons + episode list) ===== */
+.library-show-overlay-body {
+  padding: 12px 16px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.library-show-season {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.library-show-season-header {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary, #fff);
+  padding: 6px 0 4px;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+}
+
+.library-show-season-count {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-muted);
+  margin-left: 6px;
+}
+
+.library-show-episode-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.library-episode-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--bg-card);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.2s;
+  overflow: hidden;
+}
+
+.library-episode-row:active {
+  background: var(--bg-elevated);
+}
+
+.library-episode-row.is-queued,
+.library-episode-row.is-downloading,
+.library-episode-row.is-converting {
+  cursor: default;
+}
+
+.library-episode-num {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-muted);
+  min-width: 28px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.library-episode-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.library-episode-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary, #fff);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-episode-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-episode-status {
+  font-size: 11px;
+  margin-top: 4px;
+  color: var(--text-muted);
+}
+
+.library-episode-status.downloading { color: var(--accent, #4ade80); }
+.library-episode-status.converting { color: var(--accent, #4ade80); }
+.library-episode-status.paused { color: var(--warning, #f59e0b); }
+.library-episode-status.queued { color: var(--text-muted); }
+.library-episode-status.failed { color: var(--danger, #ef4444); }
+
+.library-episode-progress {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: rgba(0,0,0,0.4);
+}
+
+.library-episode-progress-bar {
+  height: 100%;
+  background: var(--accent, #4ade80);
+  transition: width 0.4s;
+}
+
+.library-episode-progress-bar.converting {
+  background: var(--accent, #4ade80);
+  opacity: 0.7;
+}
+
+.library-episode-remove {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  padding: 6px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.library-episode-remove:active {
+  background: rgba(255,255,255,0.08);
+  color: var(--danger, #ef4444);
 }
 
 /* ===== Library Categorize Button ===== */

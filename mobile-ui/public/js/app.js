@@ -838,7 +838,10 @@
     const poster = isSafePosterUrl(group.poster || '') ? group.poster : '';
     const name = escapeHTML(group.name || 'Group');
     const count = group.count;
-    const typeLabel = group.type === 'collection' ? 'movies' : 'titles';
+    let typeLabel;
+    if (group.type === 'collection') typeLabel = count === 1 ? 'movie' : 'movies';
+    else if (group.type === 'show') typeLabel = count === 1 ? 'episode' : 'episodes';
+    else typeLabel = count === 1 ? 'title' : 'titles';
 
     return `
       <div class="card library-group-tile" data-group-id="${escapeHTML(group.id)}" data-group-type="${group.type}">
@@ -2983,7 +2986,7 @@
               const yearB = (metaMap[b.imdbId]?.year || b.year || '9999');
               return yearA.localeCompare(yearB);
             });
-            _libraryGroupData[colId] = { name: col.name, poster: col.poster || colMovies[0].poster, movies: colMovies };
+            _libraryGroupData[colId] = { type: 'collection', name: col.name, poster: col.poster || colMovies[0].poster, movies: colMovies };
             html += libraryGroupTileHTML({ id: colId, name: col.name, poster: col.poster || colMovies[0].poster, count: colMovies.length, type: 'collection' });
           } else {
             ungroupedMovies.push(...colMovies);
@@ -3037,7 +3040,7 @@
             return yearA.localeCompare(yearB);
           });
           const genreId = 'genre_' + genre.toLowerCase().replace(/[^a-z0-9]/g, '_');
-          _libraryGroupData[genreId] = { name: genre, poster: genreMovies[0].poster, movies: genreMovies };
+          _libraryGroupData[genreId] = { type: 'genre', name: genre, poster: genreMovies[0].poster, movies: genreMovies };
           html += libraryGroupTileHTML({ id: genreId, name: genre, poster: genreMovies[0].poster, count: genreMovies.length, type: 'genre' });
         }
 
@@ -3059,45 +3062,40 @@
         }
       }
 
-      // TV Shows section (collapsible show headers with nested collapsible seasons)
+      // TV Shows section — render each show as a poster tile (like movies).
+      // Tapping a tile opens an overlay with seasons + episode list.
       if (showGroups.size > 0) {
         html += `<div class="library-section-header">TV Shows</div>`;
         let showIndex = 0;
         for (const [, group] of showGroups) {
           const totalEpisodes = [...group.seasons.values()].reduce((sum, eps) => sum + eps.length, 0);
           const showId = 'show_' + showIndex++;
-          html += `<div class="library-collection-group">`;
-          html += `<div class="library-collection-header collapsed" data-collection-id="${escapeHTML(showId)}">${escapeHTML(group.name)}${group.year ? ' (' + escapeHTML(group.year) + ')' : ''} — ${totalEpisodes} episode${totalEpisodes !== 1 ? 's' : ''}</div>`;
-          html += `<div class="library-collection-movies collapsed" data-collection-id="${escapeHTML(showId)}">`;
-          const sortedSeasons = [...group.seasons.keys()].sort((a, b) => a - b);
-          for (const seasonNum of sortedSeasons) {
-            const episodes = group.seasons.get(seasonNum);
-            const seasonId = showId + '_s' + seasonNum;
-            html += `<div class="library-collection-group" style="grid-column:1/-1">`;
-            html += `<div class="library-collection-header collapsed" data-collection-id="${escapeHTML(seasonId)}" style="padding-left:12px;font-size:13px">Season ${seasonNum} (${episodes.length})</div>`;
-            html += `<div class="library-collection-movies collapsed" data-collection-id="${escapeHTML(seasonId)}">`;
-            html += episodes.map(ep => renderLibraryItem(ep)).join('');
-            html += `</div></div>`;
-          }
-          html += `</div></div>`;
+          // Convert seasons Map -> sorted array for the overlay renderer.
+          const seasonsArr = [...group.seasons.entries()]
+            .sort((a, b) => a[0] - b[0])
+            .map(([seasonNum, episodes]) => ({ season: seasonNum, episodes }));
+          _libraryGroupData[showId] = {
+            type: 'show',
+            name: group.name,
+            year: group.year,
+            poster: group.poster,
+            imdbId: group.imdbId,
+            seasons: seasonsArr,
+            totalEpisodes,
+          };
+          html += libraryGroupTileHTML({
+            id: showId,
+            name: group.name,
+            poster: group.poster,
+            count: totalEpisodes,
+            type: 'show',
+          });
         }
       }
 
       dom.libraryContent.innerHTML = html;
 
-      // Attach collapse/expand handlers for TV Show headers only
-      dom.libraryContent.querySelectorAll('.library-collection-header').forEach(header => {
-        header.addEventListener('click', () => {
-          const colId = header.dataset.collectionId;
-          const moviesDiv = dom.libraryContent.querySelector(`.library-collection-movies[data-collection-id="${CSS.escape(colId)}"]`);
-          if (moviesDiv) {
-            header.classList.toggle('collapsed');
-            moviesDiv.classList.toggle('collapsed');
-          }
-        });
-      });
-
-      // Attach click handlers for movie collection/genre tiles
+      // Attach click handlers for movie collection/genre/show tiles
       attachLibraryGroupTileListeners(dom.libraryContent, _libraryGroupData);
 
       attachLibraryHandlers();
@@ -3221,7 +3219,18 @@
       document.getElementById('view-library').appendChild(overlay);
     }
 
-    const name = escapeHTML(groupData.name);
+    const titleText = groupData.name + (groupData.type === 'show' && groupData.year ? ` (${groupData.year})` : '');
+    const name = escapeHTML(titleText);
+
+    let bodyHtml;
+    if (groupData.type === 'show') {
+      bodyHtml = `<div class="library-show-overlay-body">${renderShowOverlayBody(groupData, {})}</div>`;
+    } else {
+      bodyHtml = `<div class="library-group-overlay-grid library-grid">
+        ${(groupData.movies || []).map(item => renderLibraryItem(item)).join('')}
+      </div>`;
+    }
+
     overlay.innerHTML = `
       <div class="library-group-overlay-header">
         <button class="library-group-overlay-back" aria-label="Back">
@@ -3231,9 +3240,7 @@
         </button>
         <span class="library-group-overlay-title">${name}</span>
       </div>
-      <div class="library-group-overlay-grid library-grid">
-        ${groupData.movies.map(item => renderLibraryItem(item)).join('')}
-      </div>
+      ${bodyHtml}
     `;
 
     overlay.classList.remove('hidden');
@@ -3241,8 +3248,26 @@
     const emptyEl = document.getElementById('library-empty');
     if (emptyEl) emptyEl.classList.add('hidden');
 
-    // Attach play/remove handlers inside overlay
-    attachLibraryHandlers(overlay.querySelector('.library-group-overlay-grid'));
+    if (groupData.type === 'show') {
+      attachShowOverlayHandlers(overlay);
+      // Fetch IMDb episode titles in background and re-render the body
+      // when they arrive. We don't block the initial render on this.
+      if (groupData.imdbId && /^tt\d+$/.test(groupData.imdbId)) {
+        api.getMeta('series', groupData.imdbId).then(meta => {
+          const stillOpen = !overlay.classList.contains('hidden');
+          if (!stillOpen) return;
+          const titleMap = buildEpisodeTitleMap(meta);
+          if (Object.keys(titleMap).length === 0) return;
+          const body = overlay.querySelector('.library-show-overlay-body');
+          if (!body) return;
+          body.innerHTML = renderShowOverlayBody(groupData, titleMap);
+          attachShowOverlayHandlers(overlay);
+        }).catch(() => {});
+      }
+    } else {
+      // Attach play/remove handlers inside overlay (movie collection/genre)
+      attachLibraryHandlers(overlay.querySelector('.library-group-overlay-grid'));
+    }
 
     // Back button
     overlay.querySelector('.library-group-overlay-back').addEventListener('click', () => {
@@ -3253,6 +3278,131 @@
     overlay.querySelectorAll('img.loading').forEach(img => {
       img.addEventListener('load', () => img.classList.remove('loading'));
       img.addEventListener('error', () => { img.style.display = 'none'; });
+    });
+  }
+
+  // Build a map of `s${season}e${episode}` -> IMDb episode title
+  // from a Cinemeta/TMDB series meta object.
+  function buildEpisodeTitleMap(meta) {
+    const map = {};
+    if (!meta || !Array.isArray(meta.videos)) return map;
+    for (const v of meta.videos) {
+      if (v.season == null || v.episode == null) continue;
+      const key = `s${v.season}e${v.episode}`;
+      const title = v.title || v.name;
+      if (title) map[key] = title;
+    }
+    return map;
+  }
+
+  // Render the body of a show overlay: each season as a list section,
+  // and each episode as a row showing the IMDb title (when available).
+  function renderShowOverlayBody(groupData, titleMap) {
+    const seasons = groupData.seasons || [];
+    let html = '';
+    for (const { season, episodes } of seasons) {
+      html += `<div class="library-show-season">`;
+      html += `<div class="library-show-season-header">Season ${season} <span class="library-show-season-count">(${episodes.length} episode${episodes.length !== 1 ? 's' : ''})</span></div>`;
+      html += `<div class="library-show-episode-list">`;
+      for (const ep of episodes) {
+        html += renderLibraryEpisodeRow(ep, titleMap);
+      }
+      html += `</div></div>`;
+    }
+    return html;
+  }
+
+  // Render a single episode row for the show overlay. Shows the IMDb
+  // title when we have one, otherwise falls back to the filename-derived
+  // name. Includes status indicators (downloading/queued/etc).
+  function renderLibraryEpisodeRow(item, titleMap) {
+    const epNum = item.episode != null ? item.episode : null;
+    const seasonNum = item.season != null ? item.season : null;
+    const key = (seasonNum != null && epNum != null) ? `s${seasonNum}e${epNum}` : null;
+    const imdbTitle = key ? (titleMap || {})[key] : null;
+    const fallbackName = item.name || (epNum != null ? `Episode ${epNum}` : 'Episode');
+    const displayTitle = imdbTitle || fallbackName;
+    const subText = imdbTitle && imdbTitle !== fallbackName ? fallbackName : '';
+    const numLabel = epNum != null ? String(epNum) : '?';
+
+    let statusHtml = '';
+    let statusClass = '';
+    const status = item.status;
+    if (status === 'downloading') {
+      const speed = item.downloadSpeed > 0 ? formatSpeed(item.downloadSpeed) : '';
+      statusClass = 'is-downloading';
+      statusHtml = `
+        <div class="library-episode-status downloading">${item.progress || 0}%${speed ? ' &middot; ' + speed : ''}</div>
+        <div class="library-episode-progress"><div class="library-episode-progress-bar" style="width:${item.progress || 0}%"></div></div>
+      `;
+    } else if (status === 'converting') {
+      const pct = item.convertProgress || 0;
+      statusClass = 'is-converting';
+      statusHtml = `
+        <div class="library-episode-status converting">Converting ${pct}%</div>
+        <div class="library-episode-progress"><div class="library-episode-progress-bar converting" style="width:${pct}%"></div></div>
+      `;
+    } else if (status === 'paused') {
+      statusClass = 'is-paused';
+      statusHtml = `<div class="library-episode-status paused">Paused ${item.progress || 0}%</div>`;
+    } else if (status === 'queued') {
+      const posText = item._queuePosition ? `#${item._queuePosition} in queue` : 'Queued';
+      statusClass = 'is-queued';
+      statusHtml = `<div class="library-episode-status queued">${posText}</div>`;
+    } else if (status === 'failed') {
+      statusClass = 'is-failed';
+      statusHtml = `<div class="library-episode-status failed">Failed &middot; tap to retry</div>`;
+    } else if (status === 'complete') {
+      statusClass = 'is-complete';
+    }
+
+    return `
+      <div class="library-episode-row ${statusClass}" data-id="${escapeHTML(item.id)}" data-status="${escapeHTML(status || '')}">
+        <div class="library-episode-num">${numLabel}</div>
+        <div class="library-episode-info">
+          <div class="library-episode-title">${escapeHTML(displayTitle)}</div>
+          ${subText ? `<div class="library-episode-sub">${escapeHTML(subText)}</div>` : ''}
+          ${statusHtml}
+        </div>
+        <button class="library-episode-remove" data-id="${escapeHTML(item.id)}" title="Remove">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+        </button>
+      </div>
+    `;
+  }
+
+  function attachShowOverlayHandlers(overlay) {
+    // Click row -> play (or resume/retry depending on status)
+    overlay.querySelectorAll('.library-episode-row').forEach(row => {
+      row.addEventListener('click', async (e) => {
+        // Ignore clicks on the remove button
+        if (e.target.closest('.library-episode-remove')) return;
+        const id = row.dataset.id;
+        const status = row.dataset.status;
+        if (status === 'complete' || status === 'converting') {
+          playLibraryItem(id);
+        } else if (status === 'paused') {
+          try {
+            await fetch(`/api/library/${encodeURIComponent(id)}/resume`, { method: 'POST' });
+            showToast('Resuming download...');
+            loadLibrary();
+          } catch { showToast('Failed to resume'); }
+        } else if (status === 'failed') {
+          try {
+            await fetch(`/api/library/${encodeURIComponent(id)}/retry`, { method: 'POST' });
+            showToast('Retrying download...');
+            loadLibrary();
+          } catch { showToast('Failed to retry'); }
+        }
+      });
+    });
+
+    // Remove button on each episode row
+    overlay.querySelectorAll('.library-episode-remove').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        removeLibraryItem(btn.dataset.id);
+      });
     });
   }
 
@@ -4030,32 +4180,61 @@
         const downloading = items.filter(i => i.status === 'downloading');
 
         // Update progress for downloading items in-place
+        const showOverlay = document.getElementById('library-group-overlay');
+        const showOverlayOpen = showOverlay && !showOverlay.classList.contains('hidden');
         for (const item of items) {
           const el = dom.libraryContent.querySelector(`.card[data-id="${CSS.escape(item.id)}"]`);
-          if (!el) continue;
-
-          if (item.status === 'downloading') {
-            const bar = el.querySelector('.library-card-progress-bar');
-            const overlay = el.querySelector('.library-card-overlay');
-            const meta = el.querySelector('.library-card-meta');
-            if (bar) bar.style.width = item.progress + '%';
-            if (overlay) overlay.textContent = item.progress + '%';
-            if (meta) {
-              const speed = item.downloadSpeed > 0 ? formatSpeed(item.downloadSpeed) : '';
-              meta.innerHTML = `${speed || 'Starting...'}${item.numPeers ? ' &middot; ' + item.numPeers + ' peers' : ''}`;
+          if (el) {
+            if (item.status === 'downloading') {
+              const bar = el.querySelector('.library-card-progress-bar');
+              const overlay = el.querySelector('.library-card-overlay');
+              const meta = el.querySelector('.library-card-meta');
+              if (bar) bar.style.width = item.progress + '%';
+              if (overlay) overlay.textContent = item.progress + '%';
+              if (meta) {
+                const speed = item.downloadSpeed > 0 ? formatSpeed(item.downloadSpeed) : '';
+                meta.innerHTML = `${speed || 'Starting...'}${item.numPeers ? ' &middot; ' + item.numPeers + ' peers' : ''}`;
+              }
+            } else if (item.status === 'converting') {
+              const bar = el.querySelector('.library-card-progress-bar');
+              const overlay = el.querySelector('.library-card-overlay');
+              const meta = el.querySelector('.library-card-meta');
+              const pct = item.convertProgress || 0;
+              if (bar) bar.style.width = pct + '%';
+              if (overlay) overlay.textContent = pct + '%';
+              if (meta) meta.textContent = 'Converting to MP4...';
+            } else if (el.dataset.status !== item.status) {
+              // Status changed — reload full list
+              loadLibrary();
+              return;
             }
-          } else if (item.status === 'converting') {
-            const bar = el.querySelector('.library-card-progress-bar');
-            const overlay = el.querySelector('.library-card-overlay');
-            const meta = el.querySelector('.library-card-meta');
-            const pct = item.convertProgress || 0;
-            if (bar) bar.style.width = pct + '%';
-            if (overlay) overlay.textContent = pct + '%';
-            if (meta) meta.textContent = 'Converting to MP4...';
-          } else if (el.dataset.status !== item.status) {
-            // Status changed — reload full list
-            loadLibrary();
-            return;
+            continue;
+          }
+
+          // Episode rows inside the show overlay (TV episodes)
+          if (showOverlayOpen) {
+            const row = showOverlay.querySelector(`.library-episode-row[data-id="${CSS.escape(item.id)}"]`);
+            if (!row) continue;
+            if (row.dataset.status !== (item.status || '')) {
+              // Status changed — reload library and refresh the open overlay
+              loadLibrary();
+              return;
+            }
+            if (item.status === 'downloading') {
+              const bar = row.querySelector('.library-episode-progress-bar');
+              const statusEl = row.querySelector('.library-episode-status');
+              if (bar) bar.style.width = (item.progress || 0) + '%';
+              if (statusEl) {
+                const speed = item.downloadSpeed > 0 ? formatSpeed(item.downloadSpeed) : '';
+                statusEl.innerHTML = `${item.progress || 0}%${speed ? ' &middot; ' + speed : ''}`;
+              }
+            } else if (item.status === 'converting') {
+              const bar = row.querySelector('.library-episode-progress-bar');
+              const statusEl = row.querySelector('.library-episode-status');
+              const pct = item.convertProgress || 0;
+              if (bar) bar.style.width = pct + '%';
+              if (statusEl) statusEl.textContent = `Converting ${pct}%`;
+            }
           }
         }
 

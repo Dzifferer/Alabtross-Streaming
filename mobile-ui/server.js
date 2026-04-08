@@ -307,6 +307,13 @@ app.get('/api/tmdb-meta/:type/:tmdbId', rateLimit, async (req, res) => {
       }
     }
 
+    // For movies, expose the TMDB collection so the client can auto-play the
+    // next entry in a franchise when the current one ends.
+    if (type === 'movie' && data.belongs_to_collection) {
+      meta.collectionId = data.belongs_to_collection.id;
+      meta.collectionName = data.belongs_to_collection.name;
+    }
+
     res.json({ meta });
   } catch (err) {
     console.error('[TMDB] Meta fetch error:', err.message);
@@ -376,6 +383,13 @@ app.get('/api/tmdb-meta-imdb/:type/:imdbId', rateLimit, async (req, res) => {
           }
         } catch { /* skip season on error */ }
       }
+    }
+
+    // For movies, expose the TMDB collection so the client can auto-play the
+    // next entry in a franchise when the current one ends.
+    if (type === 'movie' && data.belongs_to_collection) {
+      meta.collectionId = data.belongs_to_collection.id;
+      meta.collectionName = data.belongs_to_collection.name;
     }
 
     res.json({ meta });

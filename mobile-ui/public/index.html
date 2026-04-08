@@ -122,6 +122,22 @@
             <span id="max-streams-status" class="setting-hint">Max simultaneous torrent streams and downloads (1–20)</span>
           </div>
 
+          <!-- Auto-play Next -->
+          <div class="setting-group">
+            <label>Auto-play Next</label>
+            <div class="setting-row">
+              <label class="setting-toggle">
+                <input type="checkbox" id="setting-autoplay-enabled" checked>
+                <span>Play the next episode / movie automatically</span>
+              </label>
+            </div>
+            <div class="setting-row">
+              <input type="number" id="setting-autoplay-countdown" min="0" max="60" value="8" style="width:80px">
+              <span class="setting-hint">Countdown seconds before the next item starts</span>
+            </div>
+            <span class="setting-hint">Series use season/episode order; movies use the TMDB collection sorted by release year.</span>
+          </div>
+
           <!-- Stream Sources -->
           <div class="setting-group">
             <label>Stream Sources (Scrapers)</label>
@@ -211,7 +227,6 @@
 
           <div class="setting-group">
             <label>Quick Add TV Sources</label>
-            <button class="btn-block livetv-quick-add" data-url="https://stremio-iptv-org.vercel.app" data-name="IPTV-org">Add IPTV-org (8000+ Worldwide)</button>
             <button class="btn-block livetv-quick-add" data-url="https://7a82163c306e-livetv.baby-beamup.club" data-name="Live TV">Add Live TV (International)</button>
             <button class="btn-block livetv-quick-add" data-url="https://848b3516657c-usatv.baby-beamup.club" data-name="USA TV">Add USA TV (180+ US Channels)</button>
             <span class="setting-hint">Popular Stremio addons for live TV streams — sports, news, entertainment</span>

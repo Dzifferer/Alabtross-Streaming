@@ -1688,31 +1688,54 @@ class LibraryManager {
     // seasons from filenames/directories rather than assuming a single season
     const season = 0;
 
-    // Stop engine but only remove non-complete items (preserve already downloaded episodes)
+    // Stop the running engine so addSeasonPack can create a fresh one.
     this._stopPackEngine(packId);
-    const completedCount = packItems.filter(i => i.status === 'complete' || i.status === 'converting').length;
-    for (const item of packItems) {
-      if (item.status === 'complete' || item.status === 'converting') continue;
+
+    // Snapshot non-complete items before removing them. If addSeasonPack fails
+    // (most commonly: metadata timeout on a swarm hiccup) we restore these so
+    // the user doesn't end up with an empty pack and no recovery path.
+    const itemsToRecreate = packItems.filter(
+      i => i.status !== 'complete' && i.status !== 'converting'
+    );
+    const completedCount = packItems.length - itemsToRecreate.length;
+    const itemBackups = itemsToRecreate.map(i => ({ ...i }));
+
+    for (const item of itemsToRecreate) {
       this._stopDownload(item.id);
       this._items.delete(item.id);
     }
     this._saveMetadata();
 
-    console.log(`[Library] Restarting pack "${showName || first.name}" (${packItems.length - completedCount} items to retry, ${completedCount} already complete)`);
+    console.log(`[Library] Restarting pack "${showName || first.name}" (${itemsToRecreate.length} items to retry, ${completedCount} already complete)`);
 
-    // Re-add with corrected season parsing — addSeasonPack will skip items
-    // that still exist in this._items (the completed ones we preserved)
-    return this.addSeasonPack({
-      imdbId,
-      name: showName || first.name,
-      poster,
-      year,
-      magnetUri,
-      infoHash,
-      quality,
-      size,
-      season,
-    });
+    try {
+      // Re-add with corrected season parsing — addSeasonPack will skip items
+      // that still exist in this._items (the completed ones we preserved)
+      return await this.addSeasonPack({
+        imdbId,
+        name: showName || first.name,
+        poster,
+        year,
+        magnetUri,
+        infoHash,
+        quality,
+        size,
+        season,
+      });
+    } catch (err) {
+      // addSeasonPack failed (typically metadata timeout). Restore the items
+      // we deleted so the user can still see / retry the pack from the UI.
+      console.error(`[Library] Restart pack failed: ${err.message} — restoring ${itemBackups.length} items as failed`);
+      for (const backup of itemBackups) {
+        backup.status = 'failed';
+        backup.error = `Restart failed: ${err.message}`;
+        backup.downloadSpeed = 0;
+        backup.numPeers = 0;
+        this._items.set(backup.id, backup);
+      }
+      this._saveMetadata();
+      throw err;
+    }
   }
 
   /**

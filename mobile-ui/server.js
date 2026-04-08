@@ -717,6 +717,36 @@ async function resolveTmdbToImdb(tmdbId, type) {
   }
 }
 
+/**
+ * Search TMDB for a TV show by name and return the best match's metadata.
+ * Returns { imdbId, poster, year, name } or null if not found.
+ */
+async function lookupShowByName(showName) {
+  if (!TMDB_API_KEY || !showName) return null;
+  try {
+    const data = await tmdbFetch('/search/tv', { query: showName, include_adult: 'false' });
+    const results = data.results || [];
+    if (results.length === 0) return null;
+
+    // Pick the best match by relevance score
+    results.sort((a, b) => relevanceScore(b.name || '', showName) - relevanceScore(a.name || '', showName));
+    const best = results[0];
+
+    // Resolve IMDB ID
+    const ext = await tmdbFetch(`/tv/${best.id}/external_ids`);
+    const imdbId = ext.imdb_id || null;
+    const poster = best.poster_path
+      ? `https://image.tmdb.org/t/p/w342${best.poster_path}`
+      : null;
+    const year = (best.first_air_date || '').slice(0, 4);
+
+    return { imdbId, poster, year, name: best.name || showName };
+  } catch (err) {
+    console.warn(`[TMDB] lookupShowByName("${showName}") failed:`, err.message);
+    return null;
+  }
+}
+
 // GET /api/streams/movie/:imdbId
 app.get('/api/streams/movie/:imdbId', rateLimit, async (req, res) => {
   let { imdbId } = req.params;
@@ -1100,9 +1130,103 @@ app.post('/api/library/add-pack', rateLimit, async (req, res) => {
 
   try {
     const result = await library.addSeasonPack({ imdbId, name, poster, year, magnetUri, infoHash, quality, size, season });
+
+    // After pack is created, resolve correct TMDB metadata for any episodes
+    // whose filename-derived show name differs from the torrent-level name.
+    // This runs in the background so it doesn't block the response.
+    if (result.items && result.items.length > 0 && TMDB_API_KEY) {
+      (async () => {
+        try {
+          const allItems = library.getAll();
+          const packItems = allItems.filter(i => i.type === 'series' && i.packId === `pack_${infoHash}`);
+          // Group by unique showName to minimize TMDB lookups
+          const showNames = [...new Set(packItems.map(i => i.showName).filter(Boolean))];
+          const torrentName = name || '';
+
+          for (const sn of showNames) {
+            // Skip if show name matches the torrent-level name (already has correct metadata)
+            if (sn.toLowerCase() === torrentName.toLowerCase()) continue;
+
+            const meta = await lookupShowByName(sn);
+            if (!meta || !meta.imdbId) continue;
+
+            // Update all episodes with this show name
+            for (const ep of packItems) {
+              if (ep.showName === sn) {
+                library.relinkItem(ep.id, {
+                  imdbId: meta.imdbId,
+                  showName: meta.name,
+                  poster: meta.poster,
+                  year: meta.year,
+                });
+              }
+            }
+            console.log(`[Library] Resolved "${sn}" -> ${meta.name} (${meta.imdbId})`);
+          }
+        } catch (err) {
+          console.warn('[Library] Background metadata resolution failed:', err.message);
+        }
+      })();
+    }
+
     res.json(result);
   } catch (err) {
     console.error('[API] Season pack download error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/library/repair-metadata — one-time repair: re-derive show names from filenames
+// and look up correct IMDB IDs, posters, and year from TMDB.
+app.post('/api/library/repair-metadata', rateLimit, async (req, res) => {
+  if (!TMDB_API_KEY) {
+    return res.status(400).json({ error: 'TMDB API key not configured' });
+  }
+
+  try {
+    const allItems = library.getAll();
+    const seriesItems = allItems.filter(i => i.type === 'series' && i.fileName);
+
+    // Derive show names from filenames and group episodes
+    const showMap = new Map(); // showName -> [item ids]
+    for (const item of seriesItems) {
+      const derivedName = library._deriveShowNameFromFile(item.fileName);
+      if (!derivedName) continue;
+
+      // Only process items where the derived name differs from current showName
+      if (derivedName.toLowerCase() !== (item.showName || '').toLowerCase()) {
+        if (!showMap.has(derivedName)) showMap.set(derivedName, []);
+        showMap.get(derivedName).push(item.id);
+      }
+    }
+
+    const repaired = [];
+
+    // Look up each unique show name on TMDB
+    for (const [derivedName, itemIds] of showMap) {
+      const meta = await lookupShowByName(derivedName);
+      const updates = {
+        showName: (meta && meta.name) || derivedName,
+        imdbId: meta && meta.imdbId ? meta.imdbId : undefined,
+        poster: meta ? meta.poster : undefined,
+        year: meta ? meta.year : undefined,
+      };
+
+      for (const id of itemIds) {
+        library.relinkItem(id, updates);
+      }
+
+      repaired.push({
+        showName: updates.showName,
+        imdbId: updates.imdbId || 'not found',
+        episodesUpdated: itemIds.length,
+      });
+      console.log(`[Repair] "${derivedName}" -> ${updates.showName} (${updates.imdbId || 'no IMDB'}), ${itemIds.length} episodes`);
+    }
+
+    res.json({ repaired, totalUpdated: repaired.reduce((s, r) => s + r.episodesUpdated, 0) });
+  } catch (err) {
+    console.error('[API] Repair metadata error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });

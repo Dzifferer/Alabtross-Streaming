@@ -2577,12 +2577,14 @@
       const movies = libraryItems.filter(i => i.type !== 'series');
       const shows = libraryItems.filter(i => i.type === 'series');
 
-      // Group shows by name (imdbId or name), then by season
+      // Group shows by showName (filename-derived) so that different series
+      // bundled in the same torrent (e.g. "Naruto" vs "Naruto Shippuden") are
+      // displayed separately.  Falls back to imdbId then name.
       const showGroups = new Map();
       for (const ep of shows) {
-        const showKey = ep.imdbId || ep.showName || ep.name || 'Unknown Show';
+        const showKey = ep.showName || ep.imdbId || ep.name || 'Unknown Show';
         if (!showGroups.has(showKey)) {
-          showGroups.set(showKey, { name: ep.showName || ep.name, poster: ep.poster, year: ep.year, seasons: new Map() });
+          showGroups.set(showKey, { name: ep.showName || ep.name, imdbId: ep.imdbId, poster: ep.poster, year: ep.year, seasons: new Map() });
         }
         const group = showGroups.get(showKey);
         // Use the best poster/name/showName available

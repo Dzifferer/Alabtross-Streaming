@@ -122,6 +122,22 @@
             <span id="max-streams-status" class="setting-hint">Max simultaneous torrent streams and downloads (1–20)</span>
           </div>
 
+          <!-- Auto-play Next -->
+          <div class="setting-group">
+            <label>Auto-play Next</label>
+            <div class="setting-row">
+              <label class="setting-toggle">
+                <input type="checkbox" id="setting-autoplay-enabled" checked>
+                <span>Play the next episode / movie automatically</span>
+              </label>
+            </div>
+            <div class="setting-row">
+              <input type="number" id="setting-autoplay-countdown" min="0" max="60" value="8" style="width:80px">
+              <span class="setting-hint">Countdown seconds before the next item starts</span>
+            </div>
+            <span class="setting-hint">Series use season/episode order; movies use the TMDB collection sorted by release year.</span>
+          </div>
+
           <!-- Stream Sources -->
           <div class="setting-group">
             <label>Stream Sources (Scrapers)</label>

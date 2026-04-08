@@ -3616,43 +3616,6 @@
       });
     }
 
-    // ─── Repair Metadata Button ─────────────────────
-    const repairBtn = $('#repair-metadata-btn');
-    if (repairBtn) {
-      repairBtn.addEventListener('click', async () => {
-        const resultDiv = $('#repair-result');
-        repairBtn.disabled = true;
-        repairBtn.textContent = 'Repairing...';
-
-        try {
-          const resp = await fetch('/api/library/repair', { method: 'POST' });
-          const data = await resp.json();
-
-          if (!resp.ok) throw new Error(data.error || 'Repair failed');
-
-          if (data.retagged === 0 && data.discovered === 0) {
-            resultDiv.innerHTML = '<span class="setting-hint" style="color:var(--text-secondary)">No issues found — metadata looks good.</span>';
-          } else {
-            const parts = [];
-            if (data.retagged > 0) parts.push(`${data.retagged} episode${data.retagged !== 1 ? 's' : ''} retagged with correct season`);
-            if (data.discovered > 0) parts.push(`${data.discovered} missing episode${data.discovered !== 1 ? 's' : ''} recovered`);
-            resultDiv.innerHTML = `<span class="setting-hint" style="color:var(--success)">Repaired: ${parts.join(', ')}.</span>`;
-            refreshDownloads();
-          }
-
-          if (data.errors && data.errors.length > 0) {
-            resultDiv.innerHTML += `<br><span class="setting-hint" style="color:var(--warning)">${data.errors.length} skipped — check server logs</span>`;
-          }
-        } catch (err) {
-          resultDiv.innerHTML = `<span class="setting-hint" style="color:var(--danger)">Error: ${err.message}</span>`;
-        }
-
-        resultDiv.style.display = 'block';
-        repairBtn.disabled = false;
-        repairBtn.textContent = 'Repair Season Metadata';
-      });
-    }
-
     dom.settingsToggle.addEventListener('click', () => {
       navigateTo('settings');
       renderAddonList();

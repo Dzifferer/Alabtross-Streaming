@@ -1002,14 +1002,16 @@ class LibraryManager {
 
   /**
    * Re-link a library item to a different IMDB entry.
-   * Updates the imdbId, name, poster, and year without touching the downloaded file.
+   * Updates the imdbId, name, poster, year, and optionally showName
+   * without touching the downloaded file.
    */
-  relinkItem(id, { imdbId, name, poster, year, type }) {
+  relinkItem(id, { imdbId, name, poster, year, type, showName }) {
     const item = this._items.get(id);
     if (!item) return false;
 
     if (imdbId) item.imdbId = imdbId;
     if (name) item.name = name;
+    if (showName) item.showName = showName;
     if (poster !== undefined) item.poster = poster;
     if (year !== undefined) item.year = year;
     if (type) item.type = type;

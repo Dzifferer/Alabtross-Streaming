@@ -11,22 +11,55 @@ const { spawn } = require('child_process');
 const fallbackResolver = new dns.Resolver();
 fallbackResolver.setServers(['1.1.1.1', '8.8.8.8', '1.0.0.1', '8.8.4.4']);
 
+// Positive + negative DNS cache shared by resolveWithFallback and
+// cachedLookup. Prevents re-running system DNS + fallback DNS on every
+// request (important for IPTV m3u8 segment fan-out and for keeping the
+// SSRF check and the actual connection in sync — same hostname should
+// always resolve to the same IP across both calls).
+const DNS_CACHE_TTL_OK = 5 * 60 * 1000;   // 5 min for successful lookups
+const DNS_CACHE_TTL_FAIL = 60 * 1000;     // 1 min for failures
+const dnsCache = new Map(); // hostname -> { address, error, expires }
+
 function resolveWithFallback(hostname) {
+  const cached = dnsCache.get(hostname);
+  if (cached && cached.expires > Date.now()) {
+    if (cached.address) return Promise.resolve(cached.address);
+    return Promise.reject(cached.error);
+  }
   return new Promise((resolve, reject) => {
     dns.resolve4(hostname, (err, addresses) => {
       if (!err && addresses && addresses.length > 0) {
+        dnsCache.set(hostname, { address: addresses[0], expires: Date.now() + DNS_CACHE_TTL_OK });
         return resolve(addresses[0]);
       }
       console.log(`[DNS] System DNS failed for ${hostname}, trying fallback resolvers...`);
       fallbackResolver.resolve4(hostname, (err2, addresses2) => {
         if (!err2 && addresses2 && addresses2.length > 0) {
           console.log(`[DNS] Fallback resolved ${hostname} → ${addresses2[0]}`);
+          dnsCache.set(hostname, { address: addresses2[0], expires: Date.now() + DNS_CACHE_TTL_OK });
           return resolve(addresses2[0]);
         }
-        reject(err2 || err);
+        const finalErr = err2 || err;
+        dnsCache.set(hostname, { error: finalErr, expires: Date.now() + DNS_CACHE_TTL_FAIL });
+        reject(finalErr);
       });
     });
   });
+}
+
+// Node `net.connect`-compatible lookup function. Passed to http(s).get via
+// the `lookup` option so DNS failures inside the request fall back to
+// public resolvers transparently — no need to rewrite Host headers or
+// break TLS cert validation.
+function cachedLookup(hostname, options, callback) {
+  if (typeof options === 'function') {
+    callback = options;
+    options = {};
+  }
+  resolveWithFallback(hostname).then(
+    (address) => callback(null, address, 4),
+    (err) => callback(err)
+  );
 }
 // http-proxy-middleware removed — Stremio server proxy no longer needed
 const { getMovieStreams, getSeriesStreams, getSeasonPackStreams, getCompleteStreams, diagnoseProviders } = require('./lib/stream-providers');
@@ -1785,9 +1818,12 @@ async function validateUrlNotSSRF(urlStr) {
   if (isBlockedHost(parsed.hostname)) {
     throw new Error('Blocked host');
   }
-  // Resolve DNS to check the actual IP
+  // Resolve DNS (via fallback chain + cache) to check the actual IP.
+  // The same cache is used by cachedLookup below, so the IP we validate
+  // here is the same IP the request will connect to — prevents DNS
+  // rebinding between the SSRF check and the actual connection.
   try {
-    const { address } = await dns.promises.lookup(parsed.hostname);
+    const address = await resolveWithFallback(parsed.hostname);
     if (isBlockedHost(address)) {
       throw new Error('Blocked host (resolved IP)');
     }
@@ -1981,9 +2017,20 @@ app.get('/api/iptv/stream', rateLimit, async (req, res) => {
   }
 
   const mod = parsedUrl.protocol === 'https:' ? https : http;
-  const proxyReq = mod.get(streamUrl, {
+  // Pass a custom `lookup` so DNS failures fall back to public resolvers
+  // (1.1.1.1 / 8.8.8.8). Without this, any channel whose host isn't in
+  // the container's system DNS — whether due to sinkholing, a flaky
+  // upstream resolver, or just a provider the router blocks — fails
+  // with ENOTFOUND even though the domain is resolvable elsewhere.
+  const proxyReq = mod.get({
+    protocol: parsedUrl.protocol,
+    hostname: parsedUrl.hostname,
+    port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
+    path: parsedUrl.pathname + parsedUrl.search,
     headers: { 'User-Agent': 'Albatross/1.0' },
     timeout: 15000,
+    family: 4,
+    lookup: cachedLookup,
   }, (upstream) => {
     if (upstream.statusCode >= 300 && upstream.statusCode < 400 && upstream.headers.location) {
       // Follow redirect through proxy (SSRF check happens on re-entry)

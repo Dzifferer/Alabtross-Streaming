@@ -1107,6 +1107,20 @@ app.post('/api/library/add-pack', rateLimit, async (req, res) => {
   }
 });
 
+// POST /api/library/restart-pack — restart a pack download (re-scan torrent for all episodes)
+app.post('/api/library/restart-pack', rateLimit, async (req, res) => {
+  const { packId } = req.body;
+  if (!packId) return res.status(400).json({ error: 'packId is required' });
+
+  try {
+    const result = await library.restartPack(packId);
+    res.json(result);
+  } catch (err) {
+    console.error('[API] Restart pack error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // DELETE /api/library/:id — remove item from library
 app.delete('/api/library/:id', rateLimit, (req, res) => {
   const removed = library.removeItem(req.params.id);

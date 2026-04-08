@@ -756,6 +756,47 @@ class LibraryManager {
   }
 
   /**
+   * Restart a pack download: stops the engine, clears all items for the pack,
+   * and re-runs addSeasonPack so every episode is properly detected.
+   * Already-downloaded files on disk are kept and verified by torrent-stream.
+   */
+  async restartPack(packId) {
+    const packItems = [...this._items.values()].filter(i => i.packId === packId);
+    if (packItems.length === 0) return { error: 'Pack not found' };
+
+    const first = packItems[0];
+    const { imdbId, showName, poster, year, magnetUri, infoHash, quality, size } = first;
+
+    // Determine original season parameter: if all items share a season, use it;
+    // otherwise it was a complete pack (season=0)
+    const seasons = new Set(packItems.map(i => i.season).filter(Boolean));
+    const season = seasons.size === 1 ? [...seasons][0] : 0;
+
+    // Stop engine and remove all pack items from metadata (keep files on disk)
+    this._stopPackEngine(packId);
+    for (const item of packItems) {
+      this._stopDownload(item.id);
+      this._items.delete(item.id);
+    }
+    this._saveMetadata();
+
+    console.log(`[Library] Restarting pack "${showName || first.name}" (${packItems.length} items cleared)`);
+
+    // Re-add with corrected season parsing
+    return this.addSeasonPack({
+      imdbId,
+      name: showName || first.name,
+      poster,
+      year,
+      magnetUri,
+      infoHash,
+      quality,
+      size,
+      season,
+    });
+  }
+
+  /**
    * Pause an active download. Stops the torrent engine but keeps the item
    * in 'paused' status so it can be resumed later.
    */

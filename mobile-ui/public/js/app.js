@@ -3807,6 +3807,12 @@
       ? `Failed \u00b7 ${episodeCount}`
       : `Queued \u00b7 ${episodeCount}`;
 
+    // Restart button shared across all statuses
+    const restartBtn = `
+      <button class="download-action-btn resume" data-pack-id="${escapeHTML(pack.packId)}" data-action="restart-pack" title="Restart Download">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+      </button>`;
+
     // Actions apply to all episodes in the pack
     let actions = '';
     const firstEpId = pack.episodes[0]?.id || '';
@@ -3815,6 +3821,7 @@
         <button class="download-action-btn pause" data-pack-id="${escapeHTML(pack.packId)}" data-action="pause-pack" title="Pause All">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
         </button>
+        ${restartBtn}
         <button class="download-action-btn cancel" data-pack-id="${escapeHTML(pack.packId)}" data-action="remove-pack" title="Cancel All">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
         </button>`;
@@ -3823,11 +3830,13 @@
         <button class="download-action-btn resume" data-pack-id="${escapeHTML(pack.packId)}" data-action="resume-pack" title="Resume All">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
         </button>
+        ${restartBtn}
         <button class="download-action-btn cancel" data-pack-id="${escapeHTML(pack.packId)}" data-action="remove-pack" title="Remove All">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
         </button>`;
     } else if (pack.status === 'complete') {
       actions = `
+        ${restartBtn}
         <button class="download-action-btn cancel" data-pack-id="${escapeHTML(pack.packId)}" data-action="remove-pack" title="Remove All">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
         </button>`;
@@ -3836,6 +3845,7 @@
         <button class="download-action-btn resume" data-pack-id="${escapeHTML(pack.packId)}" data-action="retry-pack" title="Retry All">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
         </button>
+        ${restartBtn}
         <button class="download-action-btn cancel" data-pack-id="${escapeHTML(pack.packId)}" data-action="remove-pack" title="Remove All">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
         </button>`;
@@ -4025,6 +4035,22 @@
             ));
             showToast('Retrying failed episodes...');
           } catch { showToast('Failed to retry pack'); }
+          renderDownloads();
+          return;
+        }
+
+        if (action === 'restart-pack' && packId) {
+          try {
+            const resp = await fetch('/api/library/restart-pack', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ packId }),
+            });
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data.error || 'Restart failed');
+            const count = (data.items || []).filter(i => i.status === 'started').length;
+            showToast(`Pack restarted — ${count} episode${count !== 1 ? 's' : ''} downloading`);
+          } catch (err) { showToast('Failed to restart pack: ' + err.message); }
           renderDownloads();
           return;
         }

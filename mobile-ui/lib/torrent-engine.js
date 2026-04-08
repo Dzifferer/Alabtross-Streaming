@@ -86,9 +86,18 @@ class TorrentEngine {
     this._active.set(hash, placeholder);
 
     const pending = new Promise((resolve, reject) => {
+      // connections: torrent-stream's default (100). Higher values (e.g. 500)
+      // don't gain real peers on swarms with ~20 seeders and instead cause
+      // file-descriptor pressure and TCP retry storms on low-power hardware,
+      // especially when multiple torrents are active at once.
+      //
+      // uploads: 4 enables BitTorrent tit-for-tat reciprocity. With uploads:0
+      // peers choke us because we never reciprocate, so we only receive via
+      // their optimistic-unchoke slots and download speeds collapse to
+      // ~10-20% of what the swarm can actually give us.
       const engine = torrentStream(uri, {
-        connections: 500,
-        uploads: 0,
+        connections: 100,
+        uploads: 4,
         dht: true,
         path: this._downloadPath,
         trackers: TRACKERS,

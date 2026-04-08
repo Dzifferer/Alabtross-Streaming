@@ -18,7 +18,6 @@ const fs = require('fs');
 const { VIDEO_EXTENSIONS, TRACKERS, isFileNameSafe, getMimeType } = require('./file-safety');
 
 const DEFAULT_MAX_CONCURRENT_DOWNLOADS = 5;
-const MAX_FILE_SIZE = 20 * 1024 * 1024 * 1024; // 20 GB
 const METADATA_SAVE_INTERVAL = 30 * 1000; // Save metadata every 30s during active downloads
 
 class LibraryManager {
@@ -50,6 +49,16 @@ class LibraryManager {
 
     // Auto-repair season metadata for packs (deferred to avoid blocking startup)
     setImmediate(() => this.repairPackMetadata());
+  }
+
+  /**
+   * Verify that a resolved path is contained within the library directory.
+   * Prevents path traversal attacks via crafted IDs (e.g. disk_../../etc/passwd).
+   */
+  _isPathSafe(fullPath) {
+    const resolved = path.resolve(fullPath);
+    const libraryRoot = path.resolve(this._libraryPath);
+    return resolved === libraryRoot || resolved.startsWith(libraryRoot + path.sep);
   }
 
   // ─── Public API ──────────────────────────────────
@@ -314,7 +323,8 @@ class LibraryManager {
     const eMatch = base.match(/\bE(\d+)\b/i);
     if (eMatch) return { season: dirSeason, episode: parseInt(eMatch[1], 10) };
     // Try "- 05 -" or "- 05." or "- 05 " at end before extension (anime fansub convention)
-    const dashMatch = base.match(/[-–]\s*(\d{1,4})\s*(?:[-–.\s]|$)/);
+    // Negative lookahead prevents matching year-like numbers (1900-2099)
+    const dashMatch = base.match(/[-–]\s*(?!(?:19|20)\d{2}\b)(\d{1,4})\s*(?:[-–.\s]|$)/);
     if (dashMatch) return { season: dirSeason, episode: parseInt(dashMatch[1], 10) };
     // Try "Episode 5" pattern
     const epMatch = base.match(/Episode\s*(\d+)/i);
@@ -375,7 +385,8 @@ class LibraryManager {
     if (match) return match[1].replace(/[-–\s]+$/, '').trim() || null;
 
     // Try "- 001" anime convention (e.g., "Naruto Shippuden - 001")
-    match = base.match(/^(.+?)\s*[-–]\s*\d{2,4}\b/);
+    // Negative lookahead prevents matching year-like numbers (1900-2099)
+    match = base.match(/^(.+?)\s*[-–]\s*(?!(?:19|20)\d{2}\b)\d{2,4}\b/);
     if (match) return match[1].replace(/[-–\s]+$/, '').trim() || null;
 
     // Try E05 pattern (without season)
@@ -419,7 +430,7 @@ class LibraryManager {
           if (fs.existsSync(fullPath)) {
             const stat = fs.statSync(fullPath);
             currentSize = stat.size;
-            item.progress = Math.min(100, Math.round((currentSize / item.fileSize) * 100));
+            item.progress = item.fileSize > 0 ? Math.min(100, Math.round((currentSize / item.fileSize) * 100)) : 0;
           }
         } catch { /* file might not exist yet */ }
 
@@ -428,7 +439,7 @@ class LibraryManager {
           lastSizeMap.set(itemId, currentSize);
 
           if (currentSize < item.fileSize - 1024) {
-            item.progress = Math.round((currentSize / item.fileSize) * 100);
+            item.progress = item.fileSize > 0 ? Math.round((currentSize / item.fileSize) * 100) : 0;
             allComplete = false;
             continue;
           }
@@ -584,6 +595,7 @@ class LibraryManager {
     if (id.startsWith('disk_')) {
       const relPath = id.slice(5);
       const fullPath = path.join(this._libraryPath, relPath);
+      if (!this._isPathSafe(fullPath)) return null;
       try {
         if (!fs.existsSync(fullPath)) return null;
         const stat = fs.statSync(fullPath);
@@ -991,6 +1003,8 @@ class LibraryManager {
     if (id.startsWith('disk_') && !this._items.has(id)) {
       const relPath = id.slice(5);
       const fullPath = path.join(this._libraryPath, relPath);
+      if (!this._isPathSafe(fullPath)) return false;
+      this._discoveryCache = null;
       try {
         if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
         const dir = path.dirname(fullPath);
@@ -1069,6 +1083,7 @@ class LibraryManager {
     if (!item && id.startsWith('disk_')) {
       const relPath = id.slice(5); // strip 'disk_' prefix
       const fullPath = path.join(this._libraryPath, relPath);
+      if (!this._isPathSafe(fullPath)) return null;
       if (fs.existsSync(fullPath)) return fullPath;
       return null;
     }
@@ -1076,6 +1091,7 @@ class LibraryManager {
     if (!item || (item.status !== 'complete' && item.status !== 'converting') || !item.filePath) return null;
 
     const fullPath = path.join(this._libraryPath, item.filePath);
+    if (!this._isPathSafe(fullPath)) return null;
     if (!fs.existsSync(fullPath)) {
       // File was deleted externally
       item.status = 'failed';
@@ -1100,7 +1116,7 @@ class LibraryManager {
       clearInterval(this._metadataSaveTimer);
       this._metadataSaveTimer = null;
     }
-    for (const [id] of this._engines) {
+    for (const id of [...this._engines.keys()]) {
       this._stopDownload(id);
     }
     // Kill active conversions — they keep status='converting' for auto-resume on restart
@@ -1538,7 +1554,7 @@ class LibraryManager {
   _saveMetadata() {
     try {
       const data = [...this._items.values()].map(item => {
-        const { _needsResume, _needsConversion, ...clean } = item;
+        const { _needsResume, _needsConversion, _pendingConversion, _probeDuration, ...clean } = item;
         return clean;
       });
       const json = JSON.stringify(data, null, 2);

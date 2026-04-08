@@ -199,6 +199,68 @@ The script asks a few questions upfront (external drive, DuckDNS credentials, VP
 | `ENABLE_UPNP` | No | `yes` | Auto-forward port 51820 via UPnP (default: `yes`) |
 | `ENABLE_HEALTH` | No | `yes` | Auto-restart crashed containers every 5 min (default: `yes`) |
 | `DISABLE_GUI` | No | `yes` | Disable desktop GUI for headless operation (default: `yes`) |
+| `EXPRESSVPN_ACTIVATION_CODE` | No | `XXXXXXXXXXXXX` | Enables the ExpressVPN sidecar (see below) |
+| `EXPRESSVPN_DEB_PATH` | No* | `/home/jetson/expressvpn_3.x.x_arm64.deb` | *Required when `EXPRESSVPN_ACTIVATION_CODE` is set* — path to the arm64 .deb |
+| `EXPRESSVPN_LOCATION` | No | `smart` | Server alias or country (e.g. `usny`, `uk`) — default: `smart` |
+| `EXPRESSVPN_PROTOCOL` | No | `lightway_udp` | `lightway_udp`, `lightway_tcp`, or `auto` — default: `lightway_udp` |
+
+## Routing the streaming containers through ExpressVPN (optional)
+
+If you want Stremio and the Mobile UI's torrent scrapers to egress through
+ExpressVPN instead of your home IP, the setup script can build a sidecar
+container that runs the official ExpressVPN Linux CLI and shares its network
+namespace with the two app containers. Tailscale, SSH, and apt keep using
+your normal connection — only the streaming containers are affected.
+
+**Trade-off:** Routing the Mobile UI through the VPN means it can no longer
+use `--net=host`, so SSDP multicast for local Chromecast / DLNA discovery is
+lost. Streaming on the controlling phone or laptop browser still works.
+
+### Steps
+
+1. On your laptop, log in at [expressvpn.com](https://www.expressvpn.com),
+   go to **Set Up ExpressVPN → Linux → Raspberry Pi 64-bit**, and download
+   the `expressvpn_*_arm64.deb` file. Copy it to the Jetson:
+   ```bash
+   scp expressvpn_*_arm64.deb jetson@192.168.1.XX:~/
+   ```
+2. Copy your **activation code** from the same page (looks like a long
+   alphanumeric string).
+3. Run the setup with the VPN env vars set:
+   ```bash
+   sudo HEADLESS=1 \
+        DRIVE_PARTITION=sda1 \
+        EXPRESSVPN_ACTIVATION_CODE=YOUR_CODE_HERE \
+        EXPRESSVPN_DEB_PATH=/home/jetson/expressvpn_3.80.0.8_arm64.deb \
+        EXPRESSVPN_LOCATION=smart \
+        EXPRESSVPN_PROTOCOL=lightway_udp \
+        bash jetson_setup.sh
+   ```
+   Or launch the interactive mode and answer "yes" when prompted for
+   ExpressVPN.
+4. Verify the VPN is up and hiding the egress IP:
+   ```bash
+   docker exec expressvpn expressvpn status
+   docker exec stremio-server curl -s https://api.ipify.org
+   ```
+   The second command should print the ExpressVPN server's IP, not your
+   home IP.
+
+### Useful VPN commands
+
+```bash
+docker logs expressvpn                              # View VPN daemon logs
+docker exec expressvpn expressvpn status            # Check connection
+docker exec expressvpn expressvpn list              # List server aliases
+docker exec expressvpn expressvpn connect usny      # Switch location
+docker exec expressvpn expressvpn disconnect        # Stop the tunnel
+docker restart expressvpn stremio-server alabtross-mobile  # Full VPN bounce
+```
+
+> The dependent containers share the VPN container's network namespace. If
+> you restart `expressvpn`, you must also restart `stremio-server` and
+> `alabtross-mobile` so they re-attach to the new namespace. The
+> `alabtross-health` cron job handles this automatically every 5 minutes.
 
 ## Streaming Modes
 

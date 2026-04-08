@@ -37,18 +37,37 @@ sudo docker build -t alabtross-mobile ./mobile-ui
 
 BIND_IP=$(ip route get 8.8.8.8 | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')
 
-echo "==> Starting container (bind IP: $BIND_IP)..."
-sudo docker run -d \
-  --name alabtross-mobile \
-  --restart unless-stopped \
-  --net=host \
-  -e PORT=8080 \
-  -e STREMIO_SERVER="http://${BIND_IP}:11470" \
-  -e TORRENT_CACHE="/app/torrent-cache" \
-  -e LIBRARY_PATH="/app/torrent-cache/library" \
-  -e TMDB_API_KEY="${TMDB_API_KEY:?Set TMDB_API_KEY env var before deploying}" \
-  -v "/mnt/movies/torrent-cache:/app/torrent-cache" \
-  alabtross-mobile
+# If the ExpressVPN sidecar is running, inherit its network namespace
+# so this container's outbound traffic stays inside the VPN tunnel.
+# Otherwise use host networking for SSDP multicast (local casting).
+if sudo docker ps --filter "name=expressvpn" --filter "status=running" \
+     --format '{{.Names}}' 2>/dev/null | grep -q "^expressvpn$"; then
+  echo "==> ExpressVPN sidecar detected — sharing its network namespace"
+  sudo docker run -d \
+    --name alabtross-mobile \
+    --restart unless-stopped \
+    --network=container:expressvpn \
+    -e PORT=8080 \
+    -e STREMIO_SERVER="http://localhost:11470" \
+    -e TORRENT_CACHE="/app/torrent-cache" \
+    -e LIBRARY_PATH="/app/torrent-cache/library" \
+    -e TMDB_API_KEY="${TMDB_API_KEY:?Set TMDB_API_KEY env var before deploying}" \
+    -v "/mnt/movies/torrent-cache:/app/torrent-cache" \
+    alabtross-mobile
+else
+  echo "==> Starting container (bind IP: $BIND_IP)..."
+  sudo docker run -d \
+    --name alabtross-mobile \
+    --restart unless-stopped \
+    --net=host \
+    -e PORT=8080 \
+    -e STREMIO_SERVER="http://${BIND_IP}:11470" \
+    -e TORRENT_CACHE="/app/torrent-cache" \
+    -e LIBRARY_PATH="/app/torrent-cache/library" \
+    -e TMDB_API_KEY="${TMDB_API_KEY:?Set TMDB_API_KEY env var before deploying}" \
+    -v "/mnt/movies/torrent-cache:/app/torrent-cache" \
+    alabtross-mobile
+fi
 
 # Ensure Tailscale Serve is still active after container restart
 if command -v tailscale &>/dev/null && tailscale status &>/dev/null; then

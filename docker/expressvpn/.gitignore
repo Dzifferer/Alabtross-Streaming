@@ -1,0 +1,4 @@
+# The ExpressVPN .deb is gated behind account auth on their site.
+# Drop it here before building the container (see README).
+expressvpn.deb
+expressvpn_*.deb

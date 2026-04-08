@@ -291,6 +291,8 @@ MOUNT_POINT=""
 DUCKDNS_DOMAIN=""
 DUCKDNS_TOKEN=""
 HAS_DUCKDNS="no"
+HAS_EXPRESSVPN="no"
+EXPRESSVPN_DEB_PATH_RESOLVED=""
 
 if [[ "${HEADLESS:-0}" == "1" ]]; then
   # ── Headless mode — use env vars, no prompts ──
@@ -319,6 +321,23 @@ if [[ "${HEADLESS:-0}" == "1" ]]; then
     ok "DuckDNS configured: ${DUCKDNS_DOMAIN}.duckdns.org"
   else
     info "DuckDNS not configured — skipping"
+  fi
+
+  # ExpressVPN (optional) — routes the streaming containers' outbound
+  # traffic through ExpressVPN while leaving the host untouched so
+  # Tailscale, SSH, and apt keep using the normal interface.
+  if [[ -n "${EXPRESSVPN_ACTIVATION_CODE:-}" ]]; then
+    if [[ -z "${EXPRESSVPN_DEB_PATH:-}" ]]; then
+      err "EXPRESSVPN_ACTIVATION_CODE is set but EXPRESSVPN_DEB_PATH is not — skipping VPN"
+    elif [[ ! -f "$EXPRESSVPN_DEB_PATH" ]]; then
+      err "EXPRESSVPN_DEB_PATH='$EXPRESSVPN_DEB_PATH' does not exist — skipping VPN"
+    else
+      EXPRESSVPN_DEB_PATH_RESOLVED="$EXPRESSVPN_DEB_PATH"
+      HAS_EXPRESSVPN="yes"
+      ok "ExpressVPN configured (location: ${EXPRESSVPN_LOCATION:-smart}, protocol: ${EXPRESSVPN_PROTOCOL:-lightway_udp})"
+    fi
+  else
+    info "ExpressVPN not configured — containers will use direct networking"
   fi
 
   # Features default to yes in headless mode
@@ -421,6 +440,50 @@ else
     fi
   fi
 
+  # ── ExpressVPN (optional) ──
+  echo ""
+  echo -e "${BLUE}  ExpressVPN can route the streaming containers' traffic through"
+  echo -e "  a commercial VPN without touching the host network (Tailscale,"
+  echo -e "  SSH, and apt will keep using your regular connection).${NC}"
+  echo -e "${YELLOW}  NOTE: Putting the Mobile UI behind the VPN disables local"
+  echo -e "  Chromecast / DLNA device discovery (SSDP multicast). Streaming"
+  echo -e "  on your phone or laptop browser still works.${NC}"
+  echo ""
+  read -p "Route streaming containers through ExpressVPN? (yes/no) [no]: " HAS_EXPRESSVPN
+  HAS_EXPRESSVPN=$(echo "${HAS_EXPRESSVPN:-no}" | tr '[:upper:]' '[:lower:]')
+  [[ "$HAS_EXPRESSVPN" == "y" ]] && HAS_EXPRESSVPN="yes"
+  [[ "$HAS_EXPRESSVPN" == "n" ]] && HAS_EXPRESSVPN="no"
+
+  if [[ "$HAS_EXPRESSVPN" == "yes" ]]; then
+    echo ""
+    echo -e "${YELLOW}  You need the arm64 ExpressVPN .deb from your account dashboard:"
+    echo -e "  https://www.expressvpn.com/latest#linux  (pick 'Raspberry Pi 64-bit')"
+    echo -e "  Download it to the Jetson (e.g. scp or wget) before continuing.${NC}"
+    echo ""
+    read -p  "Path to expressvpn_*_arm64.deb on this device: " EXPRESSVPN_DEB_PATH
+    if [[ ! -f "$EXPRESSVPN_DEB_PATH" ]]; then
+      err "File not found: $EXPRESSVPN_DEB_PATH — skipping VPN setup"
+      HAS_EXPRESSVPN="no"
+    else
+      EXPRESSVPN_DEB_PATH_RESOLVED="$EXPRESSVPN_DEB_PATH"
+      echo ""
+      echo -e "${YELLOW}  Your activation code is shown in the ExpressVPN dashboard."
+      echo -e "  It looks like: XXXXXXXXXXXXXXXXXXXXXXXXX${NC}"
+      read -sp "Paste your ExpressVPN activation code (hidden): " EXPRESSVPN_ACTIVATION_CODE
+      echo ""
+      if [[ -z "$EXPRESSVPN_ACTIVATION_CODE" ]]; then
+        err "Activation code was empty — skipping VPN setup"
+        HAS_EXPRESSVPN="no"
+      else
+        read -p  "VPN location/country (default: smart): " _vpn_loc
+        EXPRESSVPN_LOCATION="${_vpn_loc:-smart}"
+        read -p  "VPN protocol [lightway_udp/lightway_tcp/auto] (default: lightway_udp): " _vpn_proto
+        EXPRESSVPN_PROTOCOL="${_vpn_proto:-lightway_udp}"
+        export EXPRESSVPN_ACTIVATION_CODE EXPRESSVPN_LOCATION EXPRESSVPN_PROTOCOL
+      fi
+    fi
+  fi
+
   # ── Health monitoring ──
   echo ""
   read -p "Enable auto health monitoring? (restarts crashed services) [yes]: " ENABLE_HEALTH
@@ -437,6 +500,7 @@ fi
 
 STEP=0
 TOTAL_STEPS=9
+[[ "$HAS_EXPRESSVPN" == "yes" ]] && TOTAL_STEPS=10
 step() { STEP=$((STEP+1)); hdr "[$STEP/$TOTAL_STEPS] $1"; }
 
 echo ""
@@ -698,6 +762,122 @@ fi
 
 
 # ---------------------------------------------------------------
+# STEP 6b — ExpressVPN container (optional)
+# ---------------------------------------------------------------
+# When enabled, this container provides a tun0 interface. Stremio and
+# Albatross Mobile UI share its network namespace via
+# `--network=container:expressvpn`, routing their outbound traffic
+# through ExpressVPN while the host (Tailscale, SSH, apt) stays on the
+# normal interface.
+#
+# Trade-off: Mobile UI loses `--net=host`, so SSDP multicast for local
+# Chromecast/DLNA discovery no longer works. Streaming on the
+# controlling phone/laptop browser still works normally.
+if [[ "$HAS_EXPRESSVPN" == "yes" ]]; then
+  step "Setting up ExpressVPN container"
+
+  EXPRESSVPN_BUILD_DIR="$(cd "$(dirname "$0")" && pwd)/docker/expressvpn"
+  if [[ ! -f "$EXPRESSVPN_BUILD_DIR/Dockerfile" ]]; then
+    err "Missing $EXPRESSVPN_BUILD_DIR/Dockerfile — skipping VPN, falling back to direct networking"
+    HAS_EXPRESSVPN="no"
+  elif [[ ! -f "$EXPRESSVPN_DEB_PATH_RESOLVED" ]]; then
+    err "ExpressVPN .deb vanished from $EXPRESSVPN_DEB_PATH_RESOLVED — skipping VPN"
+    HAS_EXPRESSVPN="no"
+  else
+    # Copy the .deb into the build context (the Dockerfile COPYs it in).
+    cp "$EXPRESSVPN_DEB_PATH_RESOLVED" "$EXPRESSVPN_BUILD_DIR/expressvpn.deb" \
+      || { err "Could not copy .deb into build context — skipping VPN"; HAS_EXPRESSVPN="no"; }
+  fi
+
+  if [[ "$HAS_EXPRESSVPN" == "yes" ]]; then
+    # Make sure the host has the tun kernel module loaded so the
+    # container can open /dev/net/tun.
+    modprobe tun 2>/dev/null || true
+    if [[ ! -c /dev/net/tun ]]; then
+      err "/dev/net/tun missing on host — the kernel is missing the tun module, cannot run VPN"
+      HAS_EXPRESSVPN="no"
+    fi
+  fi
+
+  if [[ "$HAS_EXPRESSVPN" == "yes" ]]; then
+    # Detect LAN IP the same way the Stremio step does — we need it for
+    # the port bindings on the VPN container (which is the network
+    # namespace stremio+mobile-ui will share).
+    VPN_BIND_IP=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')
+    VPN_BIND_IP=${VPN_BIND_IP:-0.0.0.0}
+    if ! [[ "$VPN_BIND_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+      err "Invalid bind IP '$VPN_BIND_IP' — falling back to 0.0.0.0"
+      VPN_BIND_IP="0.0.0.0"
+    fi
+
+    info "Building ExpressVPN container image (this takes a few minutes the first time)..."
+    docker build -t alabtross-expressvpn "$EXPRESSVPN_BUILD_DIR" \
+      || die "Failed to build ExpressVPN container. Check: docker build -t alabtross-expressvpn $EXPRESSVPN_BUILD_DIR"
+
+    # Clear the .deb from the build context so it isn't left on disk
+    # between runs. The image already has it baked in.
+    rm -f "$EXPRESSVPN_BUILD_DIR/expressvpn.deb"
+
+    # Tear down any previous instance — we'll replace it.
+    docker stop expressvpn 2>/dev/null || true
+    docker rm   expressvpn 2>/dev/null || true
+
+    info "Starting ExpressVPN container..."
+    # Port mappings here become the published sockets for Stremio and
+    # Mobile UI, because they'll share this container's network
+    # namespace. 8080 is bound on all interfaces so Tailscale Serve
+    # (which proxies localhost:8080) keeps working. 11470/12470 are
+    # bound to the LAN IP, matching the pre-VPN behaviour.
+    docker run -d \
+      --name expressvpn \
+      --restart unless-stopped \
+      --cap-add=NET_ADMIN \
+      --device=/dev/net/tun \
+      --sysctl net.ipv6.conf.all.disable_ipv6=1 \
+      -v expressvpn-config:/etc/expressvpn \
+      -v expressvpn-state:/var/lib/expressvpn \
+      -e EXPRESSVPN_ACTIVATION_CODE="${EXPRESSVPN_ACTIVATION_CODE}" \
+      -e EXPRESSVPN_LOCATION="${EXPRESSVPN_LOCATION:-smart}" \
+      -e EXPRESSVPN_PROTOCOL="${EXPRESSVPN_PROTOCOL:-lightway_udp}" \
+      -p 8080:8080 \
+      -p "${VPN_BIND_IP}:11470:11470" \
+      -p "${VPN_BIND_IP}:12470:12470" \
+      alabtross-expressvpn \
+      || die "Failed to start ExpressVPN container. Check: docker logs expressvpn"
+
+    # Wait for the VPN to report Connected — the shared-netns containers
+    # can't start cleanly until tun0 is up.
+    info "Waiting for ExpressVPN to connect (up to 90s)..."
+    VPN_CONNECTED=false
+    for i in {1..45}; do
+      if docker exec expressvpn expressvpn status 2>/dev/null | grep -qi "Connected"; then
+        VPN_CONNECTED=true
+        break
+      fi
+      sleep 2
+    done
+
+    if $VPN_CONNECTED; then
+      VPN_IP=$(docker exec expressvpn sh -c 'curl -s --max-time 5 https://api.ipify.org 2>/dev/null || echo unknown')
+      ok "ExpressVPN connected — egress IP: $VPN_IP"
+    else
+      err "ExpressVPN did not report Connected in 90s. Last status:"
+      docker exec expressvpn expressvpn status 2>&1 | sed 's/^/    /' || true
+      err "Check: docker logs expressvpn"
+      # Don't die — let the user see what happened and re-run the script.
+      # The dependent containers will skip VPN mode this run.
+      HAS_EXPRESSVPN="no"
+      docker stop expressvpn 2>/dev/null || true
+      docker rm   expressvpn 2>/dev/null || true
+    fi
+  fi
+
+  # Clear sensitive var from shell memory
+  unset EXPRESSVPN_ACTIVATION_CODE
+fi
+
+
+# ---------------------------------------------------------------
 # STEP 7/9 — Run Stremio Server
 # ---------------------------------------------------------------
 step "Starting Stremio Server"
@@ -714,9 +894,17 @@ fi
 STREMIO_ALREADY_OK=false
 if docker ps --filter "name=stremio-server" --filter "status=running" \
    --format '{{.Names}}' 2>/dev/null | grep -q "stremio-server"; then
-  if curl -s --max-time 3 "http://${STREMIO_BIND_IP}:11470/" &>/dev/null; then
+  # Make sure the network mode matches the desired state — if VPN was
+  # just turned on (or off) we need to recreate with the new networking.
+  CURRENT_NET_MODE=$(docker inspect -f '{{.HostConfig.NetworkMode}}' stremio-server 2>/dev/null || echo "")
+  DESIRED_NET_MODE="default"
+  [[ "$HAS_EXPRESSVPN" == "yes" ]] && DESIRED_NET_MODE="container:expressvpn"
+  if [[ "$CURRENT_NET_MODE" == "$DESIRED_NET_MODE" ]] \
+     && curl -s --max-time 3 "http://${STREMIO_BIND_IP}:11470/" &>/dev/null; then
     ok "Stremio Server already running and healthy — skipping restart"
     STREMIO_ALREADY_OK=true
+  elif [[ "$CURRENT_NET_MODE" != "$DESIRED_NET_MODE" ]]; then
+    info "Stremio network mode changed ($CURRENT_NET_MODE -> $DESIRED_NET_MODE) — recreating"
   fi
 fi
 
@@ -739,16 +927,31 @@ if [[ "$STREMIO_ALREADY_OK" != "true" ]]; then
   fi
 
   info "Starting Stremio container..."
-  docker run -d \
-    --name stremio-server \
-    --restart unless-stopped \
-    --platform linux/arm64 \
-    -p "${STREMIO_BIND_IP}:11470:11470" \
-    -p "${STREMIO_BIND_IP}:12470:12470" \
-    -e NO_CORS=1 \
-    -v "$MOUNT_POINT:/root/.stremio-server" \
-    stremio/server:latest \
-    || die "Failed to start Stremio container. Run: docker logs stremio-server"
+  if [[ "$HAS_EXPRESSVPN" == "yes" ]]; then
+    # Share the ExpressVPN container's network namespace. Port mappings
+    # already exist on the expressvpn container — adding `-p` here would
+    # be rejected by Docker.
+    docker run -d \
+      --name stremio-server \
+      --restart unless-stopped \
+      --platform linux/arm64 \
+      --network=container:expressvpn \
+      -e NO_CORS=1 \
+      -v "$MOUNT_POINT:/root/.stremio-server" \
+      stremio/server:latest \
+      || die "Failed to start Stremio container. Run: docker logs stremio-server"
+  else
+    docker run -d \
+      --name stremio-server \
+      --restart unless-stopped \
+      --platform linux/arm64 \
+      -p "${STREMIO_BIND_IP}:11470:11470" \
+      -p "${STREMIO_BIND_IP}:12470:12470" \
+      -e NO_CORS=1 \
+      -v "$MOUNT_POINT:/root/.stremio-server" \
+      stremio/server:latest \
+      || die "Failed to start Stremio container. Run: docker logs stremio-server"
+  fi
 
   # Wait for Stremio to actually respond on port 11470
   # Use the bind IP for the health check (localhost won't work if bound to LAN IP)
@@ -779,9 +982,15 @@ MOBILE_ALREADY_OK=false
 
 if docker ps --filter "name=alabtross-mobile" --filter "status=running" \
    --format '{{.Names}}' 2>/dev/null | grep -q "alabtross-mobile"; then
-  if curl -s --max-time 3 "http://${STREMIO_BIND_IP}:8080/" &>/dev/null; then
+  CURRENT_MOBILE_NET_MODE=$(docker inspect -f '{{.HostConfig.NetworkMode}}' alabtross-mobile 2>/dev/null || echo "")
+  DESIRED_MOBILE_NET_MODE="host"
+  [[ "$HAS_EXPRESSVPN" == "yes" ]] && DESIRED_MOBILE_NET_MODE="container:expressvpn"
+  if [[ "$CURRENT_MOBILE_NET_MODE" == "$DESIRED_MOBILE_NET_MODE" ]] \
+     && curl -s --max-time 3 "http://${STREMIO_BIND_IP}:8080/" &>/dev/null; then
     ok "Albatross Mobile UI already running — skipping"
     MOBILE_ALREADY_OK=true
+  elif [[ "$CURRENT_MOBILE_NET_MODE" != "$DESIRED_MOBILE_NET_MODE" ]]; then
+    info "Mobile UI network mode changed ($CURRENT_MOBILE_NET_MODE -> $DESIRED_MOBILE_NET_MODE) — recreating"
   fi
 fi
 
@@ -800,20 +1009,41 @@ if [[ "$MOBILE_ALREADY_OK" != "true" ]]; then
     mkdir -p "$LIBRARY_HOST_DIR"
 
     info "Starting Albatross Mobile UI..."
-    # --net=host is required for SSDP multicast (local device discovery for
-    # casting over VPN). Port 8080 is exposed directly on the host.
-    docker run -d \
-      --name alabtross-mobile \
-      --restart unless-stopped \
-      --net=host \
-      -e PORT=8080 \
-      -e STREMIO_SERVER="http://${STREMIO_BIND_IP}:11470" \
-      -e TORRENT_CACHE="/app/torrent-cache" \
-      -e LIBRARY_PATH="/app/torrent-cache/library" \
-      -e TMDB_API_KEY="${TMDB_API_KEY:?Set TMDB_API_KEY env var before running setup}" \
-      -v "${TORRENT_CACHE_HOST_DIR}:/app/torrent-cache" \
-      alabtross-mobile \
-      || die "Failed to start Mobile UI container."
+    if [[ "$HAS_EXPRESSVPN" == "yes" ]]; then
+      # Share the ExpressVPN container's network namespace. This routes
+      # the torrent scrapers' outbound traffic through the VPN at the
+      # cost of SSDP multicast — local Chromecast/DLNA discovery does
+      # not work in this mode. Port 8080 is already published on the
+      # expressvpn container. Stremio is reachable on localhost:11470
+      # inside the shared namespace.
+      docker run -d \
+        --name alabtross-mobile \
+        --restart unless-stopped \
+        --network=container:expressvpn \
+        -e PORT=8080 \
+        -e STREMIO_SERVER="http://localhost:11470" \
+        -e TORRENT_CACHE="/app/torrent-cache" \
+        -e LIBRARY_PATH="/app/torrent-cache/library" \
+        -e TMDB_API_KEY="${TMDB_API_KEY:?Set TMDB_API_KEY env var before running setup}" \
+        -v "${TORRENT_CACHE_HOST_DIR}:/app/torrent-cache" \
+        alabtross-mobile \
+        || die "Failed to start Mobile UI container."
+    else
+      # --net=host is required for SSDP multicast (local device discovery for
+      # casting over VPN). Port 8080 is exposed directly on the host.
+      docker run -d \
+        --name alabtross-mobile \
+        --restart unless-stopped \
+        --net=host \
+        -e PORT=8080 \
+        -e STREMIO_SERVER="http://${STREMIO_BIND_IP}:11470" \
+        -e TORRENT_CACHE="/app/torrent-cache" \
+        -e LIBRARY_PATH="/app/torrent-cache/library" \
+        -e TMDB_API_KEY="${TMDB_API_KEY:?Set TMDB_API_KEY env var before running setup}" \
+        -v "${TORRENT_CACHE_HOST_DIR}:/app/torrent-cache" \
+        alabtross-mobile \
+        || die "Failed to start Mobile UI container."
+    fi
 
     ok "Albatross Mobile UI is live on port 8080"
   else
@@ -977,6 +1207,7 @@ fi
 # Clear sensitive token from shell memory
 unset DUCKDNS_TOKEN
 unset DUCKDNS_AUTH_TOKEN
+unset EXPRESSVPN_ACTIVATION_CODE
 
 # ---------------------------------------------------------------
 # Get local IP for summary
@@ -994,26 +1225,65 @@ if [[ "${ENABLE_HEALTH:-no}" == "yes" ]]; then
 
   cat > "$HEALTH_SCRIPT" << 'HEALTHEOF'
 #!/bin/bash
-# Albatross health check — restarts containers if they crash
+# Albatross health check — restarts containers if they crash.
+#
+# When the ExpressVPN container is present, Stremio and Mobile UI
+# share its network namespace. If expressvpn restarts (or its
+# container ID changes), the dependents lose their netns and have
+# to be restarted too.
 LOG="/var/log/alabtross-health.log"
 
-check_container() {
+is_running() {
+  docker ps --filter "name=$1" --filter "status=running" \
+    --format '{{.Names}}' 2>/dev/null | grep -q "^$1$"
+}
+
+container_exists() {
+  docker ps -a --filter "name=$1" \
+    --format '{{.Names}}' 2>/dev/null | grep -q "^$1$"
+}
+
+restart_container() {
   local name=$1
-  if ! docker ps --filter "name=$name" --filter "status=running" \
-       --format '{{.Names}}' 2>/dev/null | grep -q "$name"; then
-    echo "$(date) [WARN] $name is down — restarting" >> "$LOG"
-    docker restart "$name" 2>/dev/null || docker start "$name" 2>/dev/null
-    if docker ps --filter "name=$name" --filter "status=running" \
-         --format '{{.Names}}' 2>/dev/null | grep -q "$name"; then
-      echo "$(date) [OK] $name restarted successfully" >> "$LOG"
-    else
-      echo "$(date) [ERROR] $name failed to restart" >> "$LOG"
-    fi
+  echo "$(date) [WARN] $name is down — restarting" >> "$LOG"
+  docker restart "$name" 2>/dev/null || docker start "$name" 2>/dev/null
+  if is_running "$name"; then
+    echo "$(date) [OK] $name restarted successfully" >> "$LOG"
+    return 0
+  else
+    echo "$(date) [ERROR] $name failed to restart" >> "$LOG"
+    return 1
   fi
 }
 
-check_container "stremio-server"
-check_container "alabtross-mobile"
+# If expressvpn exists, handle it first and cascade a restart to any
+# container that shares its network namespace.
+if container_exists "expressvpn"; then
+  VPN_WAS_RESTARTED=0
+  if ! is_running "expressvpn"; then
+    restart_container "expressvpn" && VPN_WAS_RESTARTED=1
+    # Give the daemon a few seconds to re-establish tun0 before
+    # touching the dependents.
+    sleep 5
+  fi
+
+  for dep in stremio-server alabtross-mobile; do
+    container_exists "$dep" || continue
+    DEP_NET=$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$dep" 2>/dev/null || echo "")
+    if [[ "$DEP_NET" == "container:expressvpn" ]] && [[ "$VPN_WAS_RESTARTED" == "1" ]]; then
+      echo "$(date) [INFO] $dep shares expressvpn netns — cascading restart" >> "$LOG"
+      restart_container "$dep"
+    elif ! is_running "$dep"; then
+      restart_container "$dep"
+    fi
+  done
+else
+  # No VPN — original behaviour
+  for name in stremio-server alabtross-mobile; do
+    container_exists "$name" || continue
+    is_running "$name" || restart_container "$name"
+  done
+fi
 
 # Trim log if over 1MB
 if [[ -f "$LOG" ]] && [[ $(stat -c%s "$LOG" 2>/dev/null || echo 0) -gt 1048576 ]]; then
@@ -1067,6 +1337,11 @@ echo "  Albatross:       https://albatross (via Tailscale Serve)"
 echo "  Albatross (LAN): http://$LOCAL_IP:8080"
 echo "  Storage:         $STORAGE_LABEL"
 echo "  VPN:             Tailscale (no port forwarding needed)"
+if [[ "$HAS_EXPRESSVPN" == "yes" ]]; then
+  EXPRESSVPN_EGRESS=$(docker exec expressvpn sh -c 'curl -s --max-time 5 https://api.ipify.org' 2>/dev/null || echo "unknown")
+  echo -e "  ExpressVPN:      ${GREEN}Active${NC} — streaming egress via $EXPRESSVPN_EGRESS"
+  echo "                   (Chromecast/DLNA discovery disabled in this mode)"
+fi
 if [[ "$HAS_DUCKDNS" == "yes" && -n "$DUCKDNS_DOMAIN" ]]; then
   echo "  DuckDNS:         ${DUCKDNS_DOMAIN}.duckdns.org"
 fi

@@ -815,17 +815,18 @@ class LibraryManager {
           return resolve({ status: 'no_video_files', items: [] });
         }
 
-        // Deselect all files first
+        // Deselect all files. Sequential mode (see _selectOnePackFile) selects
+        // exactly one file at a time below, after every item is registered.
         for (const f of engine.files) f.deselect();
 
-        // Select and create items for each video file
+        // Create an item per video file. We do NOT call file.select() here —
+        // _selectOnePackFile picks the first episode in season/episode order
+        // once all items are in this._items.
         const createdItems = [];
         // season=0 means "complete pack — detect seasons from filenames"
         const fallbackSeason = parseInt(season, 10) || 1;
 
         for (const file of videoFiles) {
-          file.select();
-
           // Parse season and episode from filename
           const parsed = this._parseSeasonEpisode(file.name, fallbackSeason);
           const seasonNum = parsed.season || fallbackSeason;
@@ -896,10 +897,14 @@ class LibraryManager {
         this._engines.set(packId, engine);
         this._startPeriodicSave();
 
+        // Sequential pack download: pick the first episode now that all items
+        // are registered. The progress timer auto-advances on completion.
+        this._selectOnePackFile(packId, engine);
+
         this._trackPackProgress(packId, engine);
         this._saveMetadata();
 
-        console.log(`[Library] Season pack started: "${name}" ${isCompletePack ? '(complete pack)' : `S${String(fallbackSeason).padStart(2, '0')}`} — ${videoFiles.length} episodes`);
+        console.log(`[Library] Season pack started: "${name}" ${isCompletePack ? '(complete pack)' : `S${String(fallbackSeason).padStart(2, '0')}`} — ${videoFiles.length} episodes (sequential)`);
         resolve({ status: 'started', items: createdItems });
       });
     });
@@ -997,14 +1002,13 @@ class LibraryManager {
         const idPrefix = imdbId || 'manual';
         const fallbackSeason = 1;
 
-        // Deselect everything; re-select only our target video files
+        // Deselect everything. Sequential mode selects exactly one file at
+        // a time below, once every item is registered.
         for (const f of engine.files) f.deselect();
 
         const createdItems = [];
 
         for (const file of videoFiles) {
-          file.select();
-
           let seasonNum = null;
           let episodeNum = null;
           let showName = null;
@@ -1075,10 +1079,14 @@ class LibraryManager {
         // Share the engine across all pack items (same mechanism as addSeasonPack)
         this._engines.set(packId, engine);
         this._startPeriodicSave();
+
+        // Sequential pack download — select only one file to start.
+        this._selectOnePackFile(packId, engine);
+
         this._trackPackProgress(packId, engine);
         this._saveMetadata();
 
-        console.log(`[Library] Manual torrent started: "${scanLabel}" — ${videoFiles.length} files`);
+        console.log(`[Library] Manual torrent started: "${scanLabel}" — ${videoFiles.length} files (sequential)`);
         resolve({ status: 'started', items: createdItems });
       });
     });
@@ -1198,6 +1206,69 @@ class LibraryManager {
   }
 
   /**
+   * Pick the next episode in a pack to download. Sequential mode: only one
+   * file is selected in the torrent engine at a time so its bandwidth isn't
+   * spread across dozens of episodes (which made each one crawl at a few
+   * KB/s and finish nothing for hours).
+   *
+   * Sort order: lowest season → lowest episode → earliest addedAt → id.
+   * Items without a season/episode number (featurettes, extras) sort to the
+   * end of their season.
+   */
+  _pickNextPackItem(packId) {
+    const candidates = [];
+    for (const item of this._items.values()) {
+      if (item.packId !== packId) continue;
+      if (item.status !== 'downloading') continue;
+      if ((item.progress || 0) >= 100) continue;
+      candidates.push(item);
+    }
+    if (candidates.length === 0) return null;
+    candidates.sort((a, b) => {
+      const sa = a.season ?? 999;
+      const sb = b.season ?? 999;
+      if (sa !== sb) return sa - sb;
+      const ea = a.episode ?? 999;
+      const eb = b.episode ?? 999;
+      if (ea !== eb) return ea - eb;
+      if (a.addedAt !== b.addedAt) return a.addedAt - b.addedAt;
+      return a.id.localeCompare(b.id);
+    });
+    return candidates[0];
+  }
+
+  /**
+   * Select exactly one file in the pack engine — the next one in episode
+   * order. Deselects every other file first so torrent-stream concentrates
+   * peer bandwidth on a single episode at a time.
+   *
+   * Returns the selected item, or null if everything in the pack is done
+   * or paused. Items whose fileName cannot be matched to a file in the
+   * torrent are marked failed and skipped.
+   */
+  _selectOnePackFile(packId, engine) {
+    if (!engine || !engine.files) return null;
+    for (const f of engine.files) f.deselect();
+
+    // Loop in case the next-picked item turns out to have a missing file —
+    // mark it failed and try again.
+    while (true) {
+      const next = this._pickNextPackItem(packId);
+      if (!next) return null;
+      const file = engine.files.find(f => path.basename(f.name) === next.fileName);
+      if (!file) {
+        console.error(`[Library] Pack sequential: file "${next.fileName}" not found in torrent — marking failed`);
+        next.status = 'failed';
+        next.error = 'File not found in torrent';
+        continue;
+      }
+      file.select();
+      console.log(`[Library] Pack sequential: now downloading "${next.fileName}"`);
+      return next;
+    }
+  }
+
+  /**
    * Shared progress tracking for pack downloads (used by both addSeasonPack and _resumePackDownload).
    * Polls file sizes every 2s to track progress, marks items complete when stable, and tears down
    * the engine when all items finish.
@@ -1218,13 +1289,26 @@ class LibraryManager {
       const sw = engine.swarm;
       const speed = sw ? sw.downloadSpeed() : 0;
       const peers = sw ? sw.wires.length : 0;
+
+      // In sequential mode, only one file at a time is selected in the engine,
+      // so attribute speed only to the currently-active item. Other "downloading"
+      // items in the pack are queued behind it and stay at 0 KB/s in the UI.
+      const activeItem = this._pickNextPackItem(packId);
+      const activeId = activeItem ? activeItem.id : null;
+
       let allComplete = true;
+      let advanceToNext = false;
 
       for (const [itemId, item] of this._items) {
         if (item.packId !== packId || item.status !== 'downloading') continue;
 
-        item.downloadSpeed = speed;
-        item.numPeers = peers;
+        if (itemId === activeId) {
+          item.downloadSpeed = speed;
+          item.numPeers = peers;
+        } else {
+          item.downloadSpeed = 0;
+          item.numPeers = peers;
+        }
 
         const file = filesByName.get(item.fileName);
         if (!file) {
@@ -1243,9 +1327,16 @@ class LibraryManager {
           item.downloadSpeed = 0;
           console.log(`[Library] Pack episode complete: "${item.fileName}"`);
           this._checkAndConvert(itemId);
+          if (itemId === activeId) advanceToNext = true;
         } else {
           allComplete = false;
         }
+      }
+
+      // If the active file just finished, immediately select the next one so
+      // peers don't sit idle until the next poll tick.
+      if (advanceToNext && !allComplete) {
+        this._selectOnePackFile(packId, engine);
       }
 
       if (allComplete) {
@@ -1345,21 +1436,22 @@ class LibraryManager {
       // Deselect all files first
       for (const f of engine.files) f.deselect();
 
-      // Select files for ALL downloading items in this pack (not just the ones
-      // originally passed in — more may have been retried since engine creation)
+      // Validate that every downloading item in this pack still has a matching
+      // file in the torrent. Items whose file vanished get marked failed so
+      // _selectOnePackFile won't try to pick them.
       for (const [, item] of this._items) {
         if (item.packId !== packId || item.status !== 'downloading') continue;
-
         const file = engine.files.find(f => path.basename(f.name) === item.fileName);
-        if (file) {
-          file.select();
-          console.log(`[Library] Pack resume: selected "${file.name}" for "${item.name}"`);
-        } else {
+        if (!file) {
           console.error(`[Library] Pack resume: could not find file "${item.fileName}" in torrent`);
           item.status = 'failed';
           item.error = 'File not found in torrent on resume';
         }
       }
+
+      // Sequential pack download — select only the first remaining episode.
+      // The progress timer auto-advances when this one finishes.
+      this._selectOnePackFile(packId, engine);
 
       this._startPeriodicSave();
       this._trackPackProgress(packId, engine);
@@ -1639,6 +1731,14 @@ class LibraryManager {
         );
         if (remainingActive.length === 0) {
           this._stopPackEngine(item.packId);
+        } else {
+          // Sequential mode: if we just paused the file currently selected
+          // in the engine, re-pick the next remaining episode so peers don't
+          // keep downloading something we no longer want.
+          const engine = this._engines.get(item.packId);
+          if (engine && engine.files) {
+            this._selectOnePackFile(item.packId, engine);
+          }
         }
       } else {
         this._stopDownload(id);
@@ -1687,12 +1787,12 @@ class LibraryManager {
         );
         this._resumePackDownload(item.packId, packItems);
       } else if (engine.files) {
-        // Engine already ready — select this item's file directly
-        const file = engine.files.find(f => path.basename(f.name) === item.fileName);
-        if (file) {
-          file.select();
-          console.log(`[Library] Added to running pack engine: "${item.fileName}"`);
-        }
+        // Engine already ready — re-pick the active file. If the resumed
+        // item is earlier in episode order than whatever is currently
+        // selected, _selectOnePackFile will switch to it. Otherwise the
+        // currently-active episode keeps running until it finishes.
+        this._selectOnePackFile(item.packId, engine);
+        console.log(`[Library] Added to running pack engine: "${item.fileName}"`);
       }
       // If engine exists but not ready yet, the ready handler will pick up this item
     } else {
@@ -1802,14 +1902,10 @@ class LibraryManager {
         );
         this._resumePackDownload(item.packId, packItems);
       } else if (engine.files) {
-        // Engine already ready — select this item's file directly
-        const file = engine.files.find(f => path.basename(f.name) === item.fileName);
-        if (file) {
-          file.select();
-          console.log(`[Library] Added to running pack engine: "${item.fileName}"`);
-        }
-        // If engine.files exists but file not found, _trackPackProgress will
-        // still monitor the item — it may already be on disk from a prior run
+        // Engine already ready — re-pick the active file. If this retried
+        // item is earlier in episode order it will become the active one.
+        this._selectOnePackFile(item.packId, engine);
+        console.log(`[Library] Added to running pack engine: "${item.fileName}"`);
       }
       // If engine exists but not ready yet (no .files), the ready handler
       // will pick up this item since it scans all downloading pack items

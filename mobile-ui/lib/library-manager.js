@@ -880,6 +880,185 @@ class LibraryManager {
   }
 
   /**
+   * Add a torrent from a raw magnet URI, auto-detecting whether it contains
+   * a single video file or a collection of files. Collections create a
+   * separate library item per video (using a shared torrent engine via
+   * packId, same as addSeasonPack); single-file torrents fall back to the
+   * simple addItem flow.
+   *
+   * Always async — torrent metadata must be fetched before we know how
+   * many video files the torrent contains.
+   */
+  addManual(opts) {
+    const { imdbId, type, name, poster, year, magnetUri, infoHash, quality, size } = opts;
+
+    if (!infoHash || !magnetUri) {
+      throw new Error('infoHash and magnetUri are required');
+    }
+
+    const packId = `pack_${infoHash}`;
+
+    // Already downloading as a pack — don't start a second engine on the same torrent
+    if (this._engines.has(packId)) {
+      return Promise.resolve({ status: 'already_downloading', items: [] });
+    }
+
+    const scanLabel = name || `Torrent ${infoHash.slice(0, 8)}`;
+    const scanDir = path.join(this._libraryPath, this._safeDirectoryName({ name: scanLabel, infoHash }));
+
+    return new Promise((resolve, reject) => {
+      // See torrent-engine.js for rationale on connections/uploads values.
+      const engine = torrentStream(magnetUri, {
+        connections: 100,
+        uploads: 0,
+        dht: true,
+        verify: true,
+        path: scanDir,
+        trackers: TRACKERS,
+      });
+
+      const timeout = setTimeout(() => {
+        try { engine.destroy(); } catch { /* ignore */ }
+        reject(new Error('Torrent metadata timeout (90s) — try a torrent with more seeds'));
+      }, 90000);
+
+      engine.on('error', (err) => {
+        clearTimeout(timeout);
+        try { engine.destroy(); } catch { /* ignore */ }
+        reject(err);
+      });
+
+      engine.on('ready', () => {
+        clearTimeout(timeout);
+
+        // Find all usable video files, excluding samples/trailers/promos and tiny junk files
+        const PACK_MIN_FILE_SIZE = 10 * 1024 * 1024; // 10 MB — skip promo/ad files
+        const dominated = /\b(sample|trailer|extra|bonus|featurette|interview)\b/i;
+        const videoFiles = engine.files.filter(f =>
+          isFileNameSafe(f.name) && !dominated.test(f.name) && f.length >= PACK_MIN_FILE_SIZE
+        );
+
+        if (videoFiles.length === 0) {
+          try { engine.destroy(); } catch { /* ignore */ }
+          return resolve({ status: 'no_video_files', items: [] });
+        }
+
+        // ─── Single-file torrent: delegate to addItem (it will re-open the engine) ───
+        // The redundant metadata fetch is a small cost (usually cached locally) in
+        // exchange for reusing all of addItem's queue/dedup/start logic unchanged.
+        if (videoFiles.length === 1) {
+          try { engine.destroy(); } catch { /* ignore */ }
+          try {
+            const result = this.addItem({
+              imdbId: imdbId || null,
+              type: type || 'movie',
+              name,
+              poster: poster || '',
+              year: year || '',
+              magnetUri,
+              infoHash,
+              quality: quality || '',
+              size: size || '',
+            });
+            return resolve({ ...result, items: [{ id: result.id, status: result.status }] });
+          } catch (err) {
+            return reject(err);
+          }
+        }
+
+        // ─── Multi-file torrent: one item per video, shared engine via packId ───
+        const safeType = ['movie', 'series'].includes(type) ? type : 'movie';
+        const idPrefix = imdbId || 'manual';
+        const fallbackSeason = 1;
+
+        // Deselect everything; re-select only our target video files
+        for (const f of engine.files) f.deselect();
+
+        const createdItems = [];
+
+        for (const file of videoFiles) {
+          file.select();
+
+          let seasonNum = null;
+          let episodeNum = null;
+          let showName = null;
+          if (safeType === 'series') {
+            const parsed = this._parseSeasonEpisode(file.name, fallbackSeason);
+            seasonNum = parsed.season || fallbackSeason;
+            episodeNum = parsed.episode;
+            showName = this._deriveShowNameFromFile(file.name) || name || 'Unknown';
+          }
+
+          // Episode items use S/E in the ID; everything else uses a filename slug
+          const filenameSlug = path.basename(file.name, path.extname(file.name))
+            .replace(/[^\w]/g, '_')
+            .slice(0, 30);
+          const itemId = (safeType === 'series' && episodeNum)
+            ? `${idPrefix}_s${seasonNum}e${episodeNum}_${infoHash.slice(0, 8)}`
+            : `${idPrefix}_${infoHash.slice(0, 8)}_${filenameSlug}`;
+
+          if (this._items.has(itemId)) {
+            const existing = this._items.get(itemId);
+            if (existing.status === 'complete' || existing.status === 'downloading') {
+              createdItems.push({ id: itemId, status: 'already_exists' });
+              continue;
+            }
+            this._items.delete(itemId);
+          }
+
+          const relativePath = path.relative(this._libraryPath, path.join(scanDir, file.path));
+          const displayName = this._deriveEpisodeName(file.name) || name || 'Unknown';
+
+          const item = {
+            id: itemId,
+            imdbId: imdbId || null,
+            type: safeType,
+            name: displayName,
+            showName,
+            poster: poster || '',
+            year: year || '',
+            quality: quality || '',
+            size: (file.length / (1024 * 1024 * 1024)).toFixed(1) + ' GB',
+            season: seasonNum,
+            episode: episodeNum,
+            infoHash,
+            magnetUri,
+            packId,
+            status: 'downloading',
+            progress: 0,
+            downloadSpeed: 0,
+            numPeers: 0,
+            filePath: relativePath,
+            fileName: path.basename(file.name),
+            fileSize: file.length,
+            addedAt: Date.now(),
+            completedAt: null,
+            error: null,
+          };
+
+          this._items.set(itemId, item);
+          createdItems.push({ id: itemId, status: 'started' });
+        }
+
+        if (createdItems.filter(i => i.status === 'started').length === 0) {
+          try { engine.destroy(); } catch { /* ignore */ }
+          this._saveMetadata();
+          return resolve({ status: 'all_exist', items: createdItems });
+        }
+
+        // Share the engine across all pack items (same mechanism as addSeasonPack)
+        this._engines.set(packId, engine);
+        this._startPeriodicSave();
+        this._trackPackProgress(packId, engine);
+        this._saveMetadata();
+
+        console.log(`[Library] Manual torrent started: "${scanLabel}" — ${videoFiles.length} files`);
+        resolve({ status: 'started', items: createdItems });
+      });
+    });
+  }
+
+  /**
    * Parse season and episode numbers from a filename.
    * Returns { season, episode } where either may be null.
    * @param {string} fileName

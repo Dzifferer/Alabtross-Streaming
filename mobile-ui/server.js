@@ -1491,8 +1491,9 @@ app.post('/api/library/repair-metadata', rateLimit, async (req, res) => {
   }
 });
 
-// POST /api/library/add-manual — add a torrent by magnet URI or info hash
-app.post('/api/library/add-manual', rateLimit, (req, res) => {
+// POST /api/library/add-manual — add a torrent by magnet URI or info hash.
+// Handles both single-file and multi-file (collection) torrents automatically.
+app.post('/api/library/add-manual', rateLimit, async (req, res) => {
   const { TRACKERS } = require('./lib/file-safety');
   let { magnetUri, infoHash, name, type, quality } = req.body;
 
@@ -1545,7 +1546,7 @@ app.post('/api/library/add-manual', rateLimit, (req, res) => {
   }
 
   try {
-    const result = library.addItem({
+    const result = await library.addManual({
       imdbId: null,
       type: ['movie', 'series'].includes(type) ? type : 'movie',
       name,
@@ -1558,6 +1559,7 @@ app.post('/api/library/add-manual', rateLimit, (req, res) => {
     });
     res.json(result);
   } catch (err) {
+    console.error('[API] Manual torrent add error:', err.message);
     res.status(400).json({ error: err.message });
   }
 });

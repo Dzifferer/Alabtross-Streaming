@@ -3590,7 +3590,17 @@
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || 'Failed to add torrent');
 
-        if (data.status === 'already_exists') {
+        // Multi-file torrents return { status, items: [...] }; single-file
+        // returns { id, status, items: [...] } — handle both shapes.
+        const startedCount = Array.isArray(data.items)
+          ? data.items.filter(i => i.status === 'started').length
+          : 0;
+
+        if (data.status === 'no_video_files') {
+          throw new Error('No playable video files found in torrent');
+        } else if (data.status === 'all_exist') {
+          showToast('All files from this torrent are already in your library');
+        } else if (data.status === 'already_exists') {
           showToast('Already in your library');
         } else if (data.status === 'already_downloading') {
           showToast('Already downloading');
@@ -3598,6 +3608,8 @@
           showToast('Already queued');
         } else if (data.status === 'queued') {
           showToast('Download queued — will start when a slot opens');
+        } else if (startedCount > 1) {
+          showToast(`Collection added — downloading ${startedCount} files...`);
         } else {
           showToast('Torrent added — downloading...');
         }

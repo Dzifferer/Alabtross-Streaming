@@ -32,6 +32,7 @@ function resolveWithFallback(hostname) {
 const { getMovieStreams, getSeriesStreams, getSeasonPackStreams, getCompleteStreams, diagnoseProviders } = require('./lib/stream-providers');
 const TorrentEngine = require('./lib/torrent-engine');
 const LibraryManager = require('./lib/library-manager');
+const { getSystemDiag } = require('./lib/system-diag');
 const { discoverDevices, getLocalIP } = require('./lib/local-discovery');
 const castManager = require('./lib/cast-manager');
 
@@ -40,7 +41,12 @@ const PORT = process.env.PORT || 8080;
 const TORRENT_CACHE_PATH = process.env.TORRENT_CACHE || path.join(__dirname, '.torrent-cache');
 const LIBRARY_PATH = process.env.LIBRARY_PATH || path.join(TORRENT_CACHE_PATH, 'library');
 const SETTINGS_PATH = path.join(TORRENT_CACHE_PATH, 'settings.json');
-let MAX_CONCURRENT_STREAMS = parseInt(process.env.MAX_CONCURRENT_STREAMS, 10) || 5;
+// Default is intentionally low. 6 concurrent torrents on a Jetson-class box
+// starve each other for CPU (piece verify), disk I/O (random writes on eMMC/SD),
+// and BT reciprocity slots, so aggregate throughput is usually *better* with
+// fewer parallel downloads that individually saturate available resources.
+// Override with the MAX_CONCURRENT_STREAMS env var or the in-app setting.
+let MAX_CONCURRENT_STREAMS = parseInt(process.env.MAX_CONCURRENT_STREAMS, 10) || 2;
 
 // Load persisted settings from disk
 try {
@@ -1063,6 +1069,121 @@ app.get('/api/torrent-status/:infoHash/bottleneck', (req, res) => {
     return res.status(404).json({ error: 'Torrent not active' });
   }
   res.json(diag);
+});
+
+// GET /api/diagnostics/system — sample host CPU / memory / disk / network over
+// ~1 second and aggregate all active torrent speeds. Use this to figure out
+// whether slow downloads are bottlenecked on the host (CPU / disk / network
+// saturated) or on the BT swarm (torrent speeds low but host is idle).
+app.get('/api/diagnostics/system', async (req, res) => {
+  try {
+    const sampleMs = Math.min(5000, Math.max(200, parseInt(req.query.ms, 10) || 1000));
+    const sys = await getSystemDiag(sampleMs);
+
+    // Aggregate torrent throughput across both streaming engine and library.
+    let torrentDownloadBps = 0;
+    let torrentPeers = 0;
+    let activeTorrents = 0;
+    const perTorrent = [];
+
+    try {
+      const eng = engine; // don't lazy-init just for diagnostics
+      if (eng) {
+        for (const s of eng.getAllStatus()) {
+          torrentDownloadBps += s.downloadSpeed || 0;
+          torrentPeers += s.numPeers || 0;
+          activeTorrents++;
+          perTorrent.push({
+            source: 'stream',
+            name: s.name,
+            downloadBps: s.downloadSpeed || 0,
+            peers: s.numPeers || 0,
+          });
+        }
+      }
+    } catch (e) {
+      console.warn('[Diag] engine status failed:', e.message);
+    }
+
+    try {
+      for (const item of library.getAll()) {
+        if (item.status !== 'downloading') continue;
+        torrentDownloadBps += item.downloadSpeed || 0;
+        torrentPeers += item.numPeers || 0;
+        activeTorrents++;
+        perTorrent.push({
+          source: 'library',
+          name: item.name,
+          downloadBps: item.downloadSpeed || 0,
+          peers: item.numPeers || 0,
+        });
+      }
+    } catch (e) {
+      console.warn('[Diag] library status failed:', e.message);
+    }
+
+    // Total network rx across non-loopback interfaces (host-wide, not just BT).
+    let hostNetRxBps = 0;
+    let hostNetTxBps = 0;
+    for (const iface of Object.values(sys.network)) {
+      hostNetRxBps += iface.rxBytesPerSec;
+      hostNetTxBps += iface.txBytesPerSec;
+    }
+
+    // Total disk write across non-pseudo devices.
+    let hostDiskWriteBps = 0;
+    let hostDiskReadBps = 0;
+    for (const dev of Object.values(sys.disk)) {
+      hostDiskWriteBps += dev.writeBytesPerSec;
+      hostDiskReadBps += dev.readBytesPerSec;
+    }
+
+    // Best-effort bottleneck hint — compares torrent pull rate to host
+    // resource usage. This is heuristic, not authoritative.
+    let hint = 'unknown';
+    const torrentMBps = torrentDownloadBps / 1e6;
+    if (activeTorrents === 0) {
+      hint = 'idle (no active downloads)';
+    } else if (sys.cpu.usagePct >= 90) {
+      hint = `cpu_bound (${sys.cpu.usagePct}% cpu) — likely verify-pass or too many concurrent torrents`;
+    } else if (sys.memory.usedPct >= 95) {
+      hint = `memory_pressure (${sys.memory.usedPct}% used) — may be swapping`;
+    } else if (hostNetRxBps > 0 && torrentDownloadBps > 0 && torrentDownloadBps >= hostNetRxBps * 0.9) {
+      // Torrent pull is close to total host network rx — suggests either
+      // swarm-limited or link-limited, not something else on the box.
+      hint = `network_or_swarm (torrents = ${(torrentMBps).toFixed(2)} MB/s, host rx = ${(hostNetRxBps / 1e6).toFixed(2)} MB/s) — either the swarm is giving all it has or the uplink/VPN is the cap`;
+    } else if (hostNetRxBps > torrentDownloadBps * 1.5) {
+      hint = `host_has_headroom — host is receiving ${(hostNetRxBps / 1e6).toFixed(2)} MB/s total but torrents only account for ${(torrentMBps).toFixed(2)} MB/s. BT protocol (e.g. uploads:0 choking) or swarm health is the cap, not your link.`;
+    } else {
+      hint = `swarm_or_protocol — torrents ${(torrentMBps).toFixed(2)} MB/s, ${torrentPeers} peers total across ${activeTorrents} torrents. Nothing on the host is saturated.`;
+    }
+
+    res.json({
+      hint,
+      torrents: {
+        active: activeTorrents,
+        totalDownloadBps: torrentDownloadBps,
+        totalDownloadMBps: +(torrentMBps).toFixed(3),
+        totalPeers: torrentPeers,
+        perTorrent,
+      },
+      host: {
+        cpu: sys.cpu,
+        memory: sys.memory,
+        network: sys.network,
+        disk: sys.disk,
+        totalNetRxBps: hostNetRxBps,
+        totalNetTxBps: hostNetTxBps,
+        totalDiskReadBps: hostDiskReadBps,
+        totalDiskWriteBps: hostDiskWriteBps,
+      },
+      sampleMs: sys.sampleMs,
+      platform: sys.platform,
+    });
+  } catch (err) {
+    console.error('[Diag] system diagnostic failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ─── Library API Routes ───────────────────────────────────────────────

@@ -794,7 +794,7 @@ if [[ "$MOBILE_ALREADY_OK" != "true" ]]; then
       -e STREMIO_SERVER="http://${STREMIO_BIND_IP}:11470" \
       -e TORRENT_CACHE="/app/torrent-cache" \
       -e LIBRARY_PATH="/app/torrent-cache/library" \
-      -e TMDB_API_KEY="689b2177d2f7ce44d969f478383d71bd" \
+      -e TMDB_API_KEY="${TMDB_API_KEY:?Set TMDB_API_KEY env var before running setup}" \
       -v "${TORRENT_CACHE_HOST_DIR}:/app/torrent-cache" \
       alabtross-mobile \
       || die "Failed to start Mobile UI container."

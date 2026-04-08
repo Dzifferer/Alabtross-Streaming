@@ -33,7 +33,7 @@ sudo docker run -d \
   -e STREMIO_SERVER="http://${BIND_IP}:11470" \
   -e TORRENT_CACHE="/app/torrent-cache" \
   -e LIBRARY_PATH="/app/torrent-cache/library" \
-  -e TMDB_API_KEY="689b2177d2f7ce44d969f478383d71bd" \
+  -e TMDB_API_KEY="${TMDB_API_KEY:?Set TMDB_API_KEY env var before deploying}" \
   -v "/mnt/movies/torrent-cache:/app/torrent-cache" \
   alabtross-mobile
 

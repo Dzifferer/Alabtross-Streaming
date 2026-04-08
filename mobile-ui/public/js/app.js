@@ -4016,6 +4016,39 @@
         reject(new Error(`${action} timed out after ${Math.round((Date.now() - startedAt) / 1000)}s (hard) [readyState=${rs} networkState=${ns} buffered=${buf}]`));
       }, hardMs);
 
+      // Decoder-stuck watchdog. Some files are parseable (metadata loads,
+      // progress events fire, the stall timer keeps resetting) but the
+      // browser never actually decodes a frame — readyState stays at 1
+      // (HAVE_METADATA) forever. Observed on Firefox/Linux with some
+      // 8-bit H.264 High profile files whose exact cause isn't
+      // determined. If we hit loadedmetadata but never reach loadeddata
+      // (readyState 2) within `decoderStuckMs` despite buffered data
+      // growing, give up on this action and let the fallback transcode
+      // run. Transcode re-encodes to a known-good H.264 baseline that
+      // Firefox always decodes.
+      //
+      // Only armed for direct/remux — transcode's first fragment always
+      // produces a loadeddata quickly, so if transcode gets stuck that's
+      // a real server problem and the stall/hard timers should catch it.
+      const decoderStuckMs = 15000;
+      let decoderStuckTimer = null;
+      const armDecoderStuckWatchdog = () => {
+        if (action === 'transcode') return;
+        if (decoderStuckTimer) clearTimeout(decoderStuckTimer);
+        decoderStuckTimer = setTimeout(() => {
+          if (settled) return;
+          // Only fire if we're STILL stuck at HAVE_METADATA. If the browser
+          // made it to HAVE_CURRENT_DATA (2) or beyond, onReady will have
+          // already resolved this promise.
+          if (v.readyState <= 1) {
+            settled = true;
+            cleanupListeners();
+            const buf = v.buffered.length > 0 ? v.buffered.end(0).toFixed(1) + 's' : '0s';
+            reject(new Error(`${action} decoder stuck at HAVE_METADATA (buffered=${buf}) — browser can't decode this file`));
+          }
+        }, decoderStuckMs);
+      };
+
       const cleanupListeners = () => {
         v.removeEventListener('canplay', onReady);
         v.removeEventListener('loadeddata', onReady);
@@ -4027,6 +4060,7 @@
         v.removeEventListener('stalled', onStalled);
         v.removeEventListener('waiting', onWaiting);
         if (stallTimer) clearTimeout(stallTimer);
+        if (decoderStuckTimer) clearTimeout(decoderStuckTimer);
         clearTimeout(hardTimer);
       };
 
@@ -4055,7 +4089,15 @@
         reject(new Error(`Media error (${code}) on ${action}`));
       };
       const onProgress = () => { logEvent('progress'); resetStall(); };
-      const onLoadedMetadata = () => { logEvent('loadedmetadata'); resetStall(); };
+      const onLoadedMetadata = () => {
+        logEvent('loadedmetadata');
+        resetStall();
+        // Start watching for a stuck decoder. If readyState doesn't
+        // advance from HAVE_METADATA (1) to HAVE_CURRENT_DATA (2) within
+        // the next few seconds, we know the browser can't decode this
+        // file and we should fall back to transcode.
+        armDecoderStuckWatchdog();
+      };
       const onLoadStart = () => { logEvent('loadstart'); resetStall(); };
       const onSuspend = () => { logEvent('suspend'); resetStall(); };
       const onStalled = () => { logEvent('stalled'); /* don't reset */ };

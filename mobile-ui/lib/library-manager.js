@@ -2606,6 +2606,16 @@ class LibraryManager {
 
           const videoCodec = videoStream ? videoStream.codec_name : null;
           const audioCodec = audioStream ? audioStream.codec_name : null;
+          // Profile and pixel format are needed to detect 10-bit / high-profile
+          // H.264 encodes that browsers (especially Firefox on Linux) can parse
+          // the metadata of but cannot actually decode. A file that says
+          // codec=h264 but uses yuv420p10le will load metadata, fire progress
+          // events, buffer plenty of data, and then just sit at readyState=1
+          // (HAVE_METADATA) forever because the decoder refuses to produce
+          // frames. classifyForClient uses these fields to route such files
+          // to /stream/transcode instead of falsely marking them direct-play.
+          const videoProfile = videoStream ? (videoStream.profile || null) : null;
+          const pixFmt = videoStream ? (videoStream.pix_fmt || null) : null;
           const container = info.format ? info.format.format_name : null;
           const duration = info.format && info.format.duration != null
             ? parseFloat(info.format.duration)
@@ -2630,6 +2640,8 @@ class LibraryManager {
             ext,
             container,
             videoCodec,
+            videoProfile,
+            pixFmt,
             audioCodec,
             duration,
             hasAudio: !!audioStream,
@@ -2668,6 +2680,68 @@ class LibraryManager {
   }
 
   /**
+   * Whether a probed video stream uses a profile / pixel format that
+   * browsers can actually decode in software. The codec name alone is
+   * NOT enough — Firefox will happily parse the metadata of a 10-bit
+   * H.264 High 10 file, report codec_name=h264, and then stall forever
+   * at readyState=1 because its software decoder can't produce frames.
+   *
+   * Browser-decodable matrix (conservative, confirmed for Firefox/Chrome):
+   *   H.264:
+   *     profile in  {Baseline, Main, High, Constrained Baseline, High Progressive}
+   *     pix_fmt in  {yuv420p, yuvj420p}
+   *   HEVC:
+   *     profile in  {Main, Main 10}      (Main 10 works on clients with HEVC HW)
+   *     pix_fmt in  {yuv420p, yuv420p10le}
+   *
+   * Anything else → must transcode, not direct-play.
+   */
+  _isBrowserDecodable(probe) {
+    if (!probe || !probe.probeOk) return false;
+    const codec = probe.videoCodec;
+    const profile = (probe.videoProfile || '').toLowerCase();
+    const pix = (probe.pixFmt || '').toLowerCase();
+
+    if (codec === 'h264') {
+      // 10-bit / 4:2:2 / 4:4:4 pixel formats are not in any browser's
+      // H.264 decoder. yuv420p / yuvj420p (range-tagged) are the only
+      // universally supported ones.
+      if (pix && pix !== 'yuv420p' && pix !== 'yuvj420p') return false;
+      // High 10, High 4:2:2, High 4:4:4, Hi10P, etc. are not browser-safe.
+      // Standard browser-playable H.264 profiles are Baseline / Main /
+      // Constrained Baseline / High / High Progressive.
+      const h264Ok = (
+        profile === '' /* unknown — trust pix_fmt */ ||
+        profile === 'baseline' ||
+        profile === 'constrained baseline' ||
+        profile === 'main' ||
+        profile === 'high' ||
+        profile === 'high progressive' ||
+        profile === 'progressive high'
+      );
+      return h264Ok;
+    }
+
+    if (codec === 'hevc') {
+      // HEVC Main and Main 10 are both browser-playable on clients that
+      // report hevc capability (they go through the hardware decoder,
+      // which handles both 8- and 10-bit 4:2:0). 4:2:2 / 4:4:4 variants
+      // aren't in any browser.
+      if (pix && pix !== 'yuv420p' && pix !== 'yuv420p10le') return false;
+      const hevcOk = (
+        profile === '' ||
+        profile === 'main' ||
+        profile === 'main 10' ||
+        profile === 'main10'
+      );
+      return hevcOk;
+    }
+
+    // All other codecs (vp9, av1, mpeg4, mpeg2, etc.) need transcoding.
+    return false;
+  }
+
+  /**
    * Decide how a SPECIFIC client should play a probed file. This is the
    * single source of truth for the probe endpoint and the client's playback
    * decision tree. `caps` describes what the browser can decode:
@@ -2686,6 +2760,8 @@ class LibraryManager {
       action: 'unplayable',
       reason: null,
       videoCodec: probe ? probe.videoCodec : null,
+      videoProfile: probe ? probe.videoProfile : null,
+      pixFmt: probe ? probe.pixFmt : null,
       audioCodec: probe ? probe.audioCodec : null,
       container: probe ? probe.container : null,
       ext: probe ? probe.ext : null,
@@ -2697,15 +2773,25 @@ class LibraryManager {
       return result;
     }
 
-    // Video codec check. If the client can't decode the source video,
-    // we MUST transcode — no container fix will help.
-    const videoPlayable =
+    // Video codec check, in two layers:
+    //   1. Is the codec name in the client's capability set?
+    //   2. Is the specific profile / pixel format browser-decodable?
+    // Layer 2 catches files that ffprobe reports as h264 but whose
+    // High 10 profile / 10-bit pixel format can't actually be decoded.
+    const codecInCaps =
       (probe.videoCodec === 'h264' && c.h264) ||
       (probe.videoCodec === 'hevc' && c.hevc);
 
+    const profileDecodable = this._isBrowserDecodable(probe);
+    const videoPlayable = codecInCaps && profileDecodable;
+
     if (!videoPlayable) {
       result.action = 'transcode';
-      result.reason = `video codec ${probe.videoCodec || 'unknown'} not playable by client`;
+      if (!codecInCaps) {
+        result.reason = `video codec ${probe.videoCodec || 'unknown'} not playable by client`;
+      } else {
+        result.reason = `video profile ${probe.videoProfile || '?'} / pix_fmt ${probe.pixFmt || '?'} not browser-decodable`;
+      }
       return result;
     }
 

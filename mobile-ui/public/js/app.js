@@ -3724,8 +3724,6 @@
   function tryLibraryStream(url, action) {
     return new Promise((resolve, reject) => {
       const v = dom.videoPlayer;
-      v.src = url;
-      v.load();
 
       // Time budget for reaching 'canplay' with NO activity. Any progress
       // event resets this. Transcode gets longer because libx264 on Orin
@@ -3739,11 +3737,6 @@
       let settled = false;
       let stallTimer = null;
       const startedAt = Date.now();
-      const hardTimer = setTimeout(() => {
-        if (settled) return; settled = true;
-        cleanupListeners();
-        reject(new Error(`${action} timed out after ${Math.round((Date.now() - startedAt) / 1000)}s (hard)`));
-      }, hardMs);
 
       const resetStall = () => {
         if (settled) return;
@@ -3754,6 +3747,12 @@
           reject(new Error(`${action} stalled (no activity for ${stallMs / 1000}s)`));
         }, stallMs);
       };
+
+      const hardTimer = setTimeout(() => {
+        if (settled) return; settled = true;
+        cleanupListeners();
+        reject(new Error(`${action} timed out after ${Math.round((Date.now() - startedAt) / 1000)}s (hard)`));
+      }, hardMs);
 
       const cleanupListeners = () => {
         v.removeEventListener('canplay', onCanPlay);
@@ -3785,24 +3784,56 @@
       };
       const onActivity = () => resetStall();
 
-      v.addEventListener('canplay', onCanPlay, { once: true });
-      v.addEventListener('error', onError, { once: true });
+      // IMPORTANT: attach listeners BEFORE setting src. If we set src first
+      // and listeners after, we race against Firefox's internal task queue
+      // and can miss an immediate 'error' from a cached-load code path.
       // 'progress' fires whenever the browser appends bytes to the buffer.
       // 'loadedmetadata' fires once the moov atom has been parsed.
       // 'loadeddata' fires on the first decoded frame.
       // 'suspend' fires when the browser pauses fetching (not an error, but
       // activity). We add them as plain listeners (no {once: true}) so we
       // can reset the stall timer on every tick.
+      v.addEventListener('canplay', onCanPlay, { once: true });
+      v.addEventListener('error', onError, { once: true });
       v.addEventListener('progress', onActivity);
       v.addEventListener('loadedmetadata', onActivity);
       v.addEventListener('loadeddata', onActivity);
       v.addEventListener('suspend', onActivity);
 
+      // Defensively reset the element before assigning a new src. If a
+      // previous playback attempt left it in an error or loading state,
+      // setting src alone can cause Firefox to fire a spurious
+      // MEDIA_ERR_SRC_NOT_SUPPORTED on the aborted load before the new
+      // load begins. Clearing src then calling load() drains any pending
+      // network activity and resets the media element's readyState.
+      try {
+        v.pause();
+        v.removeAttribute('src');
+        v.load();
+      } catch { /* ignore — element may be in a weird state */ }
+
+      v.src = url;
+      v.load();
+
       resetStall();
     });
   }
 
+  // Single-flight guard for library playback. If the user clicks another
+  // item (or the same one twice) while one is already loading, we cancel
+  // the in-flight attempt by bumping the generation counter. This prevents
+  // concurrent playLibraryItem calls from fighting over the same <video>
+  // element, which previously caused "Media error (code 4)" and spurious
+  // timeouts because one attempt's v.src assignment was aborting another's.
+  let _libraryPlayGeneration = 0;
+
   async function playLibraryItem(id) {
+    // Claim this playback attempt. Any subsequent call to playLibraryItem
+    // will bump the generation and our `isStale()` checks will bail out
+    // of the older attempt's loops and pending awaits.
+    const myGeneration = ++_libraryPlayGeneration;
+    const isStale = () => _libraryPlayGeneration !== myGeneration;
+
     // Grab poster/title from the library card before we navigate away —
     // once we're on the player view, the library DOM is gone.
     const itemEl = dom.libraryContent.querySelector(`.card[data-id="${CSS.escape(id)}"]`);
@@ -3846,8 +3877,13 @@
       }
 
       probe = await probeResp.json();
+      if (isStale()) {
+        console.log('[Library] Playback attempt superseded before probe completed — aborting');
+        return;
+      }
       console.log('[Library] Probe:', probe);
     } catch (e) {
+      if (isStale()) return;
       showPlayerError(
         'Playback failed',
         `Couldn\'t check file: ${escapeHTML(e.message)}`
@@ -3893,6 +3929,7 @@
     };
 
     for (let i = 0; i < attempts.length; i++) {
+      if (isStale()) return;
       const { action, endpoint } = attempts[i];
       const statusEl = dom.playerOverlay.querySelector('.loading-status');
       if (statusEl) {
@@ -3903,9 +3940,11 @@
 
       try {
         await tryLibraryStream(endpoint, action);
+        if (isStale()) return;
         openCurtains();
         return;
       } catch (e) {
+        if (isStale()) return;
         console.warn(`[Library] ${action} playback failed:`, e.message);
         const isLastAttempt = i === attempts.length - 1;
         if (isLastAttempt) {

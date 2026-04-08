@@ -1314,6 +1314,17 @@ class LibraryManager {
     return getMimeType(filename);
   }
 
+  /**
+   * Probe a library item's file and return codec/container metadata.
+   * Returns null if the item or its file can't be found. Otherwise returns
+   * whatever _probeFile() returns — see that method's docstring.
+   */
+  async probeItem(id) {
+    const filePath = this.getFilePath(id);
+    if (!filePath) return null;
+    return this._probeFile(filePath);
+  }
+
   destroy() {
     console.log('[Library] Shutting down — saving download state for resumption...');
     if (this._metadataSaveTimer) {
@@ -1841,8 +1852,12 @@ class LibraryManager {
   // ─── Video Conversion ──────────────────────────
 
   /**
-   * Probe a video file with ffprobe to check codec/container compatibility.
-   * Returns a Promise resolving to { directPlay, videoCodec, audioCodec, container, duration, ext }.
+   * Probe a video file with ffprobe to extract codec / container metadata.
+   * Returns a Promise resolving to {
+   *   probeOk, videoCodec, audioCodec, container, duration, ext, reason
+   * }. Callers should use classifyForClient() or _isServerConvertible()
+   * to interpret the result — this method does NOT decide playability,
+   * it only reports what's in the file.
    */
   _probeFile(filePath) {
     return new Promise((resolve) => {
@@ -1860,7 +1875,7 @@ class LibraryManager {
 
       ffprobe.on('close', (code) => {
         if (code !== 0) {
-          return resolve({ directPlay: false, reason: 'ffprobe failed' });
+          return resolve({ probeOk: false, ext, reason: 'ffprobe failed' });
         }
         try {
           const info = JSON.parse(output);
@@ -1870,23 +1885,132 @@ class LibraryManager {
           const videoCodec = videoStream ? videoStream.codec_name : null;
           const audioCodec = audioStream ? audioStream.codec_name : null;
           const container = info.format ? info.format.format_name : null;
-          const duration = info.format ? parseFloat(info.format.duration) : null;
+          const duration = info.format && info.format.duration != null
+            ? parseFloat(info.format.duration)
+            : null;
 
-          const compatibleVideo = ['h264', 'hevc'].includes(videoCodec);
-          const compatibleAudio = !audioStream || ['aac', 'mp3'].includes(audioCodec);
-          const compatibleContainer = ext === '.mp4' || ext === '.m4v';
-          const directPlay = compatibleVideo && compatibleAudio && compatibleContainer;
+          // Empty / broken probe — ffprobe succeeded but found no streams.
+          // Usually means the file is still downloading or truncated on disk.
+          if (!videoStream) {
+            return resolve({
+              probeOk: false,
+              ext,
+              container,
+              videoCodec: null,
+              audioCodec,
+              duration,
+              reason: 'no video stream (file may still be downloading)',
+            });
+          }
 
-          resolve({ directPlay, videoCodec, audioCodec, container, duration, ext });
+          resolve({
+            probeOk: true,
+            ext,
+            container,
+            videoCodec,
+            audioCodec,
+            duration,
+            hasAudio: !!audioStream,
+          });
         } catch {
-          resolve({ directPlay: false, reason: 'probe parse error' });
+          resolve({ probeOk: false, ext, reason: 'probe parse error' });
         }
       });
 
       ffprobe.on('error', () => {
-        resolve({ directPlay: false, reason: 'ffprobe not available' });
+        resolve({ probeOk: false, ext, reason: 'ffprobe not available' });
       });
     });
+  }
+
+  /**
+   * Decide what the server should do on permanent (background) conversion.
+   * This is capability-AGNOSTIC — it runs at download time when we don't
+   * know which client will eventually play the file. The goal is to fix
+   * cheap problems (MKV container, AC-3 audio) with a stream-copy remux.
+   * HEVC video is left alone because transcoding is expensive; the
+   * on-the-fly /stream/transcode endpoint handles HEVC for clients that
+   * can't decode it.
+   *
+   * Returns true when the file would benefit from a cheap remux.
+   */
+  _isServerConvertible(probe) {
+    if (!probe || !probe.probeOk) return false;
+    // Video codec must be stream-copyable (h264 or hevc). For anything else
+    // we'd need a full transcode — too expensive for background conversion.
+    if (!['h264', 'hevc'].includes(probe.videoCodec)) return false;
+    const containerOk = probe.ext === '.mp4' || probe.ext === '.m4v';
+    const audioOk = !probe.hasAudio || ['aac', 'mp3'].includes(probe.audioCodec);
+    // Only convert if at least one thing is wrong that a remux can fix.
+    return !containerOk || !audioOk;
+  }
+
+  /**
+   * Decide how a SPECIFIC client should play a probed file. This is the
+   * single source of truth for the probe endpoint and the client's playback
+   * decision tree. `caps` describes what the browser can decode:
+   *   { h264: bool, hevc: bool, aac: bool, mp3: bool }
+   * All caps default to false if omitted — be explicit on the client.
+   *
+   * Returns one of the following actions:
+   *   'direct'    — serve the raw file (fast, seekable, no ffmpeg)
+   *   'remux'     — container + audio fix, stream-copy video (cheap ffmpeg)
+   *   'transcode' — full video re-encode to H.264 + AAC (expensive ffmpeg)
+   *   'unplayable' — cannot play at all (probe failed, corrupt, etc.)
+   */
+  classifyForClient(probe, caps) {
+    const c = caps || {};
+    const result = {
+      action: 'unplayable',
+      reason: null,
+      videoCodec: probe ? probe.videoCodec : null,
+      audioCodec: probe ? probe.audioCodec : null,
+      container: probe ? probe.container : null,
+      ext: probe ? probe.ext : null,
+      duration: probe ? probe.duration : null,
+    };
+
+    if (!probe || !probe.probeOk) {
+      result.reason = (probe && probe.reason) || 'probe failed';
+      return result;
+    }
+
+    // Video codec check. If the client can't decode the source video,
+    // we MUST transcode — no container fix will help.
+    const videoPlayable =
+      (probe.videoCodec === 'h264' && c.h264) ||
+      (probe.videoCodec === 'hevc' && c.hevc);
+
+    if (!videoPlayable) {
+      result.action = 'transcode';
+      result.reason = `video codec ${probe.videoCodec || 'unknown'} not playable by client`;
+      return result;
+    }
+
+    // Audio codec check. Browser-native: aac, mp3. Everything else (ac3,
+    // eac3, dts, truehd, flac, opus-in-mp4) needs transcoding. Files with
+    // no audio stream at all are fine to direct-play.
+    const audioPlayable =
+      !probe.hasAudio ||
+      (probe.audioCodec === 'aac' && c.aac) ||
+      (probe.audioCodec === 'mp3' && c.mp3);
+
+    // Container check. Browsers play mp4/m4v natively; anything else
+    // needs at minimum a container remux.
+    const containerPlayable = probe.ext === '.mp4' || probe.ext === '.m4v';
+
+    if (containerPlayable && audioPlayable) {
+      result.action = 'direct';
+      return result;
+    }
+
+    // Container wrong or audio wrong — both fixable with a stream-copy
+    // remux through ffmpeg (video is untouched, audio transcoded to aac).
+    result.action = 'remux';
+    result.reason = !containerPlayable
+      ? `container ${probe.ext} needs remux to mp4`
+      : `audio codec ${probe.audioCodec} needs transcode to aac`;
+    return result;
   }
 
   /**
@@ -1901,14 +2025,13 @@ class LibraryManager {
 
     const probe = await this._probeFile(fullPath);
 
-    if (probe.directPlay) {
-      console.log(`[Library] "${item.name}" is already browser-compatible — no conversion needed`);
+    if (!probe.probeOk) {
+      console.log(`[Library] "${item.name}" probe failed (${probe.reason}) — skipping background conversion`);
       return;
     }
 
-    // Only convert if video codec can be copied (h264/hevc) — otherwise too expensive
-    if (!['h264', 'hevc'].includes(probe.videoCodec)) {
-      console.log(`[Library] "${item.name}" has unsupported video codec (${probe.videoCodec}) — skipping conversion, on-the-fly remux available`);
+    if (!this._isServerConvertible(probe)) {
+      console.log(`[Library] "${item.name}" needs no background conversion (${probe.ext}, video=${probe.videoCodec}, audio=${probe.audioCodec || 'none'})`);
       return;
     }
 

@@ -3673,109 +3673,231 @@
     });
   }
 
+  // ─── Client media capability detection (lazy, cached) ────────────
+  // The browser's <video> element is the source of truth for what codecs
+  // will ACTUALLY decode — not user agent strings, not feature flags. We
+  // ask canPlayType() once on first call and cache the answer for the
+  // rest of the session. The server uses these caps to decide whether a
+  // given library file can be direct-played, remuxed, or must be
+  // transcoded to a universal H.264/AAC/MP4 target.
+  //
+  // canPlayType() returns 'probably', 'maybe', or ''. We only trust
+  // 'probably' — 'maybe' is the polite "might work" answer browsers give
+  // for codecs whose decoder may or may not be installed (HEVC on
+  // desktop Chrome is the canonical example). Treating 'maybe' as no
+  // means we transcode a handful of extra files, but we never hand the
+  // browser something it can't decode and hang for four minutes.
+  let _clientCaps = null;
+  function getClientCaps() {
+    if (_clientCaps) return _clientCaps;
+    const v = document.createElement('video');
+    const probably = (type) => v.canPlayType(type) === 'probably';
+    _clientCaps = {
+      h264: probably('video/mp4; codecs="avc1.42E01E, mp4a.40.2"'),
+      // Both hvc1 and hev1 fourccs are valid HEVC containers; some browsers
+      // only answer yes to one of them. Accept either.
+      hevc: probably('video/mp4; codecs="hvc1.1.6.L93.90, mp4a.40.2"')
+         || probably('video/mp4; codecs="hev1.1.6.L93.90, mp4a.40.2"'),
+      aac:  probably('audio/mp4; codecs="mp4a.40.2"'),
+      mp3:  probably('audio/mpeg'),
+    };
+    console.log('[Client] Media capabilities:', _clientCaps);
+    return _clientCaps;
+  }
+
+  function clientCapsQuery() {
+    const c = getClientCaps();
+    return Object.entries(c).filter(([, v]) => v).map(([k]) => k).join(',');
+  }
+
+  // Set video src, wait for canplay-or-error (with timeout), then play().
+  // Resolves on successful play(), rejects with a specific Error describing
+  // which stage failed — the caller uses that to fall back to transcode.
+  function tryLibraryStream(url, action) {
+    return new Promise((resolve, reject) => {
+      const v = dom.videoPlayer;
+      v.src = url;
+      v.load();
+
+      // Direct and remux start fast (raw file or stream-copy remux through
+      // ffmpeg). Transcode has to spawn libx264 and fill its first buffer,
+      // which is noticeably slower on Orin Nano software encoding — give
+      // it more headroom before giving up.
+      const timeoutMs = action === 'transcode' ? 60000 : 20000;
+
+      let settled = false;
+      const cleanup = () => {
+        v.removeEventListener('canplay', onCanPlay);
+        v.removeEventListener('error', onError);
+        clearTimeout(timer);
+      };
+      const onCanPlay = async () => {
+        if (settled) return; settled = true;
+        cleanup();
+        try {
+          await v.play();
+          resolve();
+        } catch (playErr) {
+          reject(new Error(`play() rejected: ${playErr.message}`));
+        }
+      };
+      const onError = () => {
+        if (settled) return; settled = true;
+        cleanup();
+        const err = v.error;
+        const code = err ? `code ${err.code}` : 'unknown';
+        reject(new Error(`Media error (${code}) on ${action}`));
+      };
+      const timer = setTimeout(() => {
+        if (settled) return; settled = true;
+        cleanup();
+        reject(new Error(`${action} timed out after ${timeoutMs / 1000}s`));
+      }, timeoutMs);
+      v.addEventListener('canplay', onCanPlay, { once: true });
+      v.addEventListener('error', onError, { once: true });
+    });
+  }
+
   async function playLibraryItem(id) {
-    // Grab poster/title from DOM before navigating away
+    // Grab poster/title from the library card before we navigate away —
+    // once we're on the player view, the library DOM is gone.
     const itemEl = dom.libraryContent.querySelector(`.card[data-id="${CSS.escape(id)}"]`);
     const libPoster = itemEl?.querySelector('.card-poster img')?.src || '';
     const libTitle = itemEl?.querySelector('.card-title')?.textContent || '';
 
     navigateTo('player');
-    showCurtainOverlay({ poster: libPoster, title: libTitle, status: 'Loading from library...' });
+    showCurtainOverlay({ poster: libPoster, title: libTitle, status: 'Checking file...' });
 
+    const encodedId = encodeURIComponent(id);
+    const caps = clientCapsQuery();
+
+    // ── 1. Probe the file ────────────────────────────────────────────
+    // The server uses our caps to pick the right playback endpoint.
+    // We trust its decision and follow whatever it tells us to call.
+    let probe;
     try {
-      // Probe the file to decide the best playback strategy.
-      // Direct stream supports range requests (seeking, duration, mobile).
-      // Remux is needed for MKV containers or incompatible audio (AC3/DTS).
-      const encodedId = encodeURIComponent(id);
-      let url;
-      let useRemux = true;
+      // Abort the probe after 10s so we never hang the UI waiting for
+      // ffprobe on a broken file.
+      const ctrl = new AbortController();
+      const probeTimeout = setTimeout(() => ctrl.abort(), 10000);
+      let probeResp;
+      try {
+        probeResp = await fetch(`/api/library/${encodedId}/probe?caps=${caps}`, { signal: ctrl.signal });
+      } finally {
+        clearTimeout(probeTimeout);
+      }
+
+      if (!probeResp.ok) {
+        // Parse the server's error body once; never consume the response twice.
+        const errData = await probeResp.json().catch(() => ({}));
+        if (probeResp.status === 400 && errData.error === 'Download not complete') {
+          showPlayerError(
+            'Still downloading',
+            'This episode hasn\'t finished downloading yet.<br>' +
+            '<span style="font-size:12px">Wait for the download to complete and try again.</span>'
+          );
+          return;
+        }
+        throw new Error(errData.error || `probe HTTP ${probeResp.status}`);
+      }
+
+      probe = await probeResp.json();
+      console.log('[Library] Probe:', probe);
+    } catch (e) {
+      showPlayerError(
+        'Playback failed',
+        `Couldn\'t check file: ${escapeHTML(e.message)}`
+      );
+      return;
+    }
+
+    // ── 2. Handle unplayable files immediately ───────────────────────
+    // These are files where ffprobe itself failed — usually because the
+    // file is still downloading, the container is broken, or the disk
+    // is missing the bytes we need. No amount of transcoding fixes that.
+    if (probe.action === 'unplayable' || !probe.endpoint) {
+      const detail = probe.reason || 'Unable to read this file.';
+      showPlayerError(
+        'Cannot play file',
+        `${escapeHTML(detail)}<br>` +
+        `<span style="font-size:12px">` +
+          `video: ${escapeHTML(probe.videoCodec || '?')}, ` +
+          `audio: ${escapeHTML(probe.audioCodec || '?')}, ` +
+          `container: ${escapeHTML(probe.ext || '?')}` +
+        `</span>`
+      );
+      return;
+    }
+
+    // ── 3. Attempt playback with fallback to transcode ───────────────
+    // Build an attempt list: first whatever the server recommended,
+    // then transcode as a universal fallback if we weren't already
+    // transcoding. This handles the corner case where the client's
+    // canPlayType() lied ("probably" but actually can't decode).
+    const attempts = [{ action: probe.action, endpoint: probe.endpoint }];
+    if (probe.action !== 'transcode') {
+      attempts.push({
+        action: 'transcode',
+        endpoint: `/api/library/${encodedId}/stream/transcode?caps=${caps}`,
+      });
+    }
+
+    const statusText = {
+      direct:    'Starting playback...',
+      remux:     'Preparing for playback...',
+      transcode: 'Transcoding for your browser... (this may take a moment)',
+    };
+
+    for (let i = 0; i < attempts.length; i++) {
+      const { action, endpoint } = attempts[i];
+      const statusEl = dom.playerOverlay.querySelector('.loading-status');
+      if (statusEl) {
+        statusEl.textContent = i > 0
+          ? `Retrying: ${statusText[action] || action}`
+          : (statusText[action] || 'Loading...');
+      }
 
       try {
-        const probeResp = await fetch(`/api/library/${encodedId}/probe`);
-        if (probeResp.ok) {
-          const probe = await probeResp.json();
-          console.log('[Library] Probe result:', probe);
-          if (probe.directPlay) {
-            useRemux = false;
-          }
-        } else if (probeResp.status === 400) {
-          const errData = await probeResp.json().catch(() => ({}));
-          if (errData.error === 'Download not complete') {
-            throw new Error('Download not complete');
-          }
-        }
+        await tryLibraryStream(endpoint, action);
+        openCurtains();
+        return;
       } catch (e) {
-        if (e.message === 'Download not complete') throw e;
-        console.warn('[Library] Probe failed, falling back to remux:', e.message);
-      }
-
-      if (useRemux) {
-        url = `/api/library/${encodedId}/stream/remux`;
-        const statusEl = dom.playerOverlay.querySelector('.loading-status');
-        if (statusEl) statusEl.textContent = 'Preparing for playback...';
-      } else {
-        url = `/api/library/${encodedId}/stream`;
-      }
-
-      dom.videoPlayer.src = url;
-      dom.videoPlayer.load();
-
-      await new Promise((resolve, reject) => {
-        const onCanPlay = () => { cleanup(); resolve(); };
-        const onError = () => {
-          cleanup();
-          const err = dom.videoPlayer.error;
-          reject(new Error(err ? `Media error (code ${err.code}): ${useRemux ? 'remux' : 'direct'}` : 'Failed to load video'));
-        };
-        const cleanup = () => {
-          dom.videoPlayer.removeEventListener('canplay', onCanPlay);
-          dom.videoPlayer.removeEventListener('error', onError);
-          clearTimeout(timer);
-        };
-        const timeoutMs = 240000;
-        const timer = setTimeout(() => {
-          cleanup();
-          reject(new Error('Playback timed out — try again'));
-        }, timeoutMs);
-        dom.videoPlayer.addEventListener('canplay', onCanPlay, { once: true });
-        dom.videoPlayer.addEventListener('error', onError, { once: true });
-      });
-
-      await dom.videoPlayer.play();
-      openCurtains();
-    } catch (e) {
-      let hint = escapeHTML(e.message);
-      if (e.message.includes('Media error') && e.message.includes('direct')) {
-        // Direct stream failed — retry with remux (audio may be incompatible)
-        console.warn('[Library] Direct stream failed, retrying with remux');
-        try {
-          const encodedId = encodeURIComponent(id);
-          const statusEl = dom.playerOverlay.querySelector('.loading-status');
-          if (statusEl) statusEl.textContent = 'Retrying with audio transcode...';
-          dom.videoPlayer.src = `/api/library/${encodedId}/stream/remux`;
-          dom.videoPlayer.load();
-          await new Promise((resolve, reject) => {
-            const onCanPlay = () => { dom.videoPlayer.removeEventListener('error', onErr); resolve(); };
-            const onErr = () => { dom.videoPlayer.removeEventListener('canplay', onCanPlay); reject(new Error('Remux also failed')); };
-            dom.videoPlayer.addEventListener('canplay', onCanPlay, { once: true });
-            dom.videoPlayer.addEventListener('error', onErr, { once: true });
-          });
-          await dom.videoPlayer.play();
-          openCurtains();
+        console.warn(`[Library] ${action} playback failed:`, e.message);
+        const isLastAttempt = i === attempts.length - 1;
+        if (isLastAttempt) {
+          const hint = formatLibraryPlaybackError(e, probe, action);
+          showPlayerError('Playback failed', hint);
           return;
-        } catch (retryErr) {
-          hint = escapeHTML(retryErr.message);
         }
+        // fall through and try the next attempt (transcode)
       }
-      if (e.message === 'Download not complete') {
-        hint = 'This episode is still downloading<br><span style="font-size:12px">Wait for the download to finish and try again</span>';
-      } else if (e.message.includes('Media error')) {
-        hint += '<br><span style="font-size:12px">The file format may not be supported by your browser</span>';
-      } else if (e.message.includes('timed out')) {
-        hint += '<br><span style="font-size:12px">Try again — playback may work on a second attempt</span>';
-      }
-      showPlayerError('Playback failed', hint);
     }
+  }
+
+  // Format a user-facing error hint for a failed library playback attempt.
+  // The shape of the message depends on WHICH attempt failed — transcode
+  // failing means the server itself had a problem, while a direct/remux
+  // failure after a successful probe usually means capability detection
+  // was wrong and we should've gone straight to transcode.
+  function formatLibraryPlaybackError(err, probe, lastAction) {
+    const base = escapeHTML(err.message);
+    if (lastAction === 'transcode') {
+      return `${base}<br>` +
+        `<span style="font-size:12px">` +
+          `Server transcoding failed. Check the Jetson logs:<br>` +
+          `<code>docker logs alabtross-mobile</code>` +
+        `</span>`;
+    }
+    if (err.message.includes('timed out')) {
+      return `${base}<br>` +
+        `<span style="font-size:12px">Try again — playback sometimes works on a second attempt.</span>`;
+    }
+    return `${base}<br>` +
+      `<span style="font-size:12px">` +
+        `video: ${escapeHTML(probe?.videoCodec || '?')}, ` +
+        `audio: ${escapeHTML(probe?.audioCodec || '?')}, ` +
+        `container: ${escapeHTML(probe?.ext || '?')}` +
+      `</span>`;
   }
 
   async function removeLibraryItem(id) {

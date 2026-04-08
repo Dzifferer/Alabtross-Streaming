@@ -1774,8 +1774,22 @@ app.get('/api/library/:id/stream/remux', async (req, res) => {
   });
 });
 
-// GET /api/library/:id/probe — check if file is directly browser-playable
-app.get('/api/library/:id/probe', async (req, res) => {
+// GET /api/library/:id/stream/transcode?caps=...
+// Full video re-encode to H.264 + AAC in fragmented MP4. This is the
+// fallback for clients that can't play the source video codec (HEVC on
+// Linux browsers, mpeg4 on most browsers, vp9 in non-webm, etc).
+//
+// Output target is intentionally conservative for maximum compatibility:
+//   Video : H.264 main profile, level 4.1, yuv420p, max 720p
+//   Audio : AAC-LC, 192k, stereo downmix
+//   Container : fragmented MP4 (streamable over HTTP, no seek)
+//
+// libx264 -preset ultrafast is used because the Jetson Orin Nano has NO
+// hardware video encoder — this path is CPU-bound. 720p keeps us within
+// realtime budget on the Orin's Cortex-A78AE cores for typical 24/30 fps
+// source material. If you upgrade to a Jetson with NVENC later, swap the
+// encoder args for h264_nvenc or h264_nvmpi.
+app.get('/api/library/:id/stream/transcode', async (req, res) => {
   const item = library.getItem(req.params.id);
   if (!item) return res.status(404).json({ error: 'Item not found' });
   if (item.status !== 'complete' && item.status !== 'converting') {
@@ -1785,65 +1799,157 @@ app.get('/api/library/:id/probe', async (req, res) => {
   const filePath = library.getFilePath(req.params.id);
   if (!filePath) return res.status(404).json({ error: 'File not found' });
 
-  const ext = path.extname(filePath).toLowerCase();
+  try {
+    await fs.promises.stat(filePath);
+  } catch {
+    return res.status(404).json({ error: 'File not found on disk' });
+  }
 
-  // Use ffprobe to check container and codec info
-  const ffprobe = spawn('ffprobe', [
-    '-v', 'quiet',
-    '-print_format', 'json',
-    '-show_format',
-    '-show_streams',
-    filePath,
+  const safeFilename = path.basename(filePath)
+    .replace(/[^\w\s.\-()[\]]/g, '_')
+    .replace(/\.(mkv|avi|wmv|mp4|mov|m4v|flv|webm|ts|mpg|mpeg)$/i, '.mp4')
+    .substring(0, 200);
+
+  res.status(200);
+  res.set({
+    'Content-Type': 'video/mp4',
+    'X-Content-Type-Options': 'nosniff',
+    'Content-Disposition': `inline; filename="${safeFilename}"`,
+    'Cache-Control': 'no-store',
+    'Transfer-Encoding': 'chunked',
+  });
+
+  // Read the source file directly (not via stdin). For a full transcode we
+  // read the whole file anyway so there's no benefit to the sequential
+  // pipe trick the remux endpoint uses, and letting ffmpeg open the file
+  // itself means it can read the moov atom up front (faster startup).
+  const ffmpeg = spawn('ffmpeg', [
+    '-hide_banner',
+    '-fflags', '+genpts',
+    '-i', filePath,
+
+    // Select first video + first audio stream, drop everything else.
+    // Subtitles and data streams in MKV files routinely break ffmpeg
+    // when mapped to mp4 without explicit handling.
+    '-map', '0:v:0',
+    '-map', '0:a:0?',
+    '-sn',
+    '-dn',
+
+    // Video: H.264 main profile L4.1, widest compatibility. ultrafast
+    // preset is the only one that keeps up with realtime on Orin Nano
+    // software encoding. zerolatency trims the GOP to minimize first-
+    // frame delay. Scale to 720p max, preserve aspect, even height.
+    '-c:v', 'libx264',
+    '-preset', 'ultrafast',
+    '-tune', 'zerolatency',
+    '-profile:v', 'main',
+    '-level', '4.1',
+    '-pix_fmt', 'yuv420p',
+    '-crf', '23',
+    '-vf', "scale='min(1280,iw)':'-2'",
+
+    // Audio: AAC LC stereo. Even 5.1 sources get downmixed so phone
+    // speakers and stereo laptops don't get a broken center channel.
+    '-c:a', 'aac',
+    '-b:a', '192k',
+    '-ac', '2',
+    '-ar', '48000',
+
+    // Fragmented MP4 that can be streamed over a single HTTP response
+    // with no server-side seeking. Browsers can play it back as it arrives
+    // but cannot seek past what's been received.
+    '-movflags', '+frag_keyframe+empty_moov+default_base_moof',
+    '-f', 'mp4',
+    '-loglevel', 'warning',
+    'pipe:1',
   ]);
 
-  let output = '';
-  let responded = false;
-  ffprobe.stdout.on('data', (d) => { output += d.toString(); });
+  ffmpeg.stdout.pipe(res);
 
-  ffprobe.on('close', (code) => {
-    if (responded) return;
-    responded = true;
+  ffmpeg.stderr.on('data', (data) => {
+    const msg = data.toString().trim();
+    if (msg) console.log(`[FFmpeg/Transcode] ${msg}`);
+  });
 
-    if (code !== 0) {
-      return res.json({ directPlay: false, reason: 'ffprobe failed' });
-    }
-
-    try {
-      const info = JSON.parse(output);
-      const videoStream = (info.streams || []).find(s => s.codec_type === 'video');
-      const audioStream = (info.streams || []).find(s => s.codec_type === 'audio');
-
-      const videoCodec = videoStream ? videoStream.codec_name : null;
-      const audioCodec = audioStream ? audioStream.codec_name : null;
-      const container = info.format ? info.format.format_name : null;
-      const duration = info.format ? parseFloat(info.format.duration) : null;
-
-      // Browser-compatible: MP4 container + H.264 video + AAC audio
-      const compatibleVideo = ['h264', 'hevc'].includes(videoCodec);
-      const compatibleAudio = !audioStream || ['aac', 'mp3'].includes(audioCodec);
-      const compatibleContainer = ext === '.mp4' || ext === '.m4v';
-      const directPlay = compatibleVideo && compatibleAudio && compatibleContainer;
-
-      res.json({
-        directPlay,
-        container,
-        ext,
-        videoCodec,
-        audioCodec,
-        duration,
-        reason: !directPlay
-          ? (!compatibleContainer ? 'container needs remux' : !compatibleVideo ? 'video codec incompatible' : 'audio codec needs transcode')
-          : null,
-      });
-    } catch {
-      res.json({ directPlay: false, reason: 'probe parse error' });
+  ffmpeg.on('error', (err) => {
+    console.error(`[Library] FFmpeg transcode spawn error: ${err.message}`);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Transcode failed — FFmpeg not available' });
+    } else {
+      try { res.end(); } catch { /* ignore */ }
     }
   });
 
-  ffprobe.on('error', () => {
-    if (responded) return;
-    responded = true;
-    res.json({ directPlay: false, reason: 'ffprobe not available' });
+  ffmpeg.on('close', (code) => {
+    if (code && code !== 0 && code !== 255) {
+      console.warn(`[Library] FFmpeg transcode exited with code ${code}`);
+    }
+    try { res.end(); } catch { /* ignore */ }
+  });
+
+  // Client aborted (tab closed, seek requested, fallback triggered) —
+  // kill ffmpeg immediately so we don't waste CPU on output nobody wants.
+  res.on('close', () => {
+    try { ffmpeg.kill('SIGTERM'); } catch { /* ignore */ }
+  });
+});
+
+// ─── Library Probe Helpers ───────────────────────────────────────────
+// Parse the `caps` query param the client sends to /probe and /transcode.
+// Format: comma-separated feature tokens — "h264,hevc,aac,mp3". Any token
+// missing from the list is treated as false (conservative default). Any
+// unknown token is ignored. Invalid input falls back to an empty caps set
+// which will force transcode for every codec — safe but slow.
+function parseClientCaps(rawCaps) {
+  const caps = { h264: false, hevc: false, aac: false, mp3: false };
+  if (typeof rawCaps !== 'string' || !rawCaps) return caps;
+  for (const token of rawCaps.split(',')) {
+    const t = token.trim().toLowerCase();
+    if (t in caps) caps[t] = true;
+  }
+  return caps;
+}
+
+// GET /api/library/:id/probe?caps=h264,hevc,aac,mp3
+// Probes the file and tells the client exactly which playback endpoint
+// to use: direct, remux, transcode, or unplayable. The `caps` query
+// parameter lets the server reason about THIS client's decoder — a file
+// that's "direct play" on Safari may need transcoding on Linux Firefox.
+app.get('/api/library/:id/probe', async (req, res) => {
+  const item = library.getItem(req.params.id);
+  if (!item) return res.status(404).json({ error: 'Item not found' });
+  if (item.status !== 'complete' && item.status !== 'converting') {
+    return res.status(400).json({ error: 'Download not complete' });
+  }
+
+  const probe = await library.probeItem(req.params.id);
+  if (!probe) return res.status(404).json({ error: 'File not found' });
+
+  const caps = parseClientCaps(req.query.caps);
+  const decision = library.classifyForClient(probe, caps);
+
+  // Suggest the exact path the client should request. Keeps the client
+  // logic dumb — it just follows whatever we say.
+  const idParam = encodeURIComponent(req.params.id);
+  const endpoints = {
+    direct:   `/api/library/${idParam}/stream`,
+    remux:    `/api/library/${idParam}/stream/remux`,
+    transcode: `/api/library/${idParam}/stream/transcode?caps=${encodeURIComponent(req.query.caps || '')}`,
+  };
+
+  res.json({
+    action: decision.action,
+    reason: decision.reason,
+    endpoint: endpoints[decision.action] || null,
+    container: decision.container,
+    ext: decision.ext,
+    videoCodec: decision.videoCodec,
+    audioCodec: decision.audioCodec,
+    duration: decision.duration,
+    // Legacy flag kept so older clients still get a sensible answer while
+    // rolling out. TRUE only for the 'direct' action.
+    directPlay: decision.action === 'direct',
   });
 });
 

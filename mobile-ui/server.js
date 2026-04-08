@@ -1283,6 +1283,65 @@ app.get('/api/library/debug', (req, res) => {
   res.json(diag);
 });
 
+// GET /api/library/audit — walk the library directory and report every
+// tracked item that doesn't match its on-disk file, plus orphaned files
+// (untracked videos, leftover ffmpeg temp files, empty directories).
+//
+// Query params:
+//   ?deep=1 — additionally run ffprobe against every complete file to
+//             catch truncated/corrupt downloads that happen to have the
+//             right byte count. Slower but thorough.
+app.get('/api/library/audit', async (req, res) => {
+  try {
+    const deep = req.query.deep === '1' || req.query.deep === 'true';
+    const report = await library.auditDiskState({ deep });
+    res.json(report);
+  } catch (err) {
+    console.error('[API] Audit failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/library/audit/remediate — run the audit and act on the issues.
+// Body:
+//   {
+//     action: 'redownload' | 'remove',   // what to do with broken items
+//     removeOrphanFiles?: bool,          // default false
+//     removeOrphanTempFiles?: bool,      // default true
+//     removeEmptyDirectories?: bool,     // default true
+//     deep?: bool,                       // default false (ffprobe check)
+//     dryRun?: bool                      // default false
+//   }
+app.post('/api/library/audit/remediate', rateLimit, async (req, res) => {
+  const {
+    action = 'remove',
+    removeOrphanFiles = false,
+    removeOrphanTempFiles = true,
+    removeEmptyDirectories = true,
+    deep = false,
+    dryRun = false,
+  } = req.body || {};
+
+  if (!['redownload', 'remove'].includes(action)) {
+    return res.status(400).json({ error: "action must be 'redownload' or 'remove'" });
+  }
+
+  try {
+    const result = await library.remediateAudit({
+      action,
+      removeOrphanFiles: !!removeOrphanFiles,
+      removeOrphanTempFiles: !!removeOrphanTempFiles,
+      removeEmptyDirectories: !!removeEmptyDirectories,
+      deep: !!deep,
+      dryRun: !!dryRun,
+    });
+    res.json(result);
+  } catch (err) {
+    console.error('[API] Audit remediation failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/library/:id — get single library item
 app.get('/api/library/:id', (req, res) => {
   const item = library.getItem(req.params.id);

@@ -719,32 +719,48 @@ async function resolveTmdbToImdb(tmdbId, type) {
 
 /**
  * Search TMDB for a TV show by name and return the best match's metadata.
+ * If the full name doesn't produce a good match, progressively drops trailing
+ * words and retries (e.g. "Naruto Shippuden Cuarta Guerra Mundial Shinobi"
+ * -> "Naruto Shippuden Cuarta Guerra Mundial" -> ... -> "Naruto Shippuden").
  * Returns { imdbId, poster, year, name } or null if not found.
  */
 async function lookupShowByName(showName) {
   if (!TMDB_API_KEY || !showName) return null;
-  try {
-    const data = await tmdbFetch('/search/tv', { query: showName, include_adult: 'false' });
-    const results = data.results || [];
-    if (results.length === 0) return null;
 
-    // Pick the best match by relevance score
-    results.sort((a, b) => relevanceScore(b.name || '', showName) - relevanceScore(a.name || '', showName));
-    const best = results[0];
+  // Strip trailing year in parentheses e.g. "Mad Men (2007)" -> "Mad Men"
+  const cleaned = showName.trim().replace(/\s*\(\d{4}\)\s*$/, '').replace(/\s+\d{4}\s*$/, '');
+  const words = cleaned.split(/\s+/);
+  // Try the full name first, then progressively shorter (minimum 2 words)
+  for (let len = words.length; len >= Math.min(2, words.length); len--) {
+    const query = words.slice(0, len).join(' ');
+    try {
+      const data = await tmdbFetch('/search/tv', { query, include_adult: 'false' });
+      const results = data.results || [];
+      if (results.length === 0) continue;
 
-    // Resolve IMDB ID
-    const ext = await tmdbFetch(`/tv/${best.id}/external_ids`);
-    const imdbId = ext.imdb_id || null;
-    const poster = best.poster_path
-      ? `https://image.tmdb.org/t/p/w342${best.poster_path}`
-      : null;
-    const year = (best.first_air_date || '').slice(0, 4);
+      // Pick the best match by relevance score against the query used
+      results.sort((a, b) => relevanceScore(b.name || '', query) - relevanceScore(a.name || '', query));
+      const best = results[0];
 
-    return { imdbId, poster, year, name: best.name || showName };
-  } catch (err) {
-    console.warn(`[TMDB] lookupShowByName("${showName}") failed:`, err.message);
-    return null;
+      // Require a minimum relevance to avoid false matches on short queries
+      const score = relevanceScore(best.name || '', query);
+      if (score < 0.3 && len < words.length) continue;
+
+      // Resolve IMDB ID
+      const ext = await tmdbFetch(`/tv/${best.id}/external_ids`);
+      const imdbId = ext.imdb_id || null;
+      const poster = best.poster_path
+        ? `https://image.tmdb.org/t/p/w342${best.poster_path}`
+        : null;
+      const year = (best.first_air_date || '').slice(0, 4);
+
+      console.log(`[TMDB] lookupShowByName("${showName}") matched "${best.name}" using query "${query}"`);
+      return { imdbId, poster, year, name: best.name || showName };
+    } catch (err) {
+      console.warn(`[TMDB] lookupShowByName query="${query}" failed:`, err.message);
+    }
   }
+  return null;
 }
 
 // GET /api/streams/movie/:imdbId

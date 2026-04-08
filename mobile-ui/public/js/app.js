@@ -3666,7 +3666,7 @@
     const result = [...singles];
     for (const [packId, packItems] of packs) {
       // Sort episodes within pack
-      packItems.sort((a, b) => (a.episode || 0) - (b.episode || 0));
+      packItems.sort((a, b) => (a.season || 0) - (b.season || 0) || (a.episode || 0) - (b.episode || 0));
       const first = packItems[0];
       const totalSize = packItems.reduce((s, i) => s + (i.fileSize || 0), 0);
       const completedCount = packItems.filter(i => i.status === 'complete').length;

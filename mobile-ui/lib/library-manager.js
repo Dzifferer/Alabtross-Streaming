@@ -220,12 +220,17 @@ class LibraryManager {
           // Use filename-derived name for individual episodes (e.g., "Naruto Shippuden - 010 - Sealing Jutsu")
           const episodeName = this._deriveEpisodeName(file.name);
 
+          // Prefer show name derived from the actual filename over the torrent-level name.
+          // This correctly separates e.g. "Naruto Shippuden" episodes from "Naruto" when
+          // they are bundled in the same torrent/download.
+          const fileShowName = this._deriveShowNameFromFile(file.name);
+
           const item = {
             id: itemId,
             imdbId,
             type: 'series',
             name: episodeName,
-            showName: name || 'Unknown',
+            showName: fileShowName || name || 'Unknown',
             poster: poster || '',
             year: year || '',
             quality: quality || '',
@@ -407,6 +412,47 @@ class LibraryManager {
       name = name.replace(/[._]/g, ' ');
     }
     return name.trim() || path.basename(fileName);
+  }
+
+  /**
+   * Extract the show/series name from a filename by stripping episode
+   * numbers, quality tags, group tags, and codec info.
+   * e.g. "Naruto Shippuden - 001 [720p] [x265] [pseudo].mkv" -> "Naruto Shippuden"
+   *      "[animeawake] Naruto Shippuden - 010 - Sealing Jutsu.mp4" -> "Naruto Shippuden"
+   *      "Breaking.Bad.S01E05.720p.BluRay.mkv" -> "Breaking Bad"
+   * Returns null if no show name can be extracted.
+   */
+  _deriveShowNameFromFile(fileName) {
+    let base = path.basename(fileName, path.extname(fileName));
+    // Strip [group] tags
+    base = base.replace(/\[[^\]]*\]/g, '');
+    // Replace underscores/dots with spaces (if used as separators)
+    if (!base.includes(' ') || /^[\w.]+$/.test(base.replace(/\s/g, ''))) {
+      base = base.replace(/[._]/g, ' ');
+    }
+    base = base.trim();
+
+    // Try S01E05 pattern — show name is everything before it
+    let match = base.match(/^(.+?)\s*S\d+\s*E\d+/i);
+    if (match) return match[1].replace(/[-–\s]+$/, '').trim() || null;
+
+    // Try 1x05 pattern
+    match = base.match(/^(.+?)\s*\d+x\d+/i);
+    if (match) return match[1].replace(/[-–\s]+$/, '').trim() || null;
+
+    // Try "- 001" anime convention (e.g., "Naruto Shippuden - 001")
+    match = base.match(/^(.+?)\s*[-–]\s*\d{2,4}\b/);
+    if (match) return match[1].replace(/[-–\s]+$/, '').trim() || null;
+
+    // Try E05 pattern (without season)
+    match = base.match(/^(.+?)\s*E\d+\b/i);
+    if (match) return match[1].replace(/[-–\s]+$/, '').trim() || null;
+
+    // Try "Episode 5" pattern
+    match = base.match(/^(.+?)\s*Episode\s*\d+/i);
+    if (match) return match[1].replace(/[-–\s]+$/, '').trim() || null;
+
+    return null;
   }
 
   _stopPackEngine(packId) {
@@ -706,13 +752,14 @@ class LibraryManager {
 
         const relativePath = path.relative(this._libraryPath, fullPath);
         const episodeName = this._deriveEpisodeName(fileName);
+        const fileShowName = this._deriveShowNameFromFile(fileName);
 
         const newItem = {
           id: itemId,
           imdbId: first.imdbId,
           type: 'series',
           name: episodeName,
-          showName: first.showName || first.name,
+          showName: fileShowName || first.showName || first.name,
           poster: first.poster || '',
           year: first.year || '',
           quality: first.quality || '',

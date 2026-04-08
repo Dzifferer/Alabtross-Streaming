@@ -3298,6 +3298,12 @@
   // ─── Library Group Overlay ─────────────────────
 
   let _libraryGroupData = {};
+  // Title map for the currently-open TV show overlay. Populated once the
+  // Cinemeta metadata resolves; read by the library progress poll so that
+  // in-place episode row re-renders (on status transitions) keep the
+  // IMDb-derived episode titles instead of reverting to filename-derived
+  // fallbacks. Cleared when the overlay is hidden.
+  let _showOverlayTitleMap = null;
 
   function showLibraryGroupOverlay(groupId, groupData) {
     let overlay = document.getElementById('library-group-overlay');
@@ -3338,6 +3344,7 @@
     if (emptyEl) emptyEl.classList.add('hidden');
 
     if (groupData.type === 'show') {
+      _showOverlayTitleMap = {};
       attachShowOverlayHandlers(overlay);
       // Fetch IMDb episode titles in background and re-render the body
       // when they arrive. We don't block the initial render on this.
@@ -3347,6 +3354,7 @@
           if (!stillOpen) return;
           const titleMap = buildEpisodeTitleMap(meta);
           if (Object.keys(titleMap).length === 0) return;
+          _showOverlayTitleMap = titleMap;
           const body = overlay.querySelector('.library-show-overlay-body');
           if (!body) return;
           body.innerHTML = renderShowOverlayBody(groupData, titleMap);
@@ -3460,39 +3468,40 @@
     `;
   }
 
-  function attachShowOverlayHandlers(overlay) {
-    // Click row -> play (or resume/retry depending on status)
-    overlay.querySelectorAll('.library-episode-row').forEach(row => {
-      row.addEventListener('click', async (e) => {
-        // Ignore clicks on the remove button
-        if (e.target.closest('.library-episode-remove')) return;
-        const id = row.dataset.id;
-        const status = row.dataset.status;
-        if (status === 'complete' || status === 'converting') {
-          playLibraryItem(id);
-        } else if (status === 'paused') {
-          try {
-            await fetch(`/api/library/${encodeURIComponent(id)}/resume`, { method: 'POST' });
-            showToast('Resuming download...');
-            loadLibrary();
-          } catch { showToast('Failed to resume'); }
-        } else if (status === 'failed') {
-          try {
-            await fetch(`/api/library/${encodeURIComponent(id)}/retry`, { method: 'POST' });
-            showToast('Retrying download...');
-            loadLibrary();
-          } catch { showToast('Failed to retry'); }
-        }
-      });
+  function attachEpisodeRowHandlers(row) {
+    row.addEventListener('click', async (e) => {
+      // Ignore clicks on the remove button
+      if (e.target.closest('.library-episode-remove')) return;
+      const id = row.dataset.id;
+      const status = row.dataset.status;
+      if (status === 'complete' || status === 'converting') {
+        playLibraryItem(id);
+      } else if (status === 'paused') {
+        try {
+          await fetch(`/api/library/${encodeURIComponent(id)}/resume`, { method: 'POST' });
+          showToast('Resuming download...');
+          loadLibrary();
+        } catch { showToast('Failed to resume'); }
+      } else if (status === 'failed') {
+        try {
+          await fetch(`/api/library/${encodeURIComponent(id)}/retry`, { method: 'POST' });
+          showToast('Retrying download...');
+          loadLibrary();
+        } catch { showToast('Failed to retry'); }
+      }
     });
 
-    // Remove button on each episode row
-    overlay.querySelectorAll('.library-episode-remove').forEach(btn => {
-      btn.addEventListener('click', (e) => {
+    const removeBtn = row.querySelector('.library-episode-remove');
+    if (removeBtn) {
+      removeBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        removeLibraryItem(btn.dataset.id);
+        removeLibraryItem(removeBtn.dataset.id);
       });
-    });
+    }
+  }
+
+  function attachShowOverlayHandlers(overlay) {
+    overlay.querySelectorAll('.library-episode-row').forEach(attachEpisodeRowHandlers);
   }
 
   function hideLibraryGroupOverlay() {
@@ -3501,6 +3510,7 @@
       overlay.classList.add('hidden');
       overlay.innerHTML = '';
     }
+    _showOverlayTitleMap = null;
     dom.libraryContent.classList.remove('hidden');
   }
 
@@ -4309,6 +4319,44 @@
   }
 
   let _libraryPollTimer = null;
+
+  // Re-render a single library card in place after a status transition.
+  // Preserves the categorize-feature data-uncategorized/data-imdb attrs
+  // that loadLibrary() injects into uncategorized movie cards, and
+  // re-binds click/remove/retry/etc. handlers on the freshly-rendered
+  // element via a throwaway wrapper (attachLibraryHandlers uses
+  // querySelectorAll which wouldn't otherwise match the card itself).
+  function replaceLibraryCardInPlace(oldCard, item) {
+    const wasUncat = oldCard.dataset.uncategorized === 'true';
+    const imdbAttr = oldCard.dataset.imdb || '';
+    const movieNameAttr = oldCard.dataset.movieName || '';
+
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = renderLibraryItem(item);
+    const newCard = wrapper.firstElementChild;
+    if (!newCard) return;
+
+    if (wasUncat) {
+      newCard.dataset.uncategorized = 'true';
+      newCard.dataset.imdb = imdbAttr;
+      newCard.dataset.movieName = movieNameAttr;
+    }
+
+    attachLibraryHandlers(wrapper);
+    if (wasUncat) attachCategorizeHandlers(wrapper);
+
+    oldCard.replaceWith(newCard);
+  }
+
+  function replaceEpisodeRowInPlace(oldRow, item) {
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = renderLibraryEpisodeRow(item, _showOverlayTitleMap || {});
+    const newRow = wrapper.firstElementChild;
+    if (!newRow) return;
+    attachEpisodeRowHandlers(newRow);
+    oldRow.replaceWith(newRow);
+  }
+
   function startLibraryProgressPoll() {
     stopLibraryProgressPoll();
     _libraryPollTimer = setInterval(async () => {
@@ -4320,15 +4368,44 @@
         const resp = await fetch('/api/library');
         const data = await resp.json();
         const items = data.items || [];
-        const downloading = items.filter(i => i.status === 'downloading');
 
-        // Update progress for downloading items in-place
+        // Build per-tick element caches so item lookup is O(1). The
+        // previous implementation issued one querySelector + CSS.escape
+        // per item per tick, which scales as O(n) DOM walks per item
+        // — meaningful jank for libraries with hundreds of items.
+        const cardMap = new Map();
+        dom.libraryContent.querySelectorAll('.card[data-id]').forEach(el => {
+          cardMap.set(el.dataset.id, el);
+        });
+
         const showOverlay = document.getElementById('library-group-overlay');
         const showOverlayOpen = showOverlay && !showOverlay.classList.contains('hidden');
+        const rowMap = new Map();
+        if (showOverlayOpen) {
+          showOverlay.querySelectorAll('.library-episode-row[data-id]').forEach(el => {
+            rowMap.set(el.dataset.id, el);
+          });
+        }
+
+        let anyActive = false;
         for (const item of items) {
-          const el = dom.libraryContent.querySelector(`.card[data-id="${CSS.escape(item.id)}"]`);
+          const status = item.status;
+          if (status === 'downloading' || status === 'queued' || status === 'converting') {
+            anyActive = true;
+          }
+
+          const el = cardMap.get(item.id);
           if (el) {
-            if (item.status === 'downloading') {
+            if (el.dataset.status !== status) {
+              // Status transition — re-render this single card in place
+              // instead of rebuilding the entire library grid.
+              replaceLibraryCardInPlace(el, item);
+              continue;
+            }
+            // Same status — update progress fields in place using
+            // textContent (never innerHTML) so we don't re-parse HTML
+            // or thrash layout on every tick.
+            if (status === 'downloading') {
               const bar = el.querySelector('.library-card-progress-bar');
               const overlay = el.querySelector('.library-card-overlay');
               const meta = el.querySelector('.library-card-meta');
@@ -4336,9 +4413,10 @@
               if (overlay) overlay.textContent = item.progress + '%';
               if (meta) {
                 const speed = item.downloadSpeed > 0 ? formatSpeed(item.downloadSpeed) : '';
-                meta.innerHTML = `${speed || 'Starting...'}${item.numPeers ? ' &middot; ' + item.numPeers + ' peers' : ''}`;
+                const peers = item.numPeers ? ' \u00b7 ' + item.numPeers + ' peers' : '';
+                meta.textContent = `${speed || 'Starting...'}${peers}`;
               }
-            } else if (item.status === 'converting') {
+            } else if (status === 'converting') {
               const bar = el.querySelector('.library-card-progress-bar');
               const overlay = el.querySelector('.library-card-overlay');
               const meta = el.querySelector('.library-card-meta');
@@ -4346,32 +4424,29 @@
               if (bar) bar.style.width = pct + '%';
               if (overlay) overlay.textContent = pct + '%';
               if (meta) meta.textContent = 'Converting to MP4...';
-            } else if (el.dataset.status !== item.status) {
-              // Status changed — reload full list
-              loadLibrary();
-              return;
             }
             continue;
           }
 
           // Episode rows inside the show overlay (TV episodes)
           if (showOverlayOpen) {
-            const row = showOverlay.querySelector(`.library-episode-row[data-id="${CSS.escape(item.id)}"]`);
+            const row = rowMap.get(item.id);
             if (!row) continue;
-            if (row.dataset.status !== (item.status || '')) {
-              // Status changed — reload library and refresh the open overlay
-              loadLibrary();
-              return;
+            if (row.dataset.status !== (status || '')) {
+              // Status transition — re-render this single row in place.
+              replaceEpisodeRowInPlace(row, item);
+              continue;
             }
-            if (item.status === 'downloading') {
+            if (status === 'downloading') {
               const bar = row.querySelector('.library-episode-progress-bar');
               const statusEl = row.querySelector('.library-episode-status');
               if (bar) bar.style.width = (item.progress || 0) + '%';
               if (statusEl) {
                 const speed = item.downloadSpeed > 0 ? formatSpeed(item.downloadSpeed) : '';
-                statusEl.innerHTML = `${item.progress || 0}%${speed ? ' &middot; ' + speed : ''}`;
+                const speedTxt = speed ? ' \u00b7 ' + speed : '';
+                statusEl.textContent = `${item.progress || 0}%${speedTxt}`;
               }
-            } else if (item.status === 'converting') {
+            } else if (status === 'converting') {
               const bar = row.querySelector('.library-episode-progress-bar');
               const statusEl = row.querySelector('.library-episode-status');
               const pct = item.convertProgress || 0;
@@ -4381,9 +4456,7 @@
           }
         }
 
-        const queued = items.filter(i => i.status === 'queued');
-        const converting = items.filter(i => i.status === 'converting');
-        if (downloading.length === 0 && queued.length === 0 && converting.length === 0) {
+        if (!anyActive) {
           stopLibraryProgressPoll();
         }
       } catch { /* ignore polling errors */ }

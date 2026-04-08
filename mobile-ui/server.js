@@ -6,6 +6,28 @@ const https = require('https');
 const { URL } = require('url');
 const dns = require('dns');
 const { spawn } = require('child_process');
+
+// ─── DNS Fallback (matches stream-providers.js) ──────────────────────
+const fallbackResolver = new dns.Resolver();
+fallbackResolver.setServers(['1.1.1.1', '8.8.8.8', '1.0.0.1', '8.8.4.4']);
+
+function resolveWithFallback(hostname) {
+  return new Promise((resolve, reject) => {
+    dns.resolve4(hostname, (err, addresses) => {
+      if (!err && addresses && addresses.length > 0) {
+        return resolve(addresses[0]);
+      }
+      console.log(`[DNS] System DNS failed for ${hostname}, trying fallback resolvers...`);
+      fallbackResolver.resolve4(hostname, (err2, addresses2) => {
+        if (!err2 && addresses2 && addresses2.length > 0) {
+          console.log(`[DNS] Fallback resolved ${hostname} → ${addresses2[0]}`);
+          return resolve(addresses2[0]);
+        }
+        reject(err2 || err);
+      });
+    });
+  });
+}
 // http-proxy-middleware removed — Stremio server proxy no longer needed
 const { getMovieStreams, getSeriesStreams, getSeasonPackStreams, getCompleteStreams, diagnoseProviders } = require('./lib/stream-providers');
 const TorrentEngine = require('./lib/torrent-engine');
@@ -103,15 +125,22 @@ function tmdbFetch(endpoint, params = {}) {
   const qs = new URLSearchParams({ api_key: TMDB_API_KEY, ...params });
   const url = `${TMDB_BASE}${endpoint}?${qs}`;
   return new Promise((resolve, reject) => {
-    https.get(url, { timeout: 8000 }, (res) => {
-      if (res.statusCode !== 200) { res.resume(); return reject(new Error(`TMDB HTTP ${res.statusCode}`)); }
+    const deadline = setTimeout(() => {
+      if (req) req.destroy();
+      reject(new Error('Timeout'));
+    }, 10000);
+    const req = https.get(url, { timeout: 10000, family: 4 }, (res) => {
+      if (res.statusCode !== 200) { clearTimeout(deadline); res.resume(); return reject(new Error(`TMDB HTTP ${res.statusCode}`)); }
       let body = '';
       res.on('data', chunk => body += chunk);
       res.on('end', () => {
+        clearTimeout(deadline);
         try { resolve(JSON.parse(body)); }
         catch (e) { reject(e); }
       });
-    }).on('error', reject).on('timeout', function() { this.destroy(); reject(new Error('Timeout')); });
+    });
+    req.on('error', (e) => { clearTimeout(deadline); reject(e); });
+    req.on('timeout', () => { clearTimeout(deadline); req.destroy(); reject(new Error('Timeout')); });
   });
 }
 
@@ -1758,33 +1787,67 @@ const MAX_REDIRECTS = 5;
 
 const MAX_FETCH_BODY = 10 * 1024 * 1024; // 10 MB max response body
 
-function fetchUrl(url, redirectCount = 0) {
+function fetchUrlDirect(url, redirectCount = 0, resolvedIp = null) {
   if (redirectCount > MAX_REDIRECTS) {
     return Promise.reject(new Error('Too many redirects'));
   }
   return new Promise((resolve, reject) => {
     const mod = url.startsWith('https') ? https : http;
-    const req = mod.get(url, { headers: { 'User-Agent': 'Albatross/1.0' }, timeout: 8000 }, (res) => {
+    const parsedUrl = new URL(url);
+    const deadline = setTimeout(() => {
+      if (req) req.destroy();
+      reject(new Error('Timeout'));
+    }, 10000);
+    const options = {
+      hostname: resolvedIp || parsedUrl.hostname,
+      port: parsedUrl.port || (mod === https ? 443 : 80),
+      path: parsedUrl.pathname + parsedUrl.search,
+      headers: {
+        'User-Agent': 'Albatross/1.0',
+        ...(resolvedIp ? { Host: parsedUrl.hostname } : {}),
+      },
+      timeout: 10000,
+      family: 4,
+      servername: parsedUrl.hostname,
+    };
+    const req = mod.get(options, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        // Validate redirect target against SSRF to prevent redirect-based bypass
+        clearTimeout(deadline);
         const redirectUrl = res.headers.location;
         res.resume();
         return validateUrlNotSSRF(redirectUrl)
           .then(() => fetchUrl(redirectUrl, redirectCount + 1))
           .then(resolve, reject);
       }
-      if (res.statusCode !== 200) { res.resume(); return reject(new Error(`HTTP ${res.statusCode}`)); }
+      if (res.statusCode !== 200) { clearTimeout(deadline); res.resume(); return reject(new Error(`HTTP ${res.statusCode}`)); }
       let body = '';
       res.setEncoding('utf8');
       res.on('data', chunk => {
         body += chunk;
-        if (body.length > MAX_FETCH_BODY) { res.destroy(); reject(new Error('Response too large')); }
+        if (body.length > MAX_FETCH_BODY) { clearTimeout(deadline); res.destroy(); reject(new Error('Response too large')); }
       });
-      res.on('end', () => resolve(body));
+      res.on('end', () => { clearTimeout(deadline); resolve(body); });
     });
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
+    req.on('error', (e) => { clearTimeout(deadline); reject(e); });
+    req.on('timeout', () => { clearTimeout(deadline); req.destroy(); reject(new Error('Timeout')); });
   });
+}
+
+async function fetchUrl(url, redirectCount = 0) {
+  try {
+    return await fetchUrlDirect(url, redirectCount);
+  } catch (e) {
+    if (e.message && (e.message.includes('ENOTFOUND') || e.message.includes('EAI_AGAIN'))) {
+      const parsedUrl = new URL(url);
+      try {
+        const ip = await resolveWithFallback(parsedUrl.hostname);
+        return await fetchUrlDirect(url, redirectCount, ip);
+      } catch (_) {
+        throw e;
+      }
+    }
+    throw e;
+  }
 }
 
 function parseM3U(text) {

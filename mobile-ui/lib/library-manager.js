@@ -1404,12 +1404,15 @@ class LibraryManager {
 
     const timeout = setTimeout(() => {
       // Fail ALL downloading items for this pack, not just the ones passed in
+      let failedCount = 0;
       for (const [, item] of this._items) {
         if (item.packId === packId && item.status === 'downloading') {
           item.status = 'failed';
           item.error = 'Torrent metadata timeout (90s) on resume';
+          failedCount++;
         }
       }
+      console.error(`[Library] Pack resume timeout: "${first.showName || first.name}" — metadata not received within 90s, ${failedCount} items marked failed`);
       try { engine.destroy(); } catch {}
       this._engines.delete(packId);
       this._saveMetadata();
@@ -1418,12 +1421,15 @@ class LibraryManager {
 
     engine.on('error', (err) => {
       clearTimeout(timeout);
+      let failedCount = 0;
       for (const [, item] of this._items) {
         if (item.packId === packId && item.status === 'downloading') {
           item.status = 'failed';
           item.error = err.message;
+          failedCount++;
         }
       }
+      console.error(`[Library] Pack resume error: "${first.showName || first.name}" — ${err.message}, ${failedCount} items marked failed`);
       try { engine.destroy(); } catch {}
       this._engines.delete(packId);
       this._saveMetadata();

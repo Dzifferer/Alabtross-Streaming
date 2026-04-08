@@ -3687,12 +3687,17 @@
       else if (hasPaused) aggStatus = 'paused';
       else if (packItems.every(i => i.status === 'queued')) aggStatus = 'queued';
 
+      // Determine season label: single season or multi-season
+      const uniqueSeasons = [...new Set(packItems.map(i => i.season).filter(Boolean))].sort((a, b) => a - b);
+      const packSeason = uniqueSeasons.length === 1 ? uniqueSeasons[0] : null;
+
       result.push({
         _isPack: true,
         packId,
         name: first.showName || first.name,
         poster: first.poster,
-        season: first.season,
+        season: packSeason,
+        seasons: uniqueSeasons,
         quality: first.quality,
         status: aggStatus,
         progress: totalProgress,
@@ -3707,6 +3712,9 @@
     }
     return result;
   }
+
+  // Track which packs are expanded so state survives re-renders
+  const _expandedPacks = new Set();
 
   async function renderDownloads() {
     const panel = $('#downloads-panel');
@@ -3770,6 +3778,15 @@
 
       panel.innerHTML = html;
       attachDownloadListeners(panel);
+
+      // Restore expanded state for packs that were open before re-render
+      for (const packId of _expandedPacks) {
+        const detail = panel.querySelector(`[data-pack-detail="${CSS.escape(packId)}"]`);
+        const btn = panel.querySelector(`.pack-expand-btn[data-pack-id="${CSS.escape(packId)}"]`);
+        if (detail) detail.classList.remove('collapsed');
+        if (btn) btn.classList.add('expanded');
+      }
+
       renderSourceStats(items);
     } catch {
       panel.innerHTML = '<div class="downloads-empty"><span class="setting-hint">Could not load downloads</span></div>';
@@ -3791,7 +3808,11 @@
       ? `${(pack.fileSize / 1e9).toFixed(1)} GB`
       : '';
 
-    const seasonLabel = pack.season ? `S${String(pack.season).padStart(2, '0')}` : 'Pack';
+    const seasonLabel = pack.season
+      ? `S${String(pack.season).padStart(2, '0')}`
+      : pack.seasons && pack.seasons.length > 1
+        ? `S${String(pack.seasons[0]).padStart(2, '0')}-S${String(pack.seasons[pack.seasons.length - 1]).padStart(2, '0')}`
+        : 'Pack';
     const episodeCount = `${pack.completedCount}/${pack.totalCount} episodes`;
 
     const progressClass = pack.status === 'complete' ? 'complete'
@@ -3857,8 +3878,12 @@
       : '';
 
     // Build collapsed episode list (hidden by default)
+    const isMultiSeason = pack.seasons && pack.seasons.length > 1;
     let episodeListHtml = pack.episodes.map(ep => {
-      const epLabel = ep.episode != null ? `E${String(ep.episode).padStart(2, '0')}` : '?';
+      const seasonPrefix = isMultiSeason && ep.season ? `S${String(ep.season).padStart(2, '0')}` : '';
+      const epLabel = ep.episode != null
+        ? `${seasonPrefix}E${String(ep.episode).padStart(2, '0')}`
+        : seasonPrefix || '?';
       const epName = ep.name || ep.fileName || '';
       const epPct = ep.status === 'complete' ? '100%' : `${ep.progress || 0}%`;
       const epStatus = ep.status === 'complete' ? 'done' : ep.status === 'failed' ? 'fail' : '';
@@ -4092,6 +4117,12 @@
         if (detail) {
           detail.classList.toggle('collapsed');
           btn.classList.toggle('expanded');
+          // Track expanded state so it survives auto-refresh
+          if (_expandedPacks.has(packId)) {
+            _expandedPacks.delete(packId);
+          } else {
+            _expandedPacks.add(packId);
+          }
         }
       });
     });

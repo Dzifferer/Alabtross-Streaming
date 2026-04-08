@@ -30,8 +30,8 @@ echo "==> Stopping container..."
 sudo docker stop alabtross-mobile 2>/dev/null || true
 sudo docker rm   alabtross-mobile 2>/dev/null || true
 
-echo "==> Building (no cache)..."
-sudo docker build --no-cache -t alabtross-mobile ./mobile-ui
+echo "==> Building..."
+sudo docker build -t alabtross-mobile ./mobile-ui
 
 BIND_IP=$(ip route get 8.8.8.8 | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')
 

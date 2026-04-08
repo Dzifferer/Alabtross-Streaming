@@ -5,6 +5,7 @@ const http = require('http');
 const https = require('https');
 const { URL } = require('url');
 const dns = require('dns');
+const { spawn } = require('child_process');
 // http-proxy-middleware removed — Stremio server proxy no longer needed
 const { getMovieStreams, getSeriesStreams, getSeasonPackStreams, getCompleteStreams, diagnoseProviders } = require('./lib/stream-providers');
 const TorrentEngine = require('./lib/torrent-engine');
@@ -74,9 +75,6 @@ function getEngine() {
 
 // ─── Library Manager (initialized on startup) ─────────────────────────
 const library = new LibraryManager({ libraryPath: LIBRARY_PATH, maxConcurrentDownloads: MAX_CONCURRENT_STREAMS });
-console.log(`[Debug] LIBRARY_PATH resolved to: ${LIBRARY_PATH}`);
-console.log(`[Debug] LIBRARY_PATH exists: ${fs.existsSync(LIBRARY_PATH)}`);
-console.log(`[Debug] TORRENT_CACHE_PATH: ${TORRENT_CACHE_PATH}`);
 
 // Security headers
 app.use((req, res, next) => {
@@ -961,7 +959,6 @@ app.get('/api/torrent-status/:infoHash', (req, res) => {
 app.get('/api/library', (req, res) => {
   try {
     const items = library.getAll();
-    console.log(`[Debug] GET /api/library: returning ${items.length} items`);
     res.json({ items });
   } catch (err) {
     console.error('[Library] getAll() failed:', err.message);
@@ -1250,7 +1247,6 @@ app.get('/api/library/:id/stream/remux', async (req, res) => {
   }
 
   const safeFilename = path.basename(filePath).replace(/[^\w\s.\-()[\]]/g, '_').replace(/\.(mkv|avi|wmv|mp4)$/i, '.mp4').substring(0, 200);
-  const { spawn } = require('child_process');
 
   res.status(200);
   res.set({
@@ -1330,7 +1326,6 @@ app.get('/api/library/:id/probe', async (req, res) => {
   if (!filePath) return res.status(404).json({ error: 'File not found' });
 
   const ext = path.extname(filePath).toLowerCase();
-  const { spawn } = require('child_process');
 
   // Use ffprobe to check container and codec info
   const ffprobe = spawn('ffprobe', [

@@ -29,7 +29,6 @@ const TRACKERS = [
   'udp://open.demonii.com:1337/announce',
   'udp://explodie.org:6969/announce',
   // Additional active trackers for better peer discovery
-  'udp://tracker.opentrackr.org:1337/announce',
   'udp://opentracker.i2p.rocks:6969/announce',
   'udp://tracker.internetwarriors.net:1337/announce',
   'udp://tracker.leechers-paradise.org:6969/announce',

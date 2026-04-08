@@ -32,6 +32,8 @@ class LibraryManager {
     this._convertProcesses = new Map(); // id -> FFmpeg child process (active conversions)
     this._maxConcurrentConversions = 1;
     this._metadataSaveTimer = null;
+    this._discoveryCache = null;      // cached result of _discoverUntrackedFiles
+    this._discoveryCacheTs = 0;       // timestamp of last discovery scan
 
     // Ensure library directory exists
     if (!fs.existsSync(this._libraryPath)) {
@@ -418,9 +420,8 @@ class LibraryManager {
     const engine = this._engines.get(packId);
     if (engine) {
       try { engine.destroy(); } catch { /* ignore */ }
-      this._engines.delete(engine);
+      this._engines.delete(packId);
     }
-    this._engines.delete(packId);
 
     if (this._engines.size === 0 && this._convertProcesses.size === 0) {
       this._stopPeriodicSave();
@@ -577,8 +578,12 @@ class LibraryManager {
    */
   getAll() {
     const tracked = [...this._items.values()];
-    const discovered = this._discoverUntrackedFiles();
-    const all = [...tracked, ...discovered].sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+    const now = Date.now();
+    if (!this._discoveryCache || now - this._discoveryCacheTs > 10000) {
+      this._discoveryCache = this._discoverUntrackedFiles();
+      this._discoveryCacheTs = now;
+    }
+    const all = [...tracked, ...this._discoveryCache].sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
     return all.map(i => this._sanitizeItem(i));
   }
 
@@ -722,7 +727,7 @@ class LibraryManager {
           infoHash: first.infoHash,
           magnetUri: first.magnetUri,
           packId,
-          status: fileSize >= (fileSize - 1024) ? 'complete' : 'downloading',
+          status: 'complete',
           progress: 100,
           downloadSpeed: 0,
           numPeers: 0,
@@ -1042,6 +1047,7 @@ class LibraryManager {
     }
 
     this._items.delete(id);
+    this._discoveryCache = null; // invalidate discovery cache after deletion
     this._saveMetadata();
     this._processQueue();
     return true;
@@ -1366,22 +1372,13 @@ class LibraryManager {
     const backupFile = this._metadataFile + '.bak';
     const filesToTry = [this._metadataFile, backupFile];
 
-    console.log(`[Debug] _loadMetadata: looking for ${this._metadataFile}`);
-    console.log(`[Debug] _loadMetadata: file exists: ${fs.existsSync(this._metadataFile)}, backup exists: ${fs.existsSync(backupFile)}`);
-
     for (const file of filesToTry) {
       try {
         if (!fs.existsSync(file)) continue;
         const raw = fs.readFileSync(file, 'utf8');
-        if (!raw.trim()) {
-          console.log(`[Debug] _loadMetadata: ${path.basename(file)} exists but is empty`);
-          continue;
-        }
+        if (!raw.trim()) continue;
         const data = JSON.parse(raw);
-        if (!Array.isArray(data)) {
-          console.log(`[Debug] _loadMetadata: ${path.basename(file)} parsed but is not an array`);
-          continue;
-        }
+        if (!Array.isArray(data)) continue;
 
         for (const item of data) {
           // Mark interrupted downloads for auto-resume instead of failing them
@@ -1398,7 +1395,6 @@ class LibraryManager {
           this._items.set(item.id, item);
         }
 
-        console.log(`[Debug] _loadMetadata: loaded ${this._items.size} items from ${path.basename(file)}`);
         if (file === backupFile) {
           console.warn(`[Library] Primary metadata was corrupted — recovered from backup (${data.length} items)`);
         }
@@ -1412,7 +1408,6 @@ class LibraryManager {
       }
     }
 
-    console.log(`[Debug] _loadMetadata: no metadata loaded — _items.size = ${this._items.size}`);
   }
 
   _resumeInterruptedDownloads() {
@@ -1573,12 +1568,8 @@ class LibraryManager {
         .map(i => i.filePath)
     );
 
-    console.log(`[Debug] _discoverUntrackedFiles: scanning ${this._libraryPath}`);
-    console.log(`[Debug] _discoverUntrackedFiles: ${trackedPaths.size} tracked paths`);
-
     try {
       const entries = fs.readdirSync(this._libraryPath, { withFileTypes: true });
-      console.log(`[Debug] _discoverUntrackedFiles: found ${entries.length} entries: ${entries.map(e => `${e.name} (${e.isFile() ? 'file' : 'dir'})`).join(', ')}`);
 
       for (const entry of entries) {
         if (entry.name.startsWith('_metadata')) continue;
@@ -1588,10 +1579,7 @@ class LibraryManager {
 
         if (entry.isFile()) {
           const ext = path.extname(entry.name).toLowerCase();
-          if (!VIDEO_EXTENSIONS.has(ext)) {
-            console.log(`[Debug] _discoverUntrackedFiles: skipping "${entry.name}" — ext "${ext}" not in VIDEO_EXTENSIONS`);
-            continue;
-          }
+          if (!VIDEO_EXTENSIONS.has(ext)) continue;
           if (trackedPaths.has(entry.name)) continue;
 
           const stat = fs.statSync(entryPath);
@@ -1640,7 +1628,7 @@ class LibraryManager {
         }
       }
     } catch (err) {
-      console.error(`[Debug] _discoverUntrackedFiles: disk scan error: ${err.message} (code: ${err.code})`);
+      console.error(`[Library] Disk scan error: ${err.message}`);
     }
 
     if (discovered.length > 0) {

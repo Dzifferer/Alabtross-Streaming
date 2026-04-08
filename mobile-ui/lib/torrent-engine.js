@@ -91,14 +91,13 @@ class TorrentEngine {
       // file-descriptor pressure and TCP retry storms on low-power hardware,
       // especially when multiple torrents are active at once.
       //
-      // uploads: 0 — intentional leech-only mode for legal/privacy reasons.
-      // Costs us BitTorrent reciprocity (peers will eventually choke us and
-      // we only receive via their optimistic-unchoke slots), which is why
-      // per-peer throughput is lower than a normal BT client. Assumed to be
-      // acceptable vs. the "making available" exposure of seeding.
+      // uploads: 1 — minimal reciprocity mode. A single upload slot lets us
+      // participate in BitTorrent tit-for-tat so peers are less likely to
+      // choke us, improving per-peer download throughput compared to the
+      // previous uploads:0 leech-only configuration.
       const engine = torrentStream(uri, {
         connections: 100,
-        uploads: 0,
+        uploads: 1,
         dht: true,
         path: this._downloadPath,
         trackers: TRACKERS,

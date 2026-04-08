@@ -3678,10 +3678,13 @@
       const speed = Math.max(...packItems.map(i => i.downloadSpeed || 0));
       const peers = Math.max(...packItems.map(i => i.numPeers || 0));
       // Determine aggregate status
+      const hasDownloading = packItems.some(i => i.status === 'downloading');
+      const hasPaused = packItems.some(i => i.status === 'paused');
       let aggStatus = 'downloading';
       if (completedCount === packItems.length) aggStatus = 'complete';
       else if (failedCount === packItems.length) aggStatus = 'failed';
-      else if (packItems.every(i => i.status === 'paused')) aggStatus = 'paused';
+      else if (hasDownloading) aggStatus = 'downloading';
+      else if (hasPaused) aggStatus = 'paused';
       else if (packItems.every(i => i.status === 'queued')) aggStatus = 'queued';
 
       result.push({
@@ -3809,7 +3812,18 @@
     const firstEpId = pack.episodes[0]?.id || '';
     if (pack.status === 'downloading') {
       actions = `
+        <button class="download-action-btn pause" data-pack-id="${escapeHTML(pack.packId)}" data-action="pause-pack" title="Pause All">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+        </button>
         <button class="download-action-btn cancel" data-pack-id="${escapeHTML(pack.packId)}" data-action="remove-pack" title="Cancel All">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>`;
+    } else if (pack.status === 'paused') {
+      actions = `
+        <button class="download-action-btn resume" data-pack-id="${escapeHTML(pack.packId)}" data-action="resume-pack" title="Resume All">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        </button>
+        <button class="download-action-btn cancel" data-pack-id="${escapeHTML(pack.packId)}" data-action="remove-pack" title="Remove All">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
         </button>`;
     } else if (pack.status === 'complete') {
@@ -3968,6 +3982,34 @@
             ));
             showToast('Season pack removed');
           } catch { showToast('Failed to remove pack'); }
+          renderDownloads();
+          return;
+        }
+
+        if (action === 'pause-pack' && packId) {
+          try {
+            const resp = await fetch('/api/library');
+            const data = await resp.json();
+            const packItems = (data.items || []).filter(i => i.packId === packId && i.status === 'downloading');
+            await Promise.all(packItems.map(i =>
+              fetch(`/api/library/${encodeURIComponent(i.id)}/pause`, { method: 'POST' })
+            ));
+            showToast('Pack downloads paused');
+          } catch { showToast('Failed to pause pack'); }
+          renderDownloads();
+          return;
+        }
+
+        if (action === 'resume-pack' && packId) {
+          try {
+            const resp = await fetch('/api/library');
+            const data = await resp.json();
+            const packItems = (data.items || []).filter(i => i.packId === packId && i.status === 'paused');
+            await Promise.all(packItems.map(i =>
+              fetch(`/api/library/${encodeURIComponent(i.id)}/resume`, { method: 'POST' })
+            ));
+            showToast('Pack downloads resumed');
+          } catch { showToast('Failed to resume pack'); }
           renderDownloads();
           return;
         }
@@ -4613,12 +4655,8 @@
     // Back button
     dom.backBtn.addEventListener('click', goBack);
 
-    // Player back button — exit fullscreen and navigate back in one press
+    // Player back button — navigate back (goBack handles video cleanup after hiding view)
     dom.playerBackBtn.addEventListener('click', () => {
-      exitPlayerFullscreen();
-      dom.videoPlayer.pause();
-      dom.videoPlayer.src = '';
-      dom.videoPlayer.load();
       goBack();
     });
 
@@ -4699,10 +4737,6 @@
           v.muted = !v.muted;
           break;
         case 'Escape':
-          exitPlayerFullscreen();
-          v.pause();
-          v.src = '';
-          v.load();
           goBack();
           break;
       }

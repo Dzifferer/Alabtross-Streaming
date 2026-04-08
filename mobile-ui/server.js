@@ -104,7 +104,7 @@ function tmdbFetch(endpoint, params = {}) {
   const url = `${TMDB_BASE}${endpoint}?${qs}`;
   return new Promise((resolve, reject) => {
     https.get(url, { timeout: 8000 }, (res) => {
-      if (res.statusCode !== 200) return reject(new Error(`TMDB HTTP ${res.statusCode}`));
+      if (res.statusCode !== 200) { res.resume(); return reject(new Error(`TMDB HTTP ${res.statusCode}`)); }
       let body = '';
       res.on('data', chunk => body += chunk);
       res.on('end', () => {
@@ -630,6 +630,13 @@ app.get('/api/collections/:collectionId', rateLimit, async (req, res) => {
       movies,
     };
 
+    // Evict stale entries to prevent unbounded cache growth
+    if (collectionDetailCache.size > 200) {
+      const now = Date.now();
+      for (const [key, val] of collectionDetailCache) {
+        if (now - val.ts > COLLECTION_DETAIL_TTL) collectionDetailCache.delete(key);
+      }
+    }
     collectionDetailCache.set(collectionId, { ts: Date.now(), data });
     res.json(data);
   } catch (err) {
@@ -1195,7 +1202,7 @@ app.post('/api/library/add-pack', rateLimit, async (req, res) => {
         } catch (err) {
           console.warn('[Library] Background metadata resolution failed:', err.message);
         }
-      })();
+      })().catch(err => console.warn('[Library] Background metadata error:', err.message));
     }
 
     res.json(result);
@@ -1316,7 +1323,7 @@ app.post('/api/library/add-manual', rateLimit, (req, res) => {
   try {
     const result = library.addItem({
       imdbId: null,
-      type: type || 'movie',
+      type: ['movie', 'series'].includes(type) ? type : 'movie',
       name,
       poster: '',
       year: '',
@@ -1409,7 +1416,8 @@ app.post('/api/library/bulk-relink', rateLimit, async (req, res) => {
   }
 
   const allItems = library.getAll();
-  const matches = allItems.filter(i => i.showName === matchShowName);
+  const matchLower = matchShowName.toLowerCase();
+  const matches = allItems.filter(i => (i.showName || '').toLowerCase() === matchLower);
   let updated = 0;
 
   for (const item of matches) {
@@ -1473,7 +1481,7 @@ app.get('/api/library/:id/stream', async (req, res) => {
     const start = parseInt(parts[0], 10);
     const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
 
-    if (start >= fileSize || end >= fileSize || start > end) {
+    if (isNaN(start) || isNaN(end) || start >= fileSize || end >= fileSize || start > end) {
       res.status(416).set('Content-Range', `bytes */${fileSize}`).end();
       return;
     }
@@ -1606,9 +1614,13 @@ app.get('/api/library/:id/probe', async (req, res) => {
   ]);
 
   let output = '';
+  let responded = false;
   ffprobe.stdout.on('data', (d) => { output += d.toString(); });
 
   ffprobe.on('close', (code) => {
+    if (responded) return;
+    responded = true;
+
     if (code !== 0) {
       return res.json({ directPlay: false, reason: 'ffprobe failed' });
     }
@@ -1646,6 +1658,8 @@ app.get('/api/library/:id/probe', async (req, res) => {
   });
 
   ffprobe.on('error', () => {
+    if (responded) return;
+    responded = true;
     res.json({ directPlay: false, reason: 'ffprobe not available' });
   });
 });
@@ -1723,6 +1737,8 @@ async function validateUrlNotSSRF(urlStr) {
 
 const MAX_REDIRECTS = 5;
 
+const MAX_FETCH_BODY = 10 * 1024 * 1024; // 10 MB max response body
+
 function fetchUrl(url, redirectCount = 0) {
   if (redirectCount > MAX_REDIRECTS) {
     return Promise.reject(new Error('Too many redirects'));
@@ -1731,12 +1747,20 @@ function fetchUrl(url, redirectCount = 0) {
     const mod = url.startsWith('https') ? https : http;
     const req = mod.get(url, { headers: { 'User-Agent': 'Albatross/1.0' }, timeout: 8000 }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return fetchUrl(res.headers.location, redirectCount + 1).then(resolve, reject);
+        // Validate redirect target against SSRF to prevent redirect-based bypass
+        const redirectUrl = res.headers.location;
+        res.resume();
+        return validateUrlNotSSRF(redirectUrl)
+          .then(() => fetchUrl(redirectUrl, redirectCount + 1))
+          .then(resolve, reject);
       }
-      if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
+      if (res.statusCode !== 200) { res.resume(); return reject(new Error(`HTTP ${res.statusCode}`)); }
       let body = '';
       res.setEncoding('utf8');
-      res.on('data', chunk => body += chunk);
+      res.on('data', chunk => {
+        body += chunk;
+        if (body.length > MAX_FETCH_BODY) { res.destroy(); reject(new Error('Response too large')); }
+      });
       res.on('end', () => resolve(body));
     });
     req.on('error', reject);

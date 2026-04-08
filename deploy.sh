@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
 # Quick deploy — pull latest from main and restart Albatross
+#
+# Usage: ./deploy.sh [--no-cache]
+#   --no-cache   Force a clean Docker rebuild (also re-pulls the base image).
+#                Use this when a base image or pinned dependency changed.
 set -e
 
 cd "$(dirname "$0")"
+
+BUILD_FLAGS=""
+if [[ "${1:-}" == "--no-cache" ]]; then
+  BUILD_FLAGS="--no-cache --pull"
+  echo "==> Clean rebuild requested (--no-cache --pull)"
+fi
 
 # Load secrets from .env file (not tracked in git)
 if [ -f .env ]; then
@@ -33,7 +43,7 @@ sudo docker stop alabtross-mobile 2>/dev/null || true
 sudo docker rm   alabtross-mobile 2>/dev/null || true
 
 echo "==> Building..."
-sudo docker build -t alabtross-mobile ./mobile-ui
+sudo docker build $BUILD_FLAGS -t alabtross-mobile ./mobile-ui
 
 BIND_IP=$(ip route get 8.8.8.8 | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')
 

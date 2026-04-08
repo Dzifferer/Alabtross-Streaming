@@ -162,9 +162,13 @@ class LibraryManager {
     const packDir = path.join(this._libraryPath, this._safeDirectoryName({ name: packLabel, infoHash }));
 
     return new Promise((resolve, reject) => {
+      // See torrent-engine.js for rationale on connections/uploads values.
+      // TL;DR: uploads:0 triggers BT choking (peers stop sending us data),
+      // and connections:500 overwhelms low-power hardware when multiple
+      // torrents run concurrently.
       const engine = torrentStream(magnetUri, {
-        connections: 500,
-        uploads: 0,
+        connections: 100,
+        uploads: 4,
         dht: true,
         verify: true,
         path: packDir,
@@ -509,9 +513,10 @@ class LibraryManager {
 
     console.log(`[Library] Resuming pack "${first.showName || first.name}" (${items.length} episodes) in ${packDir}`);
 
+    // See torrent-engine.js for rationale on connections/uploads values.
     const engine = torrentStream(first.magnetUri, {
-      connections: 500,
-      uploads: 0,
+      connections: 100,
+      uploads: 4,
       dht: true,
       verify: true,
       path: packDir,
@@ -1356,9 +1361,10 @@ class LibraryManager {
 
     const itemDir = path.join(this._libraryPath, this._safeDirectoryName(item));
 
+    // See torrent-engine.js for rationale on connections/uploads values.
     const engine = torrentStream(item.magnetUri, {
-      connections: 500,
-      uploads: 0,
+      connections: 100,
+      uploads: 4,
       dht: true,
       verify: true,
       path: itemDir,

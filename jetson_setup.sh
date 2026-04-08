@@ -178,14 +178,14 @@
 #   HEADLESS=1                          — enable unattended mode
 #   DRIVE_PARTITION=sda1                — external drive partition (or "none")
 #   FORMAT_DRIVE=yes                    — auto-format unformatted drives
-#   DUCKDNS_SUBDOMAIN=albatrossburt    — DuckDNS subdomain (or empty to skip)
+#   DUCKDNS_SUBDOMAIN=myalbatross    — DuckDNS subdomain (or empty to skip)
 #   DUCKDNS_AUTH_TOKEN=xxx             — DuckDNS token
 #   ENABLE_HEALTH=yes                  — auto-restart crashed services (default: yes)
 #   DISABLE_GUI=yes                    — disable desktop for headless (default: yes)
 #
 # Example (fully headless over SSH):
 #   sudo HEADLESS=1 DRIVE_PARTITION=sda1 \
-#        DUCKDNS_SUBDOMAIN=albatrossburt \
+#        DUCKDNS_SUBDOMAIN=myalbatross \
 #        DUCKDNS_AUTH_TOKEN=your-token \
 #        bash jetson_setup.sh
 #
@@ -384,7 +384,7 @@ else
   [[ "$HAS_DUCKDNS" == "n" ]] && HAS_DUCKDNS="no"
 
   if [[ "$HAS_DUCKDNS" == "yes" ]]; then
-    read -p  "Enter your DuckDNS subdomain (e.g. albatrossburt): " DUCKDNS_DOMAIN
+    read -p  "Enter your DuckDNS subdomain (e.g. myalbatross): " DUCKDNS_DOMAIN
     echo ""
     echo -e "${YELLOW}  Your token is the long string at the top of duckdns.org"
     echo -e "  It looks like: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx${NC}"

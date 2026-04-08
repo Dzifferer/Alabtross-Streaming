@@ -1923,11 +1923,31 @@ app.get('/api/library/:id/probe', async (req, res) => {
     return res.status(400).json({ error: 'Download not complete' });
   }
 
-  const probe = await library.probeItem(req.params.id);
-  if (!probe) return res.status(404).json({ error: 'File not found' });
+  const filePath = library.getFilePath(req.params.id);
+  if (!filePath) return res.status(404).json({ error: 'File not found' });
 
+  const probe = await library._probeFile(filePath);
   const caps = parseClientCaps(req.query.caps);
   const decision = library.classifyForClient(probe, caps);
+
+  // Log the probe outcome so we can diagnose failed playbacks from the
+  // server side. Include enough context to correlate with client reports:
+  // item name, full file path, decision action, and ffprobe reason if any.
+  if (decision.action === 'unplayable') {
+    let fileSize = '?';
+    try { fileSize = String(fs.statSync(filePath).size); } catch { /* ignore */ }
+    console.warn(
+      `[Library] Probe UNPLAYABLE: "${item.name}" ` +
+      `file=${filePath} size=${fileSize}B ` +
+      `reason=${decision.reason || '?'}`
+    );
+  } else {
+    console.log(
+      `[Library] Probe ${decision.action}: "${item.name}" ` +
+      `video=${decision.videoCodec || '?'} audio=${decision.audioCodec || '?'} ` +
+      `ext=${decision.ext} caps=${req.query.caps || '(none)'}`
+    );
+  }
 
   // Suggest the exact path the client should request. Keeps the client
   // logic dumb — it just follows whatever we say.

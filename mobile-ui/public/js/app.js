@@ -3713,27 +3713,62 @@
   // Set video src, wait for canplay-or-error (with timeout), then play().
   // Resolves on successful play(), rejects with a specific Error describing
   // which stage failed — the caller uses that to fall back to transcode.
+  //
+  // The timeout is NOT a hard deadline. Large MP4s with moov-at-end can
+  // take 30-60s to reach 'canplay' on a spinning USB drive because the
+  // browser has to do multiple range requests to locate the moov atom
+  // before it knows where keyframes are. We watch for activity events
+  // (progress, loadedmetadata, suspend) and reset the stall timer on
+  // each one. Only a genuinely stuck stream — no bytes received, no
+  // metadata parsed, nothing — will actually time out.
   function tryLibraryStream(url, action) {
     return new Promise((resolve, reject) => {
       const v = dom.videoPlayer;
       v.src = url;
       v.load();
 
-      // Direct and remux start fast (raw file or stream-copy remux through
-      // ffmpeg). Transcode has to spawn libx264 and fill its first buffer,
-      // which is noticeably slower on Orin Nano software encoding — give
-      // it more headroom before giving up.
-      const timeoutMs = action === 'transcode' ? 60000 : 20000;
+      // Time budget for reaching 'canplay' with NO activity. Any progress
+      // event resets this. Transcode gets longer because libx264 on Orin
+      // Nano needs a few seconds before it emits the first mp4 fragment.
+      const stallMs = action === 'transcode' ? 30000 : 25000;
+      // Hard ceiling regardless of activity — protects against pathological
+      // cases where the server keeps dribbling bytes but never reaches a
+      // playable state.
+      const hardMs  = action === 'transcode' ? 120000 : 90000;
 
       let settled = false;
-      const cleanup = () => {
+      let stallTimer = null;
+      const startedAt = Date.now();
+      const hardTimer = setTimeout(() => {
+        if (settled) return; settled = true;
+        cleanupListeners();
+        reject(new Error(`${action} timed out after ${Math.round((Date.now() - startedAt) / 1000)}s (hard)`));
+      }, hardMs);
+
+      const resetStall = () => {
+        if (settled) return;
+        if (stallTimer) clearTimeout(stallTimer);
+        stallTimer = setTimeout(() => {
+          if (settled) return; settled = true;
+          cleanupListeners();
+          reject(new Error(`${action} stalled (no activity for ${stallMs / 1000}s)`));
+        }, stallMs);
+      };
+
+      const cleanupListeners = () => {
         v.removeEventListener('canplay', onCanPlay);
         v.removeEventListener('error', onError);
-        clearTimeout(timer);
+        v.removeEventListener('progress', onActivity);
+        v.removeEventListener('loadedmetadata', onActivity);
+        v.removeEventListener('loadeddata', onActivity);
+        v.removeEventListener('suspend', onActivity);
+        if (stallTimer) clearTimeout(stallTimer);
+        clearTimeout(hardTimer);
       };
+
       const onCanPlay = async () => {
         if (settled) return; settled = true;
-        cleanup();
+        cleanupListeners();
         try {
           await v.play();
           resolve();
@@ -3743,18 +3778,27 @@
       };
       const onError = () => {
         if (settled) return; settled = true;
-        cleanup();
+        cleanupListeners();
         const err = v.error;
         const code = err ? `code ${err.code}` : 'unknown';
         reject(new Error(`Media error (${code}) on ${action}`));
       };
-      const timer = setTimeout(() => {
-        if (settled) return; settled = true;
-        cleanup();
-        reject(new Error(`${action} timed out after ${timeoutMs / 1000}s`));
-      }, timeoutMs);
+      const onActivity = () => resetStall();
+
       v.addEventListener('canplay', onCanPlay, { once: true });
       v.addEventListener('error', onError, { once: true });
+      // 'progress' fires whenever the browser appends bytes to the buffer.
+      // 'loadedmetadata' fires once the moov atom has been parsed.
+      // 'loadeddata' fires on the first decoded frame.
+      // 'suspend' fires when the browser pauses fetching (not an error, but
+      // activity). We add them as plain listeners (no {once: true}) so we
+      // can reset the stall timer on every tick.
+      v.addEventListener('progress', onActivity);
+      v.addEventListener('loadedmetadata', onActivity);
+      v.addEventListener('loadeddata', onActivity);
+      v.addEventListener('suspend', onActivity);
+
+      resetStall();
     });
   }
 

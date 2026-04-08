@@ -142,7 +142,9 @@ class LibraryManager {
       return Promise.resolve({ status: 'already_downloading', items: [] });
     }
 
-    const packDir = path.join(this._libraryPath, this._safeDirectoryName({ name: `${name} S${String(season).padStart(2, '0')}`, infoHash }));
+    const isCompletePack = parseInt(season, 10) === 0;
+    const packLabel = isCompletePack ? name : `${name} S${String(season).padStart(2, '0')}`;
+    const packDir = path.join(this._libraryPath, this._safeDirectoryName({ name: packLabel, infoHash }));
 
     return new Promise((resolve, reject) => {
       const engine = torrentStream(magnetUri, {
@@ -185,13 +187,16 @@ class LibraryManager {
 
         // Select and create items for each video file
         const createdItems = [];
-        const seasonNum = parseInt(season, 10) || 1;
+        // season=0 means "complete pack — detect seasons from filenames"
+        const fallbackSeason = parseInt(season, 10) || 1;
 
         for (const file of videoFiles) {
           file.select();
 
-          // Try to parse episode number from filename
-          const episodeNum = this._parseEpisodeNumber(file.name, seasonNum);
+          // Parse season and episode from filename
+          const parsed = this._parseSeasonEpisode(file.name, fallbackSeason);
+          const seasonNum = parsed.season || fallbackSeason;
+          const episodeNum = parsed.episode;
 
           const itemId = episodeNum
             ? `${imdbId}_s${seasonNum}e${episodeNum}_${infoHash.slice(0, 8)}`
@@ -325,30 +330,43 @@ class LibraryManager {
         this._progressTimers.set(packId, progressTimer);
         this._saveMetadata();
 
-        console.log(`[Library] Season pack started: "${name}" S${String(seasonNum).padStart(2, '0')} — ${videoFiles.length} episodes`);
+        console.log(`[Library] Season pack started: "${name}" ${isCompletePack ? '(complete pack)' : `S${String(fallbackSeason).padStart(2, '0')}`} — ${videoFiles.length} episodes`);
         resolve({ status: 'started', items: createdItems });
       });
     });
   }
 
-  _parseEpisodeNumber(fileName, seasonNum) {
+  /**
+   * Parse season and episode numbers from a filename.
+   * Returns { season, episode } where either may be null.
+   * @param {string} fileName
+   * @param {number} fallbackSeason - season to use when filename has no season indicator
+   */
+  _parseSeasonEpisode(fileName, fallbackSeason) {
     const base = path.basename(fileName);
     // Try S01E05 pattern
     const seMatch = base.match(/S(\d+)E(\d+)/i);
-    if (seMatch) return parseInt(seMatch[2], 10);
+    if (seMatch) return { season: parseInt(seMatch[1], 10), episode: parseInt(seMatch[2], 10) };
+    // Try 1x05 pattern
+    const xMatch = base.match(/(\d+)x(\d+)/i);
+    if (xMatch) return { season: parseInt(xMatch[1], 10), episode: parseInt(xMatch[2], 10) };
     // Try E05 pattern (without season)
     const eMatch = base.match(/\bE(\d+)\b/i);
-    if (eMatch) return parseInt(eMatch[1], 10);
+    if (eMatch) return { season: fallbackSeason, episode: parseInt(eMatch[1], 10) };
     // Try "- 05 -" or "- 05." or "- 05 " at end before extension (anime fansub convention)
     const dashMatch = base.match(/[-–]\s*(\d{1,4})\s*(?:[-–.\s]|$)/);
-    if (dashMatch) return parseInt(dashMatch[1], 10);
+    if (dashMatch) return { season: fallbackSeason, episode: parseInt(dashMatch[1], 10) };
     // Try "Episode 5" pattern
     const epMatch = base.match(/Episode\s*(\d+)/i);
-    if (epMatch) return parseInt(epMatch[1], 10);
-    // Try "x05" pattern (1x05)
-    const xMatch = base.match(/\d+x(\d+)/i);
-    if (xMatch) return parseInt(xMatch[1], 10);
-    return null;
+    if (epMatch) return { season: fallbackSeason, episode: parseInt(epMatch[1], 10) };
+    return { season: fallbackSeason, episode: null };
+  }
+
+  /**
+   * Backwards-compatible wrapper for code that only needs the episode number.
+   */
+  _parseEpisodeNumber(fileName, seasonNum) {
+    return this._parseSeasonEpisode(fileName, seasonNum).episode;
   }
 
   /**
@@ -573,6 +591,165 @@ class LibraryManager {
     }
 
     return null;
+  }
+
+  /**
+   * Repair metadata for pack items that were saved with incorrect season numbers.
+   * Re-parses season/episode from each item's fileName, fixes the season field,
+   * re-keys items with corrected IDs, and discovers missing episodes on disk
+   * that were downloaded but never tracked due to ID collisions.
+   */
+  repairPackMetadata() {
+    const fixes = { retagged: 0, discovered: 0, errors: [] };
+    const PACK_MIN_FILE_SIZE = 10 * 1024 * 1024;
+    const dominated = /\b(sample|trailer|extra|bonus|featurette|interview)\b/i;
+
+    // ── Phase 1: Fix season numbers on existing pack items ──
+    const packItems = [...this._items.values()].filter(i => i.packId);
+    for (const item of packItems) {
+      if (!item.fileName) continue;
+      const parsed = this._parseSeasonEpisode(item.fileName, item.season || 1);
+      const newSeason = parsed.season || item.season;
+      const newEpisode = parsed.episode;
+
+      if (newSeason === item.season && newEpisode === item.episode) continue;
+
+      // Build the corrected ID
+      const newId = newEpisode
+        ? `${item.imdbId}_s${newSeason}e${newEpisode}_${item.infoHash.slice(0, 8)}`
+        : item.id; // keep existing ID if we can't determine episode
+
+      // Re-key if the ID changed
+      if (newId !== item.id) {
+        if (this._items.has(newId)) {
+          // Target ID already exists — skip to avoid overwriting
+          fixes.errors.push(`Skipped "${item.fileName}": target ID ${newId} already exists`);
+          continue;
+        }
+        this._items.delete(item.id);
+        item.id = newId;
+        this._items.set(newId, item);
+      }
+
+      item.season = newSeason;
+      item.episode = newEpisode;
+      fixes.retagged++;
+    }
+
+    // ── Phase 2: Discover missing episodes on disk ──
+    // Group existing items by packId to find their pack directories
+    const packGroups = new Map();
+    for (const item of this._items.values()) {
+      if (!item.packId || !item.filePath) continue;
+      if (!packGroups.has(item.packId)) packGroups.set(item.packId, []);
+      packGroups.get(item.packId).push(item);
+    }
+
+    const trackedFileNames = new Set(
+      [...this._items.values()].filter(i => i.fileName).map(i => i.fileName)
+    );
+
+    for (const [packId, items] of packGroups) {
+      const first = items[0];
+      // Derive pack directory from first item's filePath
+      const packDirName = first.filePath.split(path.sep)[0];
+      const packDir = path.join(this._libraryPath, packDirName);
+
+      if (!fs.existsSync(packDir)) continue;
+
+      // Recursively find all video files in the pack directory
+      const diskFiles = this._findVideoFilesRecursive(packDir);
+
+      for (const fullPath of diskFiles) {
+        const fileName = path.basename(fullPath);
+        if (trackedFileNames.has(fileName)) continue;
+        if (dominated.test(fileName)) continue;
+
+        let fileSize;
+        try {
+          const stat = fs.statSync(fullPath);
+          fileSize = stat.size;
+        } catch { continue; }
+
+        if (fileSize < PACK_MIN_FILE_SIZE) continue;
+
+        const parsed = this._parseSeasonEpisode(fileName, first.season || 1);
+        const seasonNum = parsed.season || first.season || 1;
+        const episodeNum = parsed.episode;
+
+        const itemId = episodeNum
+          ? `${first.imdbId}_s${seasonNum}e${episodeNum}_${first.infoHash.slice(0, 8)}`
+          : `${first.imdbId}_pack_${first.infoHash.slice(0, 8)}_${path.basename(fileName, path.extname(fileName)).replace(/[^\w]/g, '_').slice(0, 30)}`;
+
+        if (this._items.has(itemId)) continue;
+
+        const relativePath = path.relative(this._libraryPath, fullPath);
+        const episodeName = this._deriveEpisodeName(fileName);
+
+        const newItem = {
+          id: itemId,
+          imdbId: first.imdbId,
+          type: 'series',
+          name: episodeName,
+          showName: first.showName || first.name,
+          poster: first.poster || '',
+          year: first.year || '',
+          quality: first.quality || '',
+          size: (fileSize / (1024 * 1024 * 1024)).toFixed(1) + ' GB',
+          season: seasonNum,
+          episode: episodeNum,
+          infoHash: first.infoHash,
+          magnetUri: first.magnetUri,
+          packId,
+          status: fileSize >= (fileSize - 1024) ? 'complete' : 'downloading',
+          progress: 100,
+          downloadSpeed: 0,
+          numPeers: 0,
+          filePath: relativePath,
+          fileName,
+          fileSize,
+          addedAt: Date.now(),
+          completedAt: Date.now(),
+          error: null,
+        };
+
+        this._items.set(itemId, newItem);
+        trackedFileNames.add(fileName);
+        fixes.discovered++;
+
+        // Check if conversion is needed
+        this._checkAndConvert(itemId);
+      }
+    }
+
+    if (fixes.retagged > 0 || fixes.discovered > 0) {
+      this._saveMetadata();
+    }
+
+    console.log(`[Library] Metadata repair: ${fixes.retagged} items retagged, ${fixes.discovered} missing episodes discovered`);
+    return fixes;
+  }
+
+  /**
+   * Recursively find all video files in a directory.
+   */
+  _findVideoFilesRecursive(dir) {
+    const results = [];
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          results.push(...this._findVideoFilesRecursive(full));
+        } else if (entry.isFile()) {
+          const ext = path.extname(entry.name).toLowerCase();
+          if (VIDEO_EXTENSIONS.has(ext)) {
+            results.push(full);
+          }
+        }
+      }
+    } catch { /* skip unreadable dirs */ }
+    return results;
   }
 
   /**

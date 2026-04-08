@@ -1107,6 +1107,17 @@ app.post('/api/library/add-pack', rateLimit, async (req, res) => {
   }
 });
 
+// POST /api/library/repair — fix metadata for multi-season packs with incorrect season tags
+app.post('/api/library/repair', rateLimit, (req, res) => {
+  try {
+    const result = library.repairPackMetadata();
+    res.json(result);
+  } catch (err) {
+    console.error('[API] Metadata repair error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // DELETE /api/library/:id — remove item from library
 app.delete('/api/library/:id', rateLimit, (req, res) => {
   const removed = library.removeItem(req.params.id);

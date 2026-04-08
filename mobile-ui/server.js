@@ -1356,13 +1356,55 @@ app.post('/api/library/:id/reorder', rateLimit, (req, res) => {
   res.json({ success: true });
 });
 
+// POST /api/library/bulk-relink — re-link all episodes matching a showName to a new IMDB entry.
+// Auto-fetches poster from TMDB if not provided.
+app.post('/api/library/bulk-relink', rateLimit, async (req, res) => {
+  const { matchShowName, imdbId, showName, year } = req.body || {};
+  if (!matchShowName) return res.status(400).json({ error: 'matchShowName is required' });
+  if (!imdbId || !/^tt\d{1,10}$/.test(imdbId)) return res.status(400).json({ error: 'Valid imdbId is required' });
+
+  // Auto-fetch poster and year from TMDB if available
+  let poster = req.body.poster || null;
+  let resolvedYear = year;
+  if (TMDB_API_KEY) {
+    try {
+      const findData = await tmdbFetch('/find/' + imdbId, { external_source: 'imdb_id' });
+      const tvResults = findData.tv_results || [];
+      if (tvResults.length > 0) {
+        const show = tvResults[0];
+        if (!poster && show.poster_path) poster = `https://image.tmdb.org/t/p/w342${show.poster_path}`;
+        if (!resolvedYear) resolvedYear = (show.first_air_date || '').slice(0, 4);
+      }
+    } catch (err) {
+      console.warn('[Bulk-relink] TMDB poster lookup failed:', err.message);
+    }
+  }
+
+  const allItems = library.getAll();
+  const matches = allItems.filter(i => i.showName === matchShowName);
+  let updated = 0;
+
+  for (const item of matches) {
+    const success = library.relinkItem(item.id, {
+      imdbId,
+      showName: showName || matchShowName,
+      poster,
+      year: resolvedYear,
+    });
+    if (success) updated++;
+  }
+
+  console.log(`[Bulk-relink] "${matchShowName}" -> "${showName || matchShowName}" (${imdbId}), ${updated}/${matches.length} updated`);
+  res.json({ matched: matches.length, updated, showName: showName || matchShowName, imdbId, poster, year: resolvedYear });
+});
+
 // POST /api/library/:id/relink — manually re-link a library item to a different IMDB entry
 app.post('/api/library/:id/relink', rateLimit, (req, res) => {
-  const { imdbId, name, poster, year, type } = req.body || {};
+  const { imdbId, name, poster, year, type, showName } = req.body || {};
   if (!imdbId) return res.status(400).json({ error: 'imdbId is required' });
   if (!/^tt\d{1,10}$/.test(imdbId)) return res.status(400).json({ error: 'Invalid IMDB ID format' });
 
-  const success = library.relinkItem(req.params.id, { imdbId, name, poster, year, type });
+  const success = library.relinkItem(req.params.id, { imdbId, name, poster, year, type, showName });
   if (!success) return res.status(404).json({ error: 'Item not found' });
   res.json({ success: true });
 });

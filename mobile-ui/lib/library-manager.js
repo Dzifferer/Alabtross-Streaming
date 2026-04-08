@@ -495,6 +495,9 @@ class LibraryManager {
   _resumePackDownload(packId, items) {
     if (items.length === 0) return;
 
+    // Prevent duplicate engines — if one is already starting/running, skip
+    if (this._engines.has(packId)) return;
+
     const first = items[0];
 
     // Derive pack directory from the first item's filePath
@@ -515,27 +518,34 @@ class LibraryManager {
       trackers: TRACKERS,
     });
 
+    // Store engine immediately to prevent retryItem from creating duplicates
+    // (engine is usable before 'ready' — it just won't have files yet)
+    this._engines.set(packId, engine);
+
     const timeout = setTimeout(() => {
-      for (const item of items) {
-        if (item.status === 'downloading') {
+      // Fail ALL downloading items for this pack, not just the ones passed in
+      for (const [, item] of this._items) {
+        if (item.packId === packId && item.status === 'downloading') {
           item.status = 'failed';
           item.error = 'Torrent metadata timeout (90s) on resume';
         }
       }
       try { engine.destroy(); } catch {}
+      this._engines.delete(packId);
       this._saveMetadata();
       this._processQueue();
     }, 90000);
 
     engine.on('error', (err) => {
       clearTimeout(timeout);
-      for (const item of items) {
-        if (item.status === 'downloading') {
+      for (const [, item] of this._items) {
+        if (item.packId === packId && item.status === 'downloading') {
           item.status = 'failed';
           item.error = err.message;
         }
       }
       try { engine.destroy(); } catch {}
+      this._engines.delete(packId);
       this._saveMetadata();
       this._processQueue();
     });
@@ -546,9 +556,10 @@ class LibraryManager {
       // Deselect all files first
       for (const f of engine.files) f.deselect();
 
-      // For each pack item, find and select the matching file by fileName
-      for (const item of items) {
-        if (item.status !== 'downloading') continue;
+      // Select files for ALL downloading items in this pack (not just the ones
+      // originally passed in — more may have been retried since engine creation)
+      for (const [, item] of this._items) {
+        if (item.packId !== packId || item.status !== 'downloading') continue;
 
         const file = engine.files.find(f => path.basename(f.name) === item.fileName);
         if (file) {
@@ -561,10 +572,7 @@ class LibraryManager {
         }
       }
 
-      // Store the shared engine
-      this._engines.set(packId, engine);
       this._startPeriodicSave();
-
       this._trackPackProgress(packId, engine);
       this._saveMetadata();
     });
@@ -882,14 +890,22 @@ class LibraryManager {
     item.error = null;
 
     if (item.packId) {
-      if (!this._engines.has(item.packId)) {
+      const engine = this._engines.get(item.packId);
+      if (!engine) {
         // No pack engine running — restart it with all downloading items in this pack
         const packItems = [...this._items.values()].filter(
           i => i.packId === item.packId && i.status === 'downloading'
         );
         this._resumePackDownload(item.packId, packItems);
+      } else if (engine.files) {
+        // Engine already ready — select this item's file directly
+        const file = engine.files.find(f => path.basename(f.name) === item.fileName);
+        if (file) {
+          file.select();
+          console.log(`[Library] Added to running pack engine: "${item.fileName}"`);
+        }
       }
-      // If engine already exists, the progress timer will pick up this item
+      // If engine exists but not ready yet, the ready handler will pick up this item
     } else {
       this._startDownload(id);
     }
@@ -930,12 +946,25 @@ class LibraryManager {
     item.numPeers = 0;
 
     if (item.packId) {
-      if (!this._engines.has(item.packId)) {
+      const engine = this._engines.get(item.packId);
+      if (!engine) {
+        // No engine yet — start one for all downloading items in this pack
         const packItems = [...this._items.values()].filter(
           i => i.packId === item.packId && i.status === 'downloading'
         );
         this._resumePackDownload(item.packId, packItems);
+      } else if (engine.files) {
+        // Engine already ready — select this item's file directly
+        const file = engine.files.find(f => path.basename(f.name) === item.fileName);
+        if (file) {
+          file.select();
+          console.log(`[Library] Added to running pack engine: "${item.fileName}"`);
+        }
+        // If engine.files exists but file not found, _trackPackProgress will
+        // still monitor the item — it may already be on disk from a prior run
       }
+      // If engine exists but not ready yet (no .files), the ready handler
+      // will pick up this item since it scans all downloading pack items
     } else {
       this._startDownload(id);
     }

@@ -725,11 +725,6 @@ class StremioAPI {
   // Known Stremio TV addons that users can quick-add
   static KNOWN_TV_ADDONS = [
     {
-      url: 'https://stremio-iptv-org.vercel.app',
-      name: 'IPTV-org',
-      description: 'Community IPTV — 8000+ channels worldwide',
-    },
-    {
       url: 'https://7a82163c306e-livetv.baby-beamup.club',
       name: 'Live TV',
       description: 'International live TV channels',
@@ -744,8 +739,8 @@ class StremioAPI {
   // Default source added on first launch
   static DEFAULT_TV_SOURCE = {
     type: 'stremio-tv',
-    url: 'https://stremio-iptv-org.vercel.app',
-    name: 'IPTV-org',
+    url: 'https://7a82163c306e-livetv.baby-beamup.club',
+    name: 'Live TV',
     enabled: true,
   };
 
@@ -766,7 +761,19 @@ class StremioAPI {
       const saved = localStorage.getItem('livetv_sources');
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          // Auto-prune dead addons that older builds installed by default.
+          // The stremio-iptv-org.vercel.app domain is gone (NXDOMAIN) and
+          // its 404s flood the AddonProxy logs every refresh.
+          const DEAD_ADDONS = ['stremio-iptv-org.vercel.app'];
+          const cleaned = parsed.filter(s =>
+            !DEAD_ADDONS.some(dead => (s && s.url || '').includes(dead))
+          );
+          if (cleaned.length !== parsed.length) {
+            this._saveLiveTVSources(cleaned);
+          }
+          if (cleaned.length > 0) return cleaned;
+        }
       }
     } catch {
       localStorage.removeItem('livetv_sources');

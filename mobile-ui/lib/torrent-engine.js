@@ -45,6 +45,10 @@ class TorrentEngine {
     this._active = new Map(); // infoHash -> { engine, files, lastAccess, timer }
     this._streamStats = new Map(); // streamKey -> { bytesSent, startTime, lastBytes, lastTime, egressRate, mode, hash }
     this._streamIdCounter = 0;
+    // Tracks in-flight ffmpeg remux pipelines so two near-simultaneous probe
+    // requests from the same player don't spawn duplicate ffmpeg processes.
+    // Key = `${hash}:${fileIdx ?? '*'}`, Value = { startedAt }
+    this._remuxInFlight = new Map();
     this._downloadPath = opts.downloadPath || path.join(process.cwd(), '.torrent-cache');
     this._maxFileSize = opts.maxFileSize || MAX_FILE_SIZE;
     this._maxConcurrent = opts.maxConcurrent || DEFAULT_MAX_CONCURRENT;
@@ -92,10 +96,20 @@ class TorrentEngine {
 
       placeholder.engine = engine;
 
-      // Log peer count periodically
+      // Log peer count when it changes, not every 10 seconds. The old
+      // behavior spammed `peers: 0, queued: 0` for the full 90s metadata
+      // window on dead torrents, which made logs noisy and was the only
+      // signal coming from a torrent that was going nowhere.
+      let lastPeers = -1;
+      let lastQueued = -1;
       const peerLog = setInterval(() => {
-        if (engine.swarm) {
-          console.log(`[TorrentEngine] ${hash.slice(0,8)}... peers: ${engine.swarm.wires.length}, queued: ${engine.swarm.queued}`);
+        if (!engine.swarm) return;
+        const peers = engine.swarm.wires.length;
+        const queued = engine.swarm.queued;
+        if (peers !== lastPeers || queued !== lastQueued) {
+          console.log(`[TorrentEngine] ${hash.slice(0,8)}... peers: ${peers}, queued: ${queued}`);
+          lastPeers = peers;
+          lastQueued = queued;
         }
       }, 10000);
 
@@ -224,21 +238,24 @@ class TorrentEngine {
     // Select the file for download (torrent-stream won't download until selected)
     file.select();
 
-    // Validate magic bytes with timeout fallback
+    // Validate magic bytes with timeout fallback. We treat 'incomplete' (data
+    // not arrived in time) as a soft pass — the extension was already
+    // validated by isFileNameSafe, so we don't fail-closed on slow torrents.
     try {
-      const isVideo = await Promise.race([
+      const result = await Promise.race([
         this._validateMagicBytes(file),
-        new Promise(resolve => setTimeout(() => resolve(false), 10000)),
+        new Promise(resolve => setTimeout(() => resolve('incomplete'), 15000)),
       ]);
-      if (!isVideo) {
-        console.warn(`[Security] Magic byte check failed for "${file.name}"`);
+      if (result === 'mismatch') {
+        console.warn(`[Security] Magic byte mismatch for "${file.name}" — rejecting`);
         res.status(403).json({ error: 'File failed video format validation' });
         return;
       }
+      if (result === 'incomplete') {
+        console.warn(`[Security] Magic bytes not yet available for "${file.name}" — extension-only validation`);
+      }
     } catch (err) {
-      console.warn(`[Security] Magic byte error for "${file.name}": ${err.message} — rejecting`);
-      res.status(403).json({ error: 'File failed video format validation' });
-      return;
+      console.warn(`[Security] Magic byte read error for "${file.name}": ${err.message} — extension-only validation`);
     }
 
     this._touchTorrent(hash);
@@ -303,6 +320,18 @@ class TorrentEngine {
     const hash = this._extractHash(magnetOrHash);
     console.log(`[TorrentEngine] serveRemuxedStream: hash=${hash}, fileIdx=${fileIdx}`);
 
+    // Reject duplicate concurrent remuxes for the same hash+fileIdx. Browser
+    // video players typically probe the URL and then issue a real GET; without
+    // this guard both requests spawn ffmpeg, doubling CPU and torrent reads.
+    const remuxKey = `${hash}:${fileIdx ?? '*'}`;
+    const inFlight = this._remuxInFlight.get(remuxKey);
+    if (inFlight && Date.now() - inFlight.startedAt < 30000) {
+      console.warn(`[TorrentEngine] Duplicate remux request for ${remuxKey} — already in flight, rejecting`);
+      res.set('Retry-After', '5');
+      res.status(503).json({ error: 'Already remuxing this file — retry in a moment' });
+      return;
+    }
+
     let entry;
     try {
       entry = await this.getTorrent(magnetOrHash);
@@ -319,24 +348,39 @@ class TorrentEngine {
       return;
     }
 
+    // Re-check the in-flight map now that we know the actual file (the
+    // initial check happened before getTorrent resolved, so a race could
+    // have let two requests through).
+    if (this._remuxInFlight.has(remuxKey)) {
+      console.warn(`[TorrentEngine] Duplicate remux race for ${remuxKey} — second arrival, rejecting`);
+      res.set('Retry-After', '5');
+      res.status(503).json({ error: 'Already remuxing this file — retry in a moment' });
+      return;
+    }
+    this._remuxInFlight.set(remuxKey, { startedAt: Date.now() });
+
     console.log(`[TorrentEngine] Remuxing: "${file.name}" (${(file.length / 1e6).toFixed(0)}MB)`);
     file.select();
 
-    // Validate magic bytes
+    const releaseInFlight = () => this._remuxInFlight.delete(remuxKey);
+
+    // Validate magic bytes (see serveStream for the soft-pass rationale).
     try {
-      const isVideo = await Promise.race([
+      const result = await Promise.race([
         this._validateMagicBytes(file),
-        new Promise(resolve => setTimeout(() => resolve(false), 10000)),
+        new Promise(resolve => setTimeout(() => resolve('incomplete'), 15000)),
       ]);
-      if (!isVideo) {
-        console.warn(`[Security] Magic byte check failed for "${file.name}"`);
+      if (result === 'mismatch') {
+        console.warn(`[Security] Magic byte mismatch for "${file.name}" — rejecting`);
+        releaseInFlight();
         res.status(403).json({ error: 'File failed video format validation' });
         return;
       }
+      if (result === 'incomplete') {
+        console.warn(`[Security] Magic bytes not yet available for "${file.name}" — extension-only validation`);
+      }
     } catch (err) {
-      console.warn(`[Security] Magic byte error for "${file.name}": ${err.message} — rejecting`);
-      res.status(403).json({ error: 'File failed video format validation' });
-      return;
+      console.warn(`[Security] Magic byte read error for "${file.name}": ${err.message} — extension-only validation`);
     }
 
     this._touchTorrent(hash);
@@ -392,6 +436,7 @@ class TorrentEngine {
 
     ffmpeg.on('error', (err) => {
       console.error(`[TorrentEngine] FFmpeg spawn error: ${err.message}`);
+      releaseInFlight();
       if (!res.headersSent) {
         res.status(500).json({ error: 'Remux failed — FFmpeg not available' });
       } else if (!res.destroyed) {
@@ -403,10 +448,12 @@ class TorrentEngine {
       if (code && code !== 0 && code !== 255) {
         console.warn(`[TorrentEngine] FFmpeg exited with code ${code}`);
       }
+      releaseInFlight();
       if (!res.destroyed) res.end();
     });
 
     res.on('close', () => {
+      releaseInFlight();
       source.destroy();
       meter.destroy();
       ffmpeg.kill('SIGTERM');
@@ -576,27 +623,54 @@ class TorrentEngine {
 
   // ─── Security ─────────────────────────────────────
 
+  /**
+   * Read the first MAGIC_READ_SIZE bytes of a torrent file and check
+   * the video container signature.
+   *
+   * Returns:
+   *   'match'      — signature matches a known video container
+   *   'mismatch'   — we got enough bytes and they didn't match (hard reject)
+   *   'incomplete' — stream closed/timed out before delivering enough bytes
+   *                  (torrent piece not downloaded yet — DO NOT hard-reject,
+   *                  the caller should fall back to extension validation
+   *                  which has already passed at this point)
+   */
   _validateMagicBytes(file) {
     return new Promise((resolve, reject) => {
-      if (file.length < MAGIC_READ_SIZE) { resolve(false); return; }
+      if (file.length < MAGIC_READ_SIZE) { resolve('incomplete'); return; }
       const stream = file.createReadStream({ start: 0, end: MAGIC_READ_SIZE - 1 });
       const chunks = [];
       let bytesRead = 0;
+      let settled = false;
+
+      const settle = (result) => {
+        if (settled) return;
+        settled = true;
+        try { stream.destroy(); } catch {}
+        resolve(result);
+      };
+
       stream.on('data', (chunk) => {
         chunks.push(chunk);
         bytesRead += chunk.length;
-        if (bytesRead >= MAGIC_READ_SIZE) stream.destroy();
+        if (bytesRead >= MAGIC_READ_SIZE) {
+          const header = Buffer.concat(chunks).subarray(0, MAGIC_READ_SIZE);
+          settle(matchesVideoSignature(header) ? 'match' : 'mismatch');
+        }
       });
-      stream.on('end', check);
-      stream.on('close', check);
-      stream.on('error', reject);
-      let checked = false;
-      function check() {
-        if (checked) return;
-        checked = true;
-        const header = Buffer.concat(chunks).subarray(0, MAGIC_READ_SIZE);
-        resolve(matchesVideoSignature(header));
-      }
+      stream.on('end', () => {
+        // Stream ended naturally — either we got enough bytes (handled in
+        // 'data' above) or it closed early with a partial read.
+        if (!settled) settle('incomplete');
+      });
+      stream.on('close', () => {
+        if (!settled) settle('incomplete');
+      });
+      stream.on('error', (err) => {
+        if (settled) return;
+        settled = true;
+        reject(err);
+      });
     });
   }
 

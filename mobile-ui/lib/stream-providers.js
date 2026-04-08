@@ -22,11 +22,26 @@ const { TRACKERS } = require('./file-safety');
 const fallbackResolver = new dns.Resolver();
 fallbackResolver.setServers(['1.1.1.1', '8.8.8.8', '1.0.0.1', '8.8.4.4']);
 
+// Positive + negative DNS cache. Without this, every failed lookup re-runs
+// system DNS + fallback DNS on every request, which causes a CPU-burning
+// retry storm whenever a tracker domain dies.
+const DNS_TTL_OK = 5 * 60 * 1000;     // 5 min for successful lookups
+const DNS_TTL_FAIL = 2 * 60 * 1000;   // 2 min for failures (so dead sites
+                                       // don't get re-queried on every search)
+const dnsCache = new Map(); // hostname -> { ip, error, expires }
+
 function resolveWithFallback(hostname) {
+  const cached = dnsCache.get(hostname);
+  if (cached && cached.expires > Date.now()) {
+    if (cached.ip) return Promise.resolve(cached.ip);
+    return Promise.reject(cached.error);
+  }
+
   return new Promise((resolve, reject) => {
     // Try system DNS first
     dns.resolve4(hostname, (err, addresses) => {
       if (!err && addresses && addresses.length > 0) {
+        dnsCache.set(hostname, { ip: addresses[0], expires: Date.now() + DNS_TTL_OK });
         return resolve(addresses[0]);
       }
       // System DNS failed — try public resolvers
@@ -34,9 +49,12 @@ function resolveWithFallback(hostname) {
       fallbackResolver.resolve4(hostname, (err2, addresses2) => {
         if (!err2 && addresses2 && addresses2.length > 0) {
           console.log(`[DNS] Fallback resolved ${hostname} → ${addresses2[0]}`);
+          dnsCache.set(hostname, { ip: addresses2[0], expires: Date.now() + DNS_TTL_OK });
           return resolve(addresses2[0]);
         }
-        reject(err2 || err);
+        const finalErr = err2 || err;
+        dnsCache.set(hostname, { error: finalErr, expires: Date.now() + DNS_TTL_FAIL });
+        reject(finalErr);
       });
     });
   });
@@ -108,12 +126,23 @@ function httpGetDirect(url, timeoutMs = 10000, _redirectCount = 0, resolvedIp = 
 }
 
 async function httpGet(url, timeoutMs = 10000, _redirectCount = 0) {
+  // Short-circuit if we already know this hostname is unresolvable, so we
+  // don't burn CPU re-running system DNS on every search.
+  const parsedUrl = new URL(url);
+  const cached = dnsCache.get(parsedUrl.hostname);
+  if (cached && cached.expires > Date.now() && cached.error) {
+    throw cached.error;
+  }
+  // If we have a cached IP, skip system DNS and connect directly.
+  if (cached && cached.expires > Date.now() && cached.ip) {
+    return await httpGetDirect(url, timeoutMs, _redirectCount, cached.ip);
+  }
+
   try {
     return await httpGetDirect(url, timeoutMs, _redirectCount);
   } catch (e) {
     // If DNS resolution failed, try with fallback DNS resolvers
     if (e.message && (e.message.includes('ENOTFOUND') || e.message.includes('EAI_AGAIN'))) {
-      const parsedUrl = new URL(url);
       try {
         const ip = await resolveWithFallback(parsedUrl.hostname);
         console.log(`[DNS] Retrying ${parsedUrl.hostname} via resolved IP ${ip}`);
@@ -125,6 +154,10 @@ async function httpGet(url, timeoutMs = 10000, _redirectCount = 0) {
     }
     throw e;
   }
+}
+
+function isUnresolvableError(e) {
+  return e && e.message && (e.message.includes('ENOTFOUND') || e.message.includes('ENODATA'));
 }
 
 async function fetchJSON(url, timeoutMs = 10000, retries = 1) {
@@ -139,6 +172,9 @@ async function fetchJSON(url, timeoutMs = 10000, retries = 1) {
     } catch (e) {
       const isLast = attempt === retries;
       console.log(`[Provider] fetchJSON error (attempt ${attempt + 1}/${retries + 1}) for ${url}: ${e.message}`);
+      // If the host is unresolvable, retrying will hit the same negative cache.
+      // Bail out immediately instead of sleeping.
+      if (isUnresolvableError(e)) return null;
       if (!isLast) await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
     }
   }
@@ -157,6 +193,7 @@ async function fetchHTML(url, timeoutMs = 10000, retries = 1) {
     } catch (e) {
       const isLast = attempt === retries;
       console.log(`[Provider] fetchHTML error (attempt ${attempt + 1}/${retries + 1}) for ${url}: ${e.message}`);
+      if (isUnresolvableError(e)) return null;
       if (!isLast) await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
     }
   }

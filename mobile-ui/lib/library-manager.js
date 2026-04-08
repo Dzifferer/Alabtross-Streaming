@@ -186,6 +186,471 @@ class LibraryManager {
     }
   }
 
+  // ─── Disk Audit ──────────────────────────────────
+
+  /**
+   * Walk the library directory and classify every tracked item and every
+   * on-disk file so the caller can decide what to re-download or delete.
+   *
+   * This is the "disk memory audit" entry point. Unlike _recoverFromDiskState
+   * (which only flips stuck items to 'complete' when the file is perfect),
+   * this produces a full report of anything that is wrong AND of anything
+   * that sits on disk without a matching tracked item.
+   *
+   * The fast path uses only fs.statSync, so it's cheap to run on demand.
+   * Passing { deep: true } additionally spawns ffprobe against every
+   * "complete" file and flags the item as corrupt when ffprobe can't find
+   * a video stream — this catches truncated or half-written files that
+   * still happen to have the right byte count (rare but possible).
+   *
+   * Returns:
+   *   {
+   *     libraryPath,
+   *     scannedItems, scannedDiskBytes,
+   *     issues: [ { id, kind, reason, ...fields } ],
+   *     orphans: [ { relPath, sizeBytes, kind, reason } ],
+   *     summary: { ok, missingFile, wrongSize, zeroByte, corrupt,
+   *                unsafePath, badMetadata, orphanedFiles,
+   *                orphanedTempFiles, orphanedEmptyDirs, totalBytes }
+   *   }
+   *
+   * Issue kinds (for tracked items):
+   *   - 'missing_file'   — status=complete but filePath does not exist
+   *   - 'wrong_size'     — on-disk size != item.fileSize
+   *   - 'zero_byte'      — on-disk file exists but is empty
+   *   - 'corrupt'        — ffprobe found no video stream (deep mode only)
+   *   - 'unsafe_path'    — filePath escapes the library root
+   *   - 'bad_metadata'   — filePath/fileSize missing for a complete item
+   *   - 'stale_downloading' — status=downloading but no engine + partial or
+   *                            missing file; caller can redownload
+   *
+   * Orphan kinds (for untracked disk entries):
+   *   - 'video_file'         — a .mkv/.mp4/... not referenced by any item
+   *   - 'converting_temp'    — leftover *.converting.mp4 from a crashed convert
+   *   - 'metadata_temp'      — leftover _metadata.json.tmp.*
+   *   - 'empty_directory'    — directory with no files left inside it
+   */
+  async auditDiskState(opts = {}) {
+    const deep = !!opts.deep;
+    const issues = [];
+    const orphans = [];
+    const summary = {
+      ok: 0,
+      missingFile: 0,
+      wrongSize: 0,
+      zeroByte: 0,
+      corrupt: 0,
+      unsafePath: 0,
+      badMetadata: 0,
+      staleDownloading: 0,
+      orphanedFiles: 0,
+      orphanedTempFiles: 0,
+      orphanedEmptyDirs: 0,
+      totalBytes: 0,
+    };
+
+    // ── Phase 1: every tracked item vs. disk ──
+    for (const item of this._items.values()) {
+      // Items that are supposed to be in-flight are not audit targets — an
+      // in-progress download legitimately has partial or missing bytes.
+      if (item.status === 'queued' || item.status === 'paused') {
+        continue;
+      }
+
+      // status=downloading with no engine running is actually stuck — the
+      // process crashed or resume failed. Surface it so the UI can retry.
+      if (item.status === 'downloading') {
+        const hasEngine = item.packId
+          ? this._engines.has(item.packId)
+          : this._engines.has(item.id);
+        if (!hasEngine) {
+          issues.push({
+            id: item.id,
+            name: item.name,
+            kind: 'stale_downloading',
+            reason: 'status=downloading but no active torrent engine',
+            filePath: item.filePath || null,
+            fileSize: item.fileSize || 0,
+          });
+          summary.staleDownloading++;
+        }
+        continue;
+      }
+
+      if (item.status !== 'complete' && item.status !== 'converting' &&
+          item.status !== 'failed') {
+        continue;
+      }
+
+      if (!item.filePath) {
+        // A complete item without a filePath is a metadata bug, not a
+        // disk problem — leave 'failed' alone (its torrent never resolved).
+        if (item.status === 'complete' || item.status === 'converting') {
+          issues.push({
+            id: item.id,
+            name: item.name,
+            kind: 'bad_metadata',
+            reason: 'complete item has no filePath',
+          });
+          summary.badMetadata++;
+        }
+        continue;
+      }
+
+      const fullPath = path.join(this._libraryPath, item.filePath);
+      if (!this._isPathSafe(fullPath)) {
+        issues.push({
+          id: item.id,
+          name: item.name,
+          kind: 'unsafe_path',
+          reason: 'filePath escapes library root',
+          filePath: item.filePath,
+        });
+        summary.unsafePath++;
+        continue;
+      }
+
+      let stat;
+      try {
+        stat = fs.statSync(fullPath);
+      } catch {
+        // Only flag missing files for items that claim to be complete.
+        // Items in 'failed' that don't exist on disk are a valid state.
+        if (item.status === 'complete' || item.status === 'converting') {
+          issues.push({
+            id: item.id,
+            name: item.name,
+            kind: 'missing_file',
+            reason: 'file not found on disk',
+            filePath: item.filePath,
+            fileSize: item.fileSize || 0,
+          });
+          summary.missingFile++;
+        }
+        continue;
+      }
+
+      if (!stat.isFile()) {
+        issues.push({
+          id: item.id,
+          name: item.name,
+          kind: 'bad_metadata',
+          reason: 'filePath is not a regular file',
+          filePath: item.filePath,
+        });
+        summary.badMetadata++;
+        continue;
+      }
+
+      summary.totalBytes += stat.size;
+
+      if (stat.size === 0) {
+        issues.push({
+          id: item.id,
+          name: item.name,
+          kind: 'zero_byte',
+          reason: 'on-disk file is empty',
+          filePath: item.filePath,
+          fileSize: item.fileSize || 0,
+          diskSize: 0,
+        });
+        summary.zeroByte++;
+        continue;
+      }
+
+      // item.fileSize may be 0 when the torrent metadata never resolved
+      // on a prior run — treat that as "size unknown, size check skipped"
+      // rather than an issue, because we legitimately don't know what the
+      // expected size is.
+      if (item.fileSize && stat.size !== item.fileSize) {
+        issues.push({
+          id: item.id,
+          name: item.name,
+          kind: 'wrong_size',
+          reason: `on-disk size ${stat.size} != expected ${item.fileSize}`,
+          filePath: item.filePath,
+          fileSize: item.fileSize,
+          diskSize: stat.size,
+        });
+        summary.wrongSize++;
+        continue;
+      }
+
+      // At this point the file exists and size matches (or fileSize unknown).
+      // Only complete/converting items count towards the ok tally — failed
+      // items that happen to have a perfect file on disk are a different
+      // kind of problem (handled by _recoverFromDiskState, not here).
+      if (item.status === 'complete' || item.status === 'converting') {
+        if (deep) {
+          const probe = await this._probeFile(fullPath);
+          if (!probe.probeOk || !probe.videoCodec) {
+            issues.push({
+              id: item.id,
+              name: item.name,
+              kind: 'corrupt',
+              reason: probe.reason || 'ffprobe found no video stream',
+              filePath: item.filePath,
+              fileSize: item.fileSize || stat.size,
+              diskSize: stat.size,
+            });
+            summary.corrupt++;
+            continue;
+          }
+        }
+        summary.ok++;
+      }
+    }
+
+    // ── Phase 2: disk entries without a tracked item ──
+    const trackedPaths = new Set();
+    for (const it of this._items.values()) {
+      if (it.filePath) trackedPaths.add(path.normalize(it.filePath));
+    }
+
+    const walk = (absDir, relDir) => {
+      let entries;
+      try {
+        entries = fs.readdirSync(absDir, { withFileTypes: true });
+      } catch {
+        return { hadFiles: false };
+      }
+      let hadFiles = false;
+      for (const entry of entries) {
+        const absPath = path.join(absDir, entry.name);
+        const relPath = relDir ? path.join(relDir, entry.name) : entry.name;
+
+        // Skip metadata files at the library root.
+        if (!relDir && (entry.name === '_metadata.json' || entry.name === '_metadata.json.bak')) {
+          hadFiles = true;
+          continue;
+        }
+
+        if (entry.isDirectory()) {
+          const childResult = walk(absPath, relPath);
+          if (childResult.hadFiles) hadFiles = true;
+          else {
+            orphans.push({
+              relPath,
+              kind: 'empty_directory',
+              reason: 'directory contains no files',
+              sizeBytes: 0,
+            });
+            summary.orphanedEmptyDirs++;
+          }
+          continue;
+        }
+
+        if (!entry.isFile()) continue;
+        hadFiles = true;
+
+        let size = 0;
+        try { size = fs.statSync(absPath).size; } catch { /* ignore */ }
+
+        // Stale _metadata.json.tmp.* files at the library root
+        if (!relDir && entry.name.startsWith('_metadata.json.tmp.')) {
+          orphans.push({
+            relPath,
+            kind: 'metadata_temp',
+            reason: 'stale metadata temp file from a crashed save',
+            sizeBytes: size,
+          });
+          summary.orphanedTempFiles++;
+          continue;
+        }
+
+        // Leftover ffmpeg conversion temp files (*.converting.mp4)
+        if (entry.name.endsWith('.converting.mp4')) {
+          // Skip if there's an active conversion that owns it
+          const activeConvert = [...this._items.values()].some(i => {
+            if (i.status !== 'converting') return false;
+            const src = i.originalFilePath || i.filePath;
+            if (!src) return false;
+            const tmp = this._getConvertTempPath(path.join(this._libraryPath, src));
+            return path.relative(this._libraryPath, tmp) === relPath;
+          });
+          if (activeConvert) continue;
+          orphans.push({
+            relPath,
+            kind: 'converting_temp',
+            reason: 'leftover conversion temp file (no active conversion)',
+            sizeBytes: size,
+          });
+          summary.orphanedTempFiles++;
+          continue;
+        }
+
+        // Untracked video files
+        const ext = path.extname(entry.name).toLowerCase();
+        if (!VIDEO_EXTENSIONS.has(ext)) continue;
+        if (trackedPaths.has(path.normalize(relPath))) continue;
+
+        orphans.push({
+          relPath,
+          kind: 'video_file',
+          reason: 'video file is not referenced by any library item',
+          sizeBytes: size,
+        });
+        summary.orphanedFiles++;
+        summary.totalBytes += size;
+      }
+      return { hadFiles };
+    };
+
+    try {
+      walk(this._libraryPath, '');
+    } catch (err) {
+      console.error(`[Library] Audit walk failed: ${err.message}`);
+    }
+
+    console.log(
+      `[Library] Audit: ${summary.ok} ok, ${issues.length} issues, ${orphans.length} orphans`
+    );
+
+    return {
+      libraryPath: this._libraryPath,
+      scannedItems: this._items.size,
+      scannedDiskBytes: summary.totalBytes,
+      issues,
+      orphans,
+      summary,
+      deep,
+    };
+  }
+
+  /**
+   * Act on the output of auditDiskState(). `action` selects what to do with
+   * broken tracked items:
+   *   - 'redownload' — delete the bad file, clear progress, and re-queue
+   *     the item through retryItem() so the torrent engine re-verifies
+   *     whatever's on disk and fetches missing pieces
+   *   - 'remove'     — delete the bad file and drop the item from the library
+   *
+   * Orphan handling is independent of `action`:
+   *   - removeOrphanFiles:      unlink untracked video files
+   *   - removeOrphanTempFiles:  unlink *.converting.mp4 and _metadata.json.tmp.*
+   *   - removeEmptyDirectories: rmdir empty subdirectories
+   *
+   * { dryRun: true } runs the classification without touching anything.
+   */
+  async remediateAudit(opts = {}) {
+    const {
+      action = 'remove',
+      removeOrphanFiles = false,
+      removeOrphanTempFiles = true,
+      removeEmptyDirectories = true,
+      dryRun = false,
+      deep = false,
+    } = opts;
+
+    if (!['redownload', 'remove'].includes(action)) {
+      throw new Error(`Invalid action: ${action} (expected 'redownload' or 'remove')`);
+    }
+
+    const report = await this.auditDiskState({ deep });
+    const actions = [];
+
+    // ── Tracked item issues ──
+    for (const issue of report.issues) {
+      const item = this._items.get(issue.id);
+      if (!item) continue;
+
+      // stale_downloading: item is stuck in 'downloading' with no engine.
+      // 'redownload' kicks the engine back on; 'remove' wipes it.
+      if (issue.kind === 'stale_downloading') {
+        if (action === 'redownload') {
+          if (!dryRun) {
+            item.status = 'failed';
+            item.error = 'Audit: stuck downloading with no active engine';
+            this.retryItem(item.id);
+          }
+          actions.push({ id: item.id, kind: issue.kind, action: 'retry' });
+          continue;
+        }
+        if (!dryRun) this.removeItem(item.id);
+        actions.push({ id: item.id, kind: issue.kind, action: 'removed' });
+        continue;
+      }
+
+      // Files that should exist but are missing/empty/wrong-size/corrupt:
+      // delete any partial bytes on disk, then either re-queue or drop.
+      const hasOnDiskFile = ['wrong_size', 'zero_byte', 'corrupt'].includes(issue.kind);
+      if (!dryRun && hasOnDiskFile && item.filePath) {
+        const fullPath = path.join(this._libraryPath, item.filePath);
+        if (this._isPathSafe(fullPath)) {
+          try { fs.unlinkSync(fullPath); } catch { /* already gone */ }
+        }
+      }
+
+      if (action === 'redownload') {
+        // Don't retry items that lack a magnet URI — nothing to redownload from.
+        if (!item.magnetUri || !item.infoHash) {
+          if (!dryRun) this.removeItem(item.id);
+          actions.push({ id: item.id, kind: issue.kind, action: 'removed', reason: 'no magnet' });
+          continue;
+        }
+        if (!dryRun) {
+          item.status = 'failed';
+          item.progress = 0;
+          item.error = `Audit: ${issue.reason}`;
+          item.completedAt = null;
+          this.retryItem(item.id);
+        }
+        actions.push({ id: item.id, kind: issue.kind, action: 'retry' });
+      } else {
+        if (!dryRun) this.removeItem(item.id);
+        actions.push({ id: item.id, kind: issue.kind, action: 'removed' });
+      }
+    }
+
+    // ── Orphan handling ──
+    for (const orphan of report.orphans) {
+      const absPath = path.join(this._libraryPath, orphan.relPath);
+      if (!this._isPathSafe(absPath)) continue;
+
+      if (orphan.kind === 'video_file' && removeOrphanFiles) {
+        if (!dryRun) {
+          try { fs.unlinkSync(absPath); } catch (err) {
+            console.error(`[Library] Audit failed to delete orphan ${orphan.relPath}: ${err.message}`);
+            continue;
+          }
+        }
+        actions.push({ relPath: orphan.relPath, kind: orphan.kind, action: 'removed' });
+        continue;
+      }
+
+      if ((orphan.kind === 'converting_temp' || orphan.kind === 'metadata_temp') && removeOrphanTempFiles) {
+        if (!dryRun) {
+          try { fs.unlinkSync(absPath); } catch (err) {
+            console.error(`[Library] Audit failed to delete temp ${orphan.relPath}: ${err.message}`);
+            continue;
+          }
+        }
+        actions.push({ relPath: orphan.relPath, kind: orphan.kind, action: 'removed' });
+        continue;
+      }
+
+      if (orphan.kind === 'empty_directory' && removeEmptyDirectories) {
+        if (!dryRun) {
+          try { fs.rmdirSync(absPath); } catch { /* might have become non-empty */ continue; }
+        }
+        actions.push({ relPath: orphan.relPath, kind: orphan.kind, action: 'removed' });
+      }
+    }
+
+    if (!dryRun) {
+      this._discoveryCache = null; // force a fresh scan next getAll()
+      this._saveMetadata();
+    }
+
+    return {
+      dryRun,
+      action,
+      report,
+      actions,
+      actionCount: actions.length,
+    };
+  }
+
   // ─── Public API ──────────────────────────────────
 
   /**

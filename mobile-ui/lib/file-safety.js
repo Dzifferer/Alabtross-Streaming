@@ -8,7 +8,7 @@
 const path = require('path');
 
 const VIDEO_EXTENSIONS = new Set([
-  '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg',
+  '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg', '.ts',
 ]);
 
 const DANGEROUS_EXTENSIONS = new Set([
@@ -64,6 +64,7 @@ const MIME_TYPES = {
   '.m4v': 'video/mp4',
   '.mpg': 'video/mpeg',
   '.mpeg': 'video/mpeg',
+  '.ts': 'video/mp2t',
 };
 
 /**
@@ -72,6 +73,7 @@ const MIME_TYPES = {
  */
 function isFileNameSafe(filename) {
   if (!filename) return false;
+  if (filename.includes('\0')) return false;
   const normalized = path.normalize(filename);
   if (normalized.startsWith('..') || path.isAbsolute(normalized)) return false;
   if (filename.includes('..')) return false;
@@ -96,7 +98,7 @@ function getMimeType(filename) {
  * Sanitize a filename for use in Content-Disposition headers.
  */
 function sanitizeFilename(filename) {
-  return path.basename(filename).replace(/[^\w\s.\-()[\]]/g, '_').substring(0, 200);
+  return path.basename(filename).replace(/[^\w\s.\-()[\]]/g, '_').replace(/["\\]/g, '_').substring(0, 200);
 }
 
 module.exports = {

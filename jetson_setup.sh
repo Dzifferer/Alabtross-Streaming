@@ -270,6 +270,22 @@ ok "Internet connection confirmed"
 # ---------------------------------------------------------------
 hdr "Configuration"
 
+# TMDB_API_KEY is required for movie/show metadata — check early to avoid late failure
+if [[ -z "${TMDB_API_KEY:-}" ]]; then
+  echo ""
+  echo "  TMDB_API_KEY is required for movie/TV metadata lookups."
+  echo "  Get a free key at: https://www.themoviedb.org/settings/api"
+  echo ""
+  if [[ "${HEADLESS:-0}" == "1" ]]; then
+    die "Set TMDB_API_KEY env var before running setup in headless mode."
+  else
+    read -rp "  Enter your TMDB API key: " TMDB_API_KEY
+    [[ -z "$TMDB_API_KEY" ]] && die "TMDB_API_KEY is required. Exiting."
+    export TMDB_API_KEY
+    ok "TMDB API key set"
+  fi
+fi
+
 DRIVE_PART=""
 MOUNT_POINT=""
 DUCKDNS_DOMAIN=""

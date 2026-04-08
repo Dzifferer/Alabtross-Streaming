@@ -6,7 +6,9 @@ cd "$(dirname "$0")"
 
 # Load secrets from .env file (not tracked in git)
 if [ -f .env ]; then
-  export $(grep -v '^#' .env | xargs)
+  set -a
+  . .env
+  set +a
 fi
 
 if [ -z "$TMDB_API_KEY" ]; then

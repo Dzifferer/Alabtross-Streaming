@@ -354,16 +354,20 @@ class LibraryManager {
     const xMatch = base.match(/(\d+)x(\d+)/i);
     if (xMatch) return { season: parseInt(xMatch[1], 10), episode: parseInt(xMatch[2], 10) };
 
-    // No season+episode combo in filename — try to extract season from directory path
-    // e.g. "Mad Men (2007) Season 2 S02 (...)/E01.mkv" or "Season 3/episode.mkv"
+    // No season+episode combo in filename — try to extract season from directory path.
+    // Check from the immediate parent directory upward so "Season 02" in the child dir
+    // takes priority over "Season 1-18" in the grandparent dir.
     let dirSeason = fallbackSeason;
     const dirPart = path.dirname(fileName);
     if (dirPart && dirPart !== '.') {
-      const dirSeMatch = dirPart.match(/S(\d+)/i);
-      if (dirSeMatch) dirSeason = parseInt(dirSeMatch[1], 10);
-      else {
-        const dirSeasonMatch = dirPart.match(/Season\s*(\d+)/i);
-        if (dirSeasonMatch) dirSeason = parseInt(dirSeasonMatch[1], 10);
+      const segments = dirPart.split(path.sep).reverse(); // innermost first
+      for (const seg of segments) {
+        // Try "S02" (but not "S01-S07" range patterns)
+        const sMatch = seg.match(/\bS(\d+)\b(?!\s*-\s*S?\d)/i);
+        if (sMatch) { dirSeason = parseInt(sMatch[1], 10); break; }
+        // Try "Season 2" or "Season 02"
+        const seasonMatch = seg.match(/\bSeason\s*(\d+)\b(?!\s*-)/i);
+        if (seasonMatch) { dirSeason = parseInt(seasonMatch[1], 10); break; }
       }
     }
 

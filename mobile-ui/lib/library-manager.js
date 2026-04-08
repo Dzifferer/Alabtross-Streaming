@@ -142,7 +142,9 @@ class LibraryManager {
       return Promise.resolve({ status: 'already_downloading', items: [] });
     }
 
-    const packDir = path.join(this._libraryPath, this._safeDirectoryName({ name: `${name} S${String(season).padStart(2, '0')}`, infoHash }));
+    const isCompletePack = parseInt(season, 10) === 0;
+    const packLabel = isCompletePack ? name : `${name} S${String(season).padStart(2, '0')}`;
+    const packDir = path.join(this._libraryPath, this._safeDirectoryName({ name: packLabel, infoHash }));
 
     return new Promise((resolve, reject) => {
       const engine = torrentStream(magnetUri, {
@@ -185,13 +187,16 @@ class LibraryManager {
 
         // Select and create items for each video file
         const createdItems = [];
-        const seasonNum = parseInt(season, 10) || 1;
+        // season=0 means "complete pack — detect seasons from filenames"
+        const fallbackSeason = parseInt(season, 10) || 1;
 
         for (const file of videoFiles) {
           file.select();
 
-          // Try to parse episode number from filename
-          const episodeNum = this._parseEpisodeNumber(file.name, seasonNum);
+          // Parse season and episode from filename
+          const parsed = this._parseSeasonEpisode(file.name, fallbackSeason);
+          const seasonNum = parsed.season || fallbackSeason;
+          const episodeNum = parsed.episode;
 
           const itemId = episodeNum
             ? `${imdbId}_s${seasonNum}e${episodeNum}_${infoHash.slice(0, 8)}`
@@ -325,30 +330,43 @@ class LibraryManager {
         this._progressTimers.set(packId, progressTimer);
         this._saveMetadata();
 
-        console.log(`[Library] Season pack started: "${name}" S${String(seasonNum).padStart(2, '0')} — ${videoFiles.length} episodes`);
+        console.log(`[Library] Season pack started: "${name}" ${isCompletePack ? '(complete pack)' : `S${String(fallbackSeason).padStart(2, '0')}`} — ${videoFiles.length} episodes`);
         resolve({ status: 'started', items: createdItems });
       });
     });
   }
 
-  _parseEpisodeNumber(fileName, seasonNum) {
+  /**
+   * Parse season and episode numbers from a filename.
+   * Returns { season, episode } where either may be null.
+   * @param {string} fileName
+   * @param {number} fallbackSeason - season to use when filename has no season indicator
+   */
+  _parseSeasonEpisode(fileName, fallbackSeason) {
     const base = path.basename(fileName);
     // Try S01E05 pattern
     const seMatch = base.match(/S(\d+)E(\d+)/i);
-    if (seMatch) return parseInt(seMatch[2], 10);
+    if (seMatch) return { season: parseInt(seMatch[1], 10), episode: parseInt(seMatch[2], 10) };
+    // Try 1x05 pattern
+    const xMatch = base.match(/(\d+)x(\d+)/i);
+    if (xMatch) return { season: parseInt(xMatch[1], 10), episode: parseInt(xMatch[2], 10) };
     // Try E05 pattern (without season)
     const eMatch = base.match(/\bE(\d+)\b/i);
-    if (eMatch) return parseInt(eMatch[1], 10);
+    if (eMatch) return { season: fallbackSeason, episode: parseInt(eMatch[1], 10) };
     // Try "- 05 -" or "- 05." or "- 05 " at end before extension (anime fansub convention)
     const dashMatch = base.match(/[-–]\s*(\d{1,4})\s*(?:[-–.\s]|$)/);
-    if (dashMatch) return parseInt(dashMatch[1], 10);
+    if (dashMatch) return { season: fallbackSeason, episode: parseInt(dashMatch[1], 10) };
     // Try "Episode 5" pattern
     const epMatch = base.match(/Episode\s*(\d+)/i);
-    if (epMatch) return parseInt(epMatch[1], 10);
-    // Try "x05" pattern (1x05)
-    const xMatch = base.match(/\d+x(\d+)/i);
-    if (xMatch) return parseInt(xMatch[1], 10);
-    return null;
+    if (epMatch) return { season: fallbackSeason, episode: parseInt(epMatch[1], 10) };
+    return { season: fallbackSeason, episode: null };
+  }
+
+  /**
+   * Backwards-compatible wrapper for code that only needs the episode number.
+   */
+  _parseEpisodeNumber(fileName, seasonNum) {
+    return this._parseSeasonEpisode(fileName, seasonNum).episode;
   }
 
   /**

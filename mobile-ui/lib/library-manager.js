@@ -793,17 +793,20 @@ class LibraryManager {
     // seasons from filenames/directories rather than assuming a single season
     const season = 0;
 
-    // Stop engine and remove all pack items from metadata (keep files on disk)
+    // Stop engine but only remove non-complete items (preserve already downloaded episodes)
     this._stopPackEngine(packId);
+    const completedCount = packItems.filter(i => i.status === 'complete' || i.status === 'converting').length;
     for (const item of packItems) {
+      if (item.status === 'complete' || item.status === 'converting') continue;
       this._stopDownload(item.id);
       this._items.delete(item.id);
     }
     this._saveMetadata();
 
-    console.log(`[Library] Restarting pack "${showName || first.name}" (${packItems.length} items cleared)`);
+    console.log(`[Library] Restarting pack "${showName || first.name}" (${packItems.length - completedCount} items to retry, ${completedCount} already complete)`);
 
-    // Re-add with corrected season parsing
+    // Re-add with corrected season parsing — addSeasonPack will skip items
+    // that still exist in this._items (the completed ones we preserved)
     return this.addSeasonPack({
       imdbId,
       name: showName || first.name,
@@ -921,7 +924,8 @@ class LibraryManager {
 
     item.status = 'downloading';
     item.error = null;
-    item.progress = 0;
+    // Don't reset progress — torrent engine uses verify:true to skip existing data,
+    // and progress will be recalculated from disk size on the next poll cycle.
     item.downloadSpeed = 0;
     item.numPeers = 0;
 

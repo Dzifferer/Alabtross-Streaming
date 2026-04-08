@@ -88,6 +88,12 @@ class LibraryManager {
 
     this._cleanupStaleTmpFiles();
     this._loadMetadata();
+    // Recover items that are fully downloaded on disk but stuck in the
+    // wrong status (most commonly 'failed' from a torrent-metadata-timeout
+    // during resume, or 'downloading' from a container crash mid-download).
+    // This MUST run before _resumeInterruptedDownloads so recovered items
+    // don't trigger unnecessary torrent engine spin-up.
+    this._recoverFromDiskState();
     console.log(`[Library] Initialized at ${this._libraryPath}, ${this._items.size} items loaded`);
 
     // Auto-resume any downloads/conversions that were interrupted (power loss, crash, restart)
@@ -106,6 +112,78 @@ class LibraryManager {
     const resolved = path.resolve(fullPath);
     const libraryRoot = path.resolve(this._libraryPath);
     return resolved === libraryRoot || resolved.startsWith(libraryRoot + path.sep);
+  }
+
+  /**
+   * Returns true when an item's file is fully present on disk at the
+   * exact expected size. Used by startup recovery to distinguish items
+   * that are genuinely still downloading from items that are actually
+   * complete but got stuck in 'downloading' (container crash) or
+   * 'failed' (torrent resume metadata timeout) in metadata.
+   *
+   * Uses only stat() — no ffprobe, no torrent engine — so it's cheap
+   * enough to run against every item at startup.
+   */
+  _isFileCompleteOnDisk(item) {
+    if (!item || !item.filePath || !item.fileSize || item.fileSize <= 0) {
+      return false;
+    }
+    const fullPath = path.join(this._libraryPath, item.filePath);
+    if (!this._isPathSafe(fullPath)) return false;
+    try {
+      const stat = fs.statSync(fullPath);
+      return stat.isFile() && stat.size === item.fileSize;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Scan every item after metadata load and auto-recover any that are
+   * in 'failed' or 'downloading' but whose files are already fully
+   * present on disk at the expected size.
+   *
+   * Fixes the common failure mode where a container restart triggers
+   * _resumeInterruptedDownloads() for items whose torrents can no longer
+   * reach metadata within the 90s timeout — even though the underlying
+   * files had long since finished downloading to disk. Without this
+   * recovery, those items get stuck permanently in 'failed' with
+   * "Torrent metadata timeout (90s) on resume" until the user manually
+   * retries each one.
+   *
+   * Runs once at startup, synchronously, using only fs.statSync() on
+   * items that need checking. O(n) cheap disk I/O — zero network calls,
+   * zero ffprobe spawns.
+   */
+  _recoverFromDiskState() {
+    let recoveredFailed = 0;
+    let skippedResume = 0;
+    for (const item of this._items.values()) {
+      const needsCheck =
+        item.status === 'failed' ||
+        item.status === 'downloading' ||
+        item._needsResume;
+      if (!needsCheck) continue;
+      if (!this._isFileCompleteOnDisk(item)) continue;
+
+      const wasFailed = item.status === 'failed';
+      item.status = 'complete';
+      item.error = null;
+      item.progress = 100;
+      item.downloadSpeed = 0;
+      item.numPeers = 0;
+      if (!item.completedAt) item.completedAt = Date.now();
+      if (item._needsResume) delete item._needsResume;
+      if (wasFailed) recoveredFailed++;
+      else skippedResume++;
+    }
+    if (recoveredFailed || skippedResume) {
+      console.log(
+        `[Library] Disk recovery: ${recoveredFailed} failed items restored, ` +
+        `${skippedResume} resumes skipped (files already complete on disk)`
+      );
+      this._saveMetadata();
+    }
   }
 
   // ─── Public API ──────────────────────────────────

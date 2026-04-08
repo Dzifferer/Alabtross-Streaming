@@ -88,20 +88,32 @@ class LibraryManager {
 
     this._cleanupStaleTmpFiles();
     this._loadMetadata();
-    // Recover items that are fully downloaded on disk but stuck in the
-    // wrong status (most commonly 'failed' from a torrent-metadata-timeout
-    // during resume, or 'downloading' from a container crash mid-download).
-    // This MUST run before _resumeInterruptedDownloads so recovered items
-    // don't trigger unnecessary torrent engine spin-up.
-    this._recoverFromDiskState();
     console.log(`[Library] Initialized at ${this._libraryPath}, ${this._items.size} items loaded`);
 
-    // Auto-resume any downloads/conversions that were interrupted (power loss, crash, restart)
-    this._resumeInterruptedDownloads();
-    this._resumeInterruptedConversions();
+    // Disk recovery + resume + metadata repair are deferred to an async
+    // init chain so the constructor (and therefore Express startup) does
+    // not block on hundreds of fs.stat calls. The chain is strictly
+    // ordered: _recoverFromDiskState MUST complete before
+    // _resumeInterruptedDownloads so that items whose files are already
+    // complete on disk don't trigger unnecessary torrent engine spin-up.
+    this._initPromise = this._initAsync();
+  }
 
-    // Auto-repair season metadata for packs (deferred to avoid blocking startup)
-    setImmediate(() => this.repairPackMetadata());
+  async _initAsync() {
+    try {
+      // Recover items that are fully downloaded on disk but stuck in the
+      // wrong status (most commonly 'failed' from a torrent-metadata-timeout
+      // during resume, or 'downloading' from a container crash mid-download).
+      await this._recoverFromDiskState();
+      // Auto-resume any downloads/conversions that were interrupted
+      // (power loss, crash, restart).
+      this._resumeInterruptedDownloads();
+      this._resumeInterruptedConversions();
+      // Auto-repair season metadata for packs.
+      this.repairPackMetadata();
+    } catch (err) {
+      console.error('[Library] Async init failed:', err);
+    }
   }
 
   /**
@@ -121,17 +133,18 @@ class LibraryManager {
    * complete but got stuck in 'downloading' (container crash) or
    * 'failed' (torrent resume metadata timeout) in metadata.
    *
-   * Uses only stat() — no ffprobe, no torrent engine — so it's cheap
-   * enough to run against every item at startup.
+   * Uses only fs.promises.stat() — no ffprobe, no torrent engine — and
+   * yields back to the event loop between syscalls, so it's safe to
+   * run against every item at startup without blocking Express.
    */
-  _isFileCompleteOnDisk(item) {
+  async _isFileCompleteOnDisk(item) {
     if (!item || !item.filePath || !item.fileSize || item.fileSize <= 0) {
       return false;
     }
     const fullPath = path.join(this._libraryPath, item.filePath);
     if (!this._isPathSafe(fullPath)) return false;
     try {
-      const stat = fs.statSync(fullPath);
+      const stat = await fs.promises.stat(fullPath);
       return stat.isFile() && stat.size === item.fileSize;
     } catch {
       return false;
@@ -151,32 +164,45 @@ class LibraryManager {
    * "Torrent metadata timeout (90s) on resume" until the user manually
    * retries each one.
    *
-   * Runs once at startup, synchronously, using only fs.statSync() on
-   * items that need checking. O(n) cheap disk I/O — zero network calls,
-   * zero ffprobe spawns.
+   * Runs once at startup via the async init chain. Stats are issued in
+   * bounded-concurrency batches using fs.promises.stat so the event
+   * loop stays responsive even for libraries with hundreds of items.
    */
-  _recoverFromDiskState() {
-    let recoveredFailed = 0;
-    let skippedResume = 0;
+  async _recoverFromDiskState() {
+    const candidates = [];
     for (const item of this._items.values()) {
       const needsCheck =
         item.status === 'failed' ||
         item.status === 'downloading' ||
         item._needsResume;
-      if (!needsCheck) continue;
-      if (!this._isFileCompleteOnDisk(item)) continue;
-
-      const wasFailed = item.status === 'failed';
-      item.status = 'complete';
-      item.error = null;
-      item.progress = 100;
-      item.downloadSpeed = 0;
-      item.numPeers = 0;
-      if (!item.completedAt) item.completedAt = Date.now();
-      if (item._needsResume) delete item._needsResume;
-      if (wasFailed) recoveredFailed++;
-      else skippedResume++;
+      if (needsCheck) candidates.push(item);
     }
+    if (candidates.length === 0) return;
+
+    let recoveredFailed = 0;
+    let skippedResume = 0;
+    const BATCH_SIZE = 32;
+    for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
+      const batch = candidates.slice(i, i + BATCH_SIZE);
+      const results = await Promise.all(
+        batch.map(item => this._isFileCompleteOnDisk(item))
+      );
+      for (let j = 0; j < batch.length; j++) {
+        if (!results[j]) continue;
+        const item = batch[j];
+        const wasFailed = item.status === 'failed';
+        item.status = 'complete';
+        item.error = null;
+        item.progress = 100;
+        item.downloadSpeed = 0;
+        item.numPeers = 0;
+        if (!item.completedAt) item.completedAt = Date.now();
+        if (item._needsResume) delete item._needsResume;
+        if (wasFailed) recoveredFailed++;
+        else skippedResume++;
+      }
+    }
+
     if (recoveredFailed || skippedResume) {
       console.log(
         `[Library] Disk recovery: ${recoveredFailed} failed items restored, ` +

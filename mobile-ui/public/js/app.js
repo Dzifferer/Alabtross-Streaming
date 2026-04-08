@@ -3848,14 +3848,16 @@
       if (!resp.ok) throw new Error('Failed');
       const data = await resp.json();
       const items = data.items || [];
+      const slots = data.slots || { active: 0, max: 5 };
+      const hasSlots = slots.active < slots.max;
 
       // Group pack items into single aggregate rows
       const grouped = groupPackItems(items);
 
-      // Split into categories
+      // Split into categories (sort queued by addedAt to match actual queue priority)
       const downloading = grouped.filter(i => i.status === 'downloading');
       const paused = grouped.filter(i => i.status === 'paused');
-      const queued = grouped.filter(i => i.status === 'queued');
+      const queued = grouped.filter(i => i.status === 'queued').sort((a, b) => (a.addedAt || 0) - (b.addedAt || 0));
       const completed = grouped.filter(i => i.status === 'complete').slice(0, 5);
       const failed = grouped.filter(i => i.status === 'failed');
 
@@ -3865,7 +3867,7 @@
         return;
       }
 
-      const renderItem = (i, idx, len) => i._isPack ? downloadPackHTML(i) : downloadItemHTML(i, idx, len);
+      const renderItem = (i, idx, len) => i._isPack ? downloadPackHTML(i, idx, len, hasSlots) : downloadItemHTML(i, idx, len, hasSlots);
 
       let html = '';
 
@@ -3916,7 +3918,7 @@
     }
   }
 
-  function downloadPackHTML(pack) {
+  function downloadPackHTML(pack, queueIdx, queueLen, hasSlots) {
     const poster = pack.poster
       ? `<img class="download-poster" src="${escapeHTML(pack.poster)}" alt="" loading="lazy">`
       : '<div class="download-poster"></div>';
@@ -3993,6 +3995,25 @@
         <button class="download-action-btn cancel" data-pack-id="${escapeHTML(pack.packId)}" data-action="remove-pack" title="Remove All">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
         </button>`;
+    } else if (pack.status === 'queued') {
+      const firstEpIdQ = pack.episodes[0]?.id || '';
+      const startBtn = hasSlots
+        ? `<button class="download-action-btn resume" data-pack-id="${escapeHTML(pack.packId)}" data-id="${escapeHTML(firstEpIdQ)}" data-action="start-pack" title="Start Now">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          </button>`
+        : '';
+      const upBtn = queueIdx > 0
+        ? `<button class="queue-move-btn" data-pack-id="${escapeHTML(pack.packId)}" data-action="move-up-pack" title="Move up">\u25B2</button>`
+        : '';
+      const downBtn = queueIdx < queueLen - 1
+        ? `<button class="queue-move-btn" data-pack-id="${escapeHTML(pack.packId)}" data-action="move-down-pack" title="Move down">\u25BC</button>`
+        : '';
+      actions = `
+        ${startBtn}
+        <div class="download-queue-controls">${upBtn}${downBtn}</div>
+        <button class="download-action-btn cancel" data-pack-id="${escapeHTML(pack.packId)}" data-action="remove-pack" title="Remove All">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>`;
     }
 
     const showProgress = ['downloading', 'paused', 'queued'].includes(pack.status);
@@ -4013,8 +4034,9 @@
       return `<div class="pack-episode-row ${epStatus}"><span class="pack-ep-label">${escapeHTML(epLabel)}</span><span class="pack-ep-file">${escapeHTML(epName)}</span><span class="pack-ep-pct">${epPct}</span></div>`;
     }).join('');
 
+    const queueIdxAttr = queueIdx != null ? ` data-queue-idx="${queueIdx}"` : '';
     return `
-      <div class="download-item download-pack-item" data-pack-id="${escapeHTML(pack.packId)}">
+      <div class="download-item download-pack-item" data-pack-id="${escapeHTML(pack.packId)}"${queueIdxAttr}>
         ${poster}
         <div class="download-info">
           <div class="download-name">${escapeHTML(pack.name)} <span class="pack-season-tag">${seasonLabel}</span></div>
@@ -4033,7 +4055,7 @@
       </div>`;
   }
 
-  function downloadItemHTML(item, queueIdx, queueLen) {
+  function downloadItemHTML(item, queueIdx, queueLen, hasSlots) {
     const poster = item.poster
       ? `<img class="download-poster" src="${escapeHTML(item.poster)}" alt="" loading="lazy">`
       : '<div class="download-poster"></div>';
@@ -4069,6 +4091,11 @@
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
         </button>`;
     } else if (item.status === 'queued') {
+      const startBtn = hasSlots
+        ? `<button class="download-action-btn resume" data-id="${escapeHTML(item.id)}" data-action="start" title="Start Now">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          </button>`
+        : '';
       const upBtn = queueIdx > 0
         ? `<button class="queue-move-btn" data-id="${escapeHTML(item.id)}" data-action="move-up" title="Move up">\u25B2</button>`
         : '';
@@ -4076,6 +4103,7 @@
         ? `<button class="queue-move-btn" data-id="${escapeHTML(item.id)}" data-action="move-down" title="Move down">\u25BC</button>`
         : '';
       actions = `
+        ${startBtn}
         <div class="download-queue-controls">${upBtn}${downBtn}</div>
         <button class="download-action-btn cancel" data-id="${escapeHTML(item.id)}" data-action="remove" title="Remove">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
@@ -4203,7 +4231,24 @@
           return;
         }
 
-        if (action === 'pause') {
+        if (action === 'start' && id) {
+          try {
+            const r = await fetch(`/api/library/${encodeURIComponent(id)}/start`, { method: 'POST' });
+            if (!r.ok) { const d = await r.json(); showToast(d.error || 'Cannot start'); }
+          } catch { showToast('Failed to start'); }
+          renderDownloads();
+        } else if (action === 'start-pack' && packId) {
+          try {
+            const resp = await fetch('/api/library');
+            const data = await resp.json();
+            const firstQueued = (data.items || []).find(i => i.packId === packId && i.status === 'queued');
+            if (firstQueued) {
+              const r = await fetch(`/api/library/${encodeURIComponent(firstQueued.id)}/start`, { method: 'POST' });
+              if (!r.ok) { const d = await r.json(); showToast(d.error || 'Cannot start pack'); }
+            }
+          } catch { showToast('Failed to start pack'); }
+          renderDownloads();
+        } else if (action === 'pause') {
           try {
             await fetch(`/api/library/${encodeURIComponent(id)}/pause`, { method: 'POST' });
           } catch { showToast('Failed to pause'); }
@@ -4233,6 +4278,16 @@
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ position: newPos }),
+          });
+          renderDownloads();
+        } else if (action === 'move-up-pack' || action === 'move-down-pack') {
+          const row = btn.closest('.download-item');
+          const currentIdx = parseInt(row?.dataset?.queueIdx || '0', 10);
+          const newPos = action === 'move-up-pack' ? Math.max(0, currentIdx - 1) : currentIdx + 1;
+          await fetch('/api/library/reorder-pack', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ packId, position: newPos }),
           });
           renderDownloads();
         }

@@ -21,11 +21,39 @@
     currentType: null,    // 'movie' or 'series'
     currentMeta: null,
     currentSeason: 1,
+    currentSeasonEp: null, // { season, episode } for the episode currently loaded/playing
     searchTimeout: null,
     vpnVerified: false,
     activeFilter: '',     // currently selected filter chip value
     playerStarted: false, // true after first 'playing' event, prevents overlay clobber during initial load
   };
+
+  // ─── Auto-play Next Settings ─────────────────────
+  // When a movie or episode finishes, the client can automatically line up the
+  // next item in the series (by season/episode) or in the TMDB collection (by
+  // release year) and start playing it after a short countdown.
+  const AUTOPLAY_DEFAULT_COUNTDOWN = 8;
+
+  function getAutoplaySettings() {
+    try {
+      const enabledRaw = localStorage.getItem('autoplay_next_enabled');
+      const countdownRaw = localStorage.getItem('autoplay_next_countdown');
+      const countdown = parseInt(countdownRaw, 10);
+      return {
+        enabled: enabledRaw === null ? true : enabledRaw === 'true',
+        countdownSeconds: Number.isFinite(countdown) && countdown >= 0 ? countdown : AUTOPLAY_DEFAULT_COUNTDOWN,
+      };
+    } catch {
+      return { enabled: true, countdownSeconds: AUTOPLAY_DEFAULT_COUNTDOWN };
+    }
+  }
+
+  function setAutoplaySettings({ enabled, countdownSeconds }) {
+    try {
+      if (enabled != null) localStorage.setItem('autoplay_next_enabled', String(!!enabled));
+      if (countdownSeconds != null) localStorage.setItem('autoplay_next_countdown', String(countdownSeconds));
+    } catch { /* ignore quota errors */ }
+  }
 
   // ─── DOM Refs ────────────────────────────────────
 
@@ -240,6 +268,7 @@
     // Stop video if leaving player
     if (state.currentView !== 'player') {
       state.playerStarted = false;
+      clearUpNextOverlay();
       dom.videoPlayer.pause();
       dom.videoPlayer.src = '';
       dom.videoPlayer.load(); // release previous resource from memory
@@ -1564,6 +1593,14 @@
   async function loadStreams(type, id, seasonEpisode, prefetchedStreamsPromise) {
     const generation = ++_streamLoadGeneration;
 
+    // Record the episode we're about to load so the "ended" handler can
+    // compute the next one in order.
+    if (type === 'series' && seasonEpisode && seasonEpisode.season != null && seasonEpisode.episode != null) {
+      state.currentSeasonEp = { season: seasonEpisode.season, episode: seasonEpisode.episode };
+    } else if (type === 'movie') {
+      state.currentSeasonEp = null;
+    }
+
     const container = document.getElementById('stream-container');
     if (!container) return;
 
@@ -2088,6 +2125,7 @@
 
   async function playStream(stream) {
     if (_playStreamCleanup) { _playStreamCleanup(); _playStreamCleanup = null; }
+    clearUpNextOverlay();
 
     const url = api.getPlaybackUrl(stream);
     if (!url) {
@@ -2183,13 +2221,16 @@
       const onPlaying = () => {
         if (!_curtainAnimating) dom.playerOverlay.classList.add('hidden');
       };
+      const onEnded = () => handlePlaybackEnded();
       dom.videoPlayer.addEventListener('waiting', onStalled);
       dom.videoPlayer.addEventListener('stalled', onStalled);
       dom.videoPlayer.addEventListener('playing', onPlaying);
+      dom.videoPlayer.addEventListener('ended', onEnded);
       _playStreamCleanup = () => {
         dom.videoPlayer.removeEventListener('waiting', onStalled);
         dom.videoPlayer.removeEventListener('stalled', onStalled);
         dom.videoPlayer.removeEventListener('playing', onPlaying);
+        dom.videoPlayer.removeEventListener('ended', onEnded);
       };
     } catch (e) {
       if (statusInterval) clearInterval(statusInterval);
@@ -2199,6 +2240,273 @@
       }
       showPlayerError('Playback failed', hint);
     }
+  }
+
+  // ─── Auto-play Next ──────────────────────────────
+  //
+  // When a movie or episode finishes playing we look for the next item in
+  // order:
+  //   * Series: the next episode by (season, episode) within meta.videos.
+  //             Released episodes only (drop unaired ones with a future
+  //             `released` date).
+  //   * Movies: if the movie belongs to a TMDB collection, fetch the
+  //             collection and use the next movie sorted by release year.
+  //
+  // A short countdown overlay ("Up next...") is shown so the user can cancel
+  // or jump in immediately. The feature is controlled by the settings in
+  // getAutoplaySettings().
+
+  let _upNextState = null; // { timer, interval, cleanup }
+
+  function clearUpNextOverlay() {
+    if (_upNextState) {
+      if (_upNextState.timer) clearTimeout(_upNextState.timer);
+      if (_upNextState.interval) clearInterval(_upNextState.interval);
+      _upNextState = null;
+    }
+    const el = document.getElementById('up-next-card');
+    if (el) el.remove();
+  }
+
+  function findNextEpisode(meta, currentSeasonEp) {
+    if (!meta || !Array.isArray(meta.videos) || !currentSeasonEp) return null;
+
+    const now = Date.now();
+    const eps = meta.videos
+      .filter(v => v.season != null && v.episode != null)
+      .filter(v => {
+        // Drop unreleased episodes (air date in the future) so we don't try
+        // to play something that doesn't exist yet.
+        if (!v.released) return true;
+        const t = Date.parse(v.released);
+        return !Number.isFinite(t) || t <= now;
+      })
+      .sort((a, b) => (a.season - b.season) || (a.episode - b.episode));
+
+    const idx = eps.findIndex(v =>
+      v.season === currentSeasonEp.season && v.episode === currentSeasonEp.episode
+    );
+    if (idx < 0 || idx >= eps.length - 1) return null;
+
+    const next = eps[idx + 1];
+    // Compute absolute episode index (1-based) for anime numbering, matching
+    // the calculation in attachEpisodeHandlers().
+    const absoluteEpisode = idx + 2;
+    return { ...next, absoluteEpisode };
+  }
+
+  async function findNextMovieInCollection(meta) {
+    if (!meta || !meta.collectionId) return null;
+    const currentImdb = meta.imdb_id || (typeof meta.id === 'string' && meta.id.startsWith('tt') ? meta.id : null);
+    if (!currentImdb) return null;
+
+    try {
+      const resp = await fetch(`/api/collections/${encodeURIComponent(meta.collectionId)}`);
+      if (!resp.ok) return null;
+      const data = await resp.json();
+      const movies = Array.isArray(data.movies) ? data.movies : [];
+      // Server already sorts by year, but sort again defensively.
+      const sorted = movies
+        .filter(m => m && m.imdb_id)
+        .slice()
+        .sort((a, b) => (a.year || '9999').localeCompare(b.year || '9999'));
+
+      const idx = sorted.findIndex(m => m.imdb_id === currentImdb);
+      if (idx < 0 || idx >= sorted.length - 1) return null;
+      return sorted[idx + 1];
+    } catch (e) {
+      console.warn('[autoplay] collection fetch failed:', e);
+      return null;
+    }
+  }
+
+  // Resolve a stream for the next item and start playing it without relying
+  // on the detail-view DOM. Used by the auto-play-next flow so it can work
+  // while the user is still inside the player.
+  async function autoplayLoadAndPlay({ type, id, seasonEpisode, nextMeta, fallbackTitle }) {
+    // Update app state so the player, Back navigation, and future auto-play
+    // decisions all operate on the new item.
+    state.currentType = type;
+    if (nextMeta) state.currentMeta = nextMeta;
+    if (type === 'series' && seasonEpisode) {
+      state.currentSeasonEp = { season: seasonEpisode.season, episode: seasonEpisode.episode };
+      state.currentSeason = seasonEpisode.season;
+    } else if (type === 'movie') {
+      state.currentSeasonEp = null;
+    }
+
+    // Show the curtain overlay while we look for a stream, reusing the
+    // existing loading UX.
+    const poster = (state.currentMeta && state.currentMeta.poster) || '';
+    const title = (state.currentMeta && state.currentMeta.name) || fallbackTitle || '';
+    showCurtainOverlay({
+      poster,
+      title,
+      status: 'Finding next stream...',
+      subtitle: '',
+    });
+
+    try {
+      const streams = await api.getStreams(type, id, seasonEpisode);
+      if (!streams || streams.length === 0) {
+        showPlayerError('No streams found', 'Could not find a stream for the next item');
+        return;
+      }
+
+      // Prefer the quick race for a clear winner, then fall back to a full
+      // ranking to pick the best playable stream.
+      let chosen = null;
+      try {
+        const raceResult = await api.raceTopStreams(streams);
+        if (raceResult && raceResult.winner) chosen = raceResult.winner;
+      } catch (e) {
+        console.warn('[autoplay] race failed:', e);
+      }
+
+      if (!chosen) {
+        const ranked = await api.testAndRankStreams(streams);
+        const best = ranked.find(r => r.responseTime < Infinity);
+        chosen = best ? best.stream : null;
+      }
+
+      if (!chosen) {
+        showPlayerError('No playable stream', 'Could not find a playable stream for the next item');
+        return;
+      }
+
+      playStream(chosen);
+    } catch (e) {
+      console.warn('[autoplay] stream lookup failed:', e);
+      showPlayerError('Auto-play failed', escapeHTML(e.message || 'Unknown error'));
+    }
+  }
+
+  async function handlePlaybackEnded() {
+    const settings = getAutoplaySettings();
+    if (!settings.enabled) return;
+    if (state.currentView !== 'player') return;
+    const meta = state.currentMeta;
+    if (!meta) return;
+
+    if (state.currentType === 'series') {
+      const next = findNextEpisode(meta, state.currentSeasonEp);
+      if (!next) {
+        showToast('End of series');
+        return;
+      }
+      showUpNextOverlay({
+        title: next.title || `Episode ${next.episode}`,
+        subtitle: `Season ${next.season} · Episode ${next.episode}`,
+        poster: meta.poster || '',
+        countdownSeconds: settings.countdownSeconds,
+        onPlay: () => {
+          const showId = meta.imdb_id || meta.id;
+          autoplayLoadAndPlay({
+            type: 'series',
+            id: showId,
+            seasonEpisode: {
+              season: next.season,
+              episode: next.episode,
+              absoluteEpisode: next.absoluteEpisode,
+              genres: meta.genres,
+            },
+            nextMeta: meta, // stay on the same show meta for series
+            fallbackTitle: `${meta.name || ''} — S${next.season}E${next.episode}`,
+          });
+        },
+      });
+      return;
+    }
+
+    if (state.currentType === 'movie') {
+      const next = await findNextMovieInCollection(meta);
+      if (!next || !next.imdb_id) return; // silent — most movies aren't in a collection
+      showUpNextOverlay({
+        title: next.name || 'Next movie',
+        subtitle: next.year ? `${meta.collectionName || 'Next in collection'} · ${next.year}` : (meta.collectionName || ''),
+        poster: next.poster || meta.poster || '',
+        countdownSeconds: settings.countdownSeconds,
+        onPlay: async () => {
+          // Load full meta for the next movie so the player header, recently
+          // played entry, and future auto-play lookups all reflect it.
+          let nextMeta = null;
+          try { nextMeta = await api.getMeta('movie', next.imdb_id); } catch {}
+          if (!nextMeta) {
+            // Minimal shim so state.currentMeta is still useful.
+            nextMeta = {
+              id: next.imdb_id,
+              imdb_id: next.imdb_id,
+              type: 'movie',
+              name: next.name,
+              poster: next.poster || '',
+              year: next.year || '',
+              description: next.overview || '',
+            };
+          }
+          // Track in recently played, same as openDetail does.
+          try { addRecentlyPlayed('movie', nextMeta); } catch {}
+          autoplayLoadAndPlay({
+            type: 'movie',
+            id: next.imdb_id,
+            seasonEpisode: undefined,
+            nextMeta,
+            fallbackTitle: next.name || '',
+          });
+        },
+      });
+    }
+  }
+
+  function showUpNextOverlay({ title, subtitle, poster, countdownSeconds, onPlay }) {
+    clearUpNextOverlay();
+
+    const container = document.getElementById('player-container') || document.body;
+    const card = document.createElement('div');
+    card.id = 'up-next-card';
+    card.className = 'up-next-card';
+    const safeTitle = escapeHTML(title || '');
+    const safeSubtitle = escapeHTML(subtitle || '');
+    card.innerHTML = `
+      <div class="up-next-header">Up next</div>
+      <div class="up-next-body">
+        ${poster ? `<img class="up-next-poster" src="${poster}" alt="">` : ''}
+        <div class="up-next-info">
+          <div class="up-next-title">${safeTitle}</div>
+          ${safeSubtitle ? `<div class="up-next-subtitle">${safeSubtitle}</div>` : ''}
+          <div class="up-next-countdown">Playing in <span id="up-next-seconds">${countdownSeconds}</span>s</div>
+        </div>
+      </div>
+      <div class="up-next-actions">
+        <button type="button" class="up-next-cancel" id="up-next-cancel">Cancel</button>
+        <button type="button" class="up-next-play" id="up-next-play">Play now</button>
+      </div>
+    `;
+    container.appendChild(card);
+
+    let remaining = countdownSeconds;
+    const secondsEl = card.querySelector('#up-next-seconds');
+    const interval = setInterval(() => {
+      remaining -= 1;
+      if (secondsEl) secondsEl.textContent = String(Math.max(0, remaining));
+      if (remaining <= 0) {
+        clearInterval(interval);
+      }
+    }, 1000);
+
+    const timer = setTimeout(() => {
+      clearUpNextOverlay();
+      try { onPlay && onPlay(); } catch (e) { console.warn('[autoplay] onPlay failed:', e); }
+    }, Math.max(0, countdownSeconds) * 1000);
+
+    _upNextState = { timer, interval };
+
+    card.querySelector('#up-next-cancel').addEventListener('click', () => {
+      clearUpNextOverlay();
+    });
+    card.querySelector('#up-next-play').addEventListener('click', () => {
+      clearUpNextOverlay();
+      try { onPlay && onPlay(); } catch (e) { console.warn('[autoplay] onPlay failed:', e); }
+    });
   }
 
   // ─── Library ─────────────────────────────────────
@@ -3597,6 +3905,28 @@
         maxStreamsStatus.style.color = 'var(--danger, #ff6b6b)';
       }
     });
+
+    // ─── Auto-play Next ─────────────────────────────
+    const autoplayEnabledInput = $('#setting-autoplay-enabled');
+    const autoplayCountdownInput = $('#setting-autoplay-countdown');
+    if (autoplayEnabledInput && autoplayCountdownInput) {
+      const current = getAutoplaySettings();
+      autoplayEnabledInput.checked = current.enabled;
+      autoplayCountdownInput.value = String(current.countdownSeconds);
+
+      autoplayEnabledInput.addEventListener('change', () => {
+        setAutoplaySettings({ enabled: autoplayEnabledInput.checked });
+        showToast(autoplayEnabledInput.checked ? 'Auto-play next enabled' : 'Auto-play next disabled');
+      });
+      autoplayCountdownInput.addEventListener('change', () => {
+        const n = parseInt(autoplayCountdownInput.value, 10);
+        if (!Number.isFinite(n) || n < 0 || n > 60) {
+          autoplayCountdownInput.value = String(getAutoplaySettings().countdownSeconds);
+          return;
+        }
+        setAutoplaySettings({ countdownSeconds: n });
+      });
+    }
 
     // ─── Stremio Addons ──────────────────────────────
 

@@ -280,6 +280,7 @@ class LibraryManager {
 
           // Use filename-derived name for individual episodes (e.g., "Naruto Shippuden - 010 - Sealing Jutsu")
           const episodeName = this._deriveEpisodeName(file.name);
+          const episodeTitle = this._deriveEpisodeTitle(file.name);
 
           // Prefer show name derived from the actual filename over the torrent-level name.
           // This correctly separates e.g. "Naruto Shippuden" episodes from "Naruto" when
@@ -291,6 +292,7 @@ class LibraryManager {
             imdbId,
             type: 'series',
             name: episodeName,
+            episodeTitle,
             showName: fileShowName || name || 'Unknown',
             poster: poster || '',
             year: year || '',
@@ -413,6 +415,68 @@ class LibraryManager {
       name = name.replace(/[._]/g, ' ');
     }
     return name.trim() || path.basename(fileName);
+  }
+
+  /**
+   * Extract just the episode title from a filename, e.g.:
+   *   "Ep 14 - Ozymandias - Declino.mkv"        -> "Ozymandias"
+   *   "Breaking.Bad.S05E14.Ozymandias.720p.mkv" -> "Ozymandias"
+   *   "Show - 010 - Sealing Jutsu.mp4"          -> "Sealing Jutsu"
+   *   "Naruto - 042 [720p][x265].mkv"           -> null   (no title)
+   *
+   * Strategy: drop the extension, group/quality tags, then locate the
+   * episode marker and capture what follows. For dual-language titles
+   * ("Original - Translated"), the original (first) title is preferred
+   * since it matches TMDB / search queries better.
+   *
+   * Returns null when no title can be confidently extracted, so callers
+   * should fall back to _deriveEpisodeName for display.
+   */
+  _deriveEpisodeTitle(fileName) {
+    let base = path.basename(fileName, path.extname(fileName));
+    // Strip [group] / (group) tags
+    base = base.replace(/\[[^\]]*\]/g, '').replace(/\([^)]*\)/g, '');
+    // Normalize separators if file uses dots/underscores instead of spaces
+    if (!base.includes(' ') && (base.includes('.') || base.includes('_'))) {
+      base = base.replace(/[._]/g, ' ');
+    }
+    base = base.replace(/\s+/g, ' ').trim();
+
+    // Cut everything from the first quality/codec/source tag onward.
+    const tagRegex = /\b(?:480p|576p|720p|1080p|2160p|4K|UHD|x26[45]|h\.?26[45]|HEVC|HDR(?:10)?|10bit|8bit|BluRay|BDRip|BRRip|WEB[-.]?DL|WEB[-.]?Rip|HDTV|DVDRip|REMUX|PROPER|REPACK|UNCUT|EXTENDED|DD5\.1|DD2\.0|AC3|AAC|DTS|FLAC|MULTI|DUAL|SUBBED|DUBBED|pseudo)\b/i;
+    const tagIdx = base.search(tagRegex);
+    if (tagIdx > 0) base = base.slice(0, tagIdx).trim();
+
+    // Locate an episode marker and take what follows it as the title.
+    const markers = [
+      /S\d+\s*E\d+\s*[-–:]?\s*/i,
+      /\b\d+x\d+\s*[-–:]?\s*/i,
+      /\bEp(?:isode)?\.?[\s_]*\d+\s*[-–:]?\s*/i,
+      /[-–]\s*(?!(?:19|20)\d{2}\b)\d{1,4}\s*[-–]\s*/,
+    ];
+    let title = null;
+    for (const re of markers) {
+      const m = base.match(re);
+      if (m) {
+        const after = base.slice(m.index + m[0].length).trim();
+        if (after) { title = after; break; }
+      }
+    }
+    if (!title) return null;
+
+    // Trim leading/trailing punctuation
+    title = title.replace(/^[-–:\s]+|[-–:\s]+$/g, '').trim();
+
+    // Dual-language ("Ozymandias - Declino"): take the first part if both
+    // halves look like real titles. Single-dashed titles like
+    // "The Lion and the Rose" are unaffected because they don't contain
+    // " - " separators.
+    const dashSplit = title.split(/\s+[-–]\s+/);
+    if (dashSplit.length >= 2 && dashSplit[0].length >= 3 && dashSplit[1].length >= 3) {
+      title = dashSplit[0].trim();
+    }
+
+    return title || null;
   }
 
   /**
@@ -766,6 +830,7 @@ class LibraryManager {
 
         const relativePath = path.relative(this._libraryPath, fullPath);
         const episodeName = this._deriveEpisodeName(fileName);
+        const episodeTitle = this._deriveEpisodeTitle(fileName);
         const fileShowName = this._deriveShowNameFromFile(fileName);
 
         const newItem = {
@@ -773,6 +838,7 @@ class LibraryManager {
           imdbId: first.imdbId,
           type: 'series',
           name: episodeName,
+          episodeTitle,
           showName: fileShowName || first.showName || first.name,
           poster: first.poster || '',
           year: first.year || '',

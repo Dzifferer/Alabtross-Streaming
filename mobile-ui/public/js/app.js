@@ -4358,7 +4358,7 @@
       const epLabel = ep.episode != null
         ? `${seasonPrefix}E${String(ep.episode).padStart(2, '0')}`
         : seasonPrefix || '?';
-      const epName = ep.name || ep.fileName || '';
+      const epName = ep.episodeTitle || ep.name || ep.fileName || '';
       const epPct = ep.status === 'complete' ? '100%' : `${ep.progress || 0}%`;
       const epStatus = ep.status === 'complete' ? 'done' : ep.status === 'failed' ? 'fail' : '';
       return `<div class="pack-episode-row ${epStatus}"><span class="pack-ep-label">${escapeHTML(epLabel)}</span><span class="pack-ep-file">${escapeHTML(epName)}</span><span class="pack-ep-pct">${epPct}</span></div>`;

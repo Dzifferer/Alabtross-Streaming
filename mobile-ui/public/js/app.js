@@ -3710,7 +3710,7 @@
     return Object.entries(c).filter(([, v]) => v).map(([k]) => k).join(',');
   }
 
-  // Set video src, wait for canplay-or-error (with timeout), then play().
+  // Set video src, wait for a playable signal (with timeout), then play().
   // Resolves on successful play(), rejects with a specific Error describing
   // which stage failed — the caller uses that to fall back to transcode.
   //
@@ -3738,6 +3738,14 @@
       let stallTimer = null;
       const startedAt = Date.now();
 
+      // Diagnostic: log every significant video element event so we can
+      // see exactly what the browser is doing during playback setup.
+      const logEvent = (name) => {
+        if (settled) return;
+        const elapsed = Math.round((Date.now() - startedAt) / 1000);
+        console.log(`[Library/${action}] +${elapsed}s ${name} readyState=${v.readyState} networkState=${v.networkState} buffered=${v.buffered.length > 0 ? v.buffered.end(0).toFixed(1) + 's' : '0s'}`);
+      };
+
       const resetStall = () => {
         if (settled) return;
         if (stallTimer) clearTimeout(stallTimer);
@@ -3751,22 +3759,33 @@
       const hardTimer = setTimeout(() => {
         if (settled) return; settled = true;
         cleanupListeners();
-        reject(new Error(`${action} timed out after ${Math.round((Date.now() - startedAt) / 1000)}s (hard)`));
+        const rs = v.readyState;
+        const ns = v.networkState;
+        const buf = v.buffered.length > 0 ? v.buffered.end(0).toFixed(1) + 's' : '0s';
+        reject(new Error(`${action} timed out after ${Math.round((Date.now() - startedAt) / 1000)}s (hard) [readyState=${rs} networkState=${ns} buffered=${buf}]`));
       }, hardMs);
 
       const cleanupListeners = () => {
-        v.removeEventListener('canplay', onCanPlay);
+        v.removeEventListener('canplay', onReady);
+        v.removeEventListener('loadeddata', onReady);
         v.removeEventListener('error', onError);
-        v.removeEventListener('progress', onActivity);
-        v.removeEventListener('loadedmetadata', onActivity);
-        v.removeEventListener('loadeddata', onActivity);
-        v.removeEventListener('suspend', onActivity);
+        v.removeEventListener('progress', onProgress);
+        v.removeEventListener('loadedmetadata', onLoadedMetadata);
+        v.removeEventListener('loadstart', onLoadStart);
+        v.removeEventListener('suspend', onSuspend);
+        v.removeEventListener('stalled', onStalled);
+        v.removeEventListener('waiting', onWaiting);
         if (stallTimer) clearTimeout(stallTimer);
         clearTimeout(hardTimer);
       };
 
-      const onCanPlay = async () => {
-        if (settled) return; settled = true;
+      // Ready to play: either canplay OR loadeddata — whichever comes
+      // first. loadeddata fires as soon as the first frame is decoded,
+      // which is usually earlier and more reliable than canplay.
+      const onReady = async (e) => {
+        if (settled) return;
+        logEvent(e.type + ' (READY)');
+        settled = true;
         cleanupListeners();
         try {
           await v.play();
@@ -3776,44 +3795,43 @@
         }
       };
       const onError = () => {
-        if (settled) return; settled = true;
+        if (settled) return;
+        logEvent('error');
+        settled = true;
         cleanupListeners();
         const err = v.error;
         const code = err ? `code ${err.code}` : 'unknown';
         reject(new Error(`Media error (${code}) on ${action}`));
       };
-      const onActivity = () => resetStall();
+      const onProgress = () => { logEvent('progress'); resetStall(); };
+      const onLoadedMetadata = () => { logEvent('loadedmetadata'); resetStall(); };
+      const onLoadStart = () => { logEvent('loadstart'); resetStall(); };
+      const onSuspend = () => { logEvent('suspend'); resetStall(); };
+      const onStalled = () => { logEvent('stalled'); /* don't reset */ };
+      const onWaiting = () => { logEvent('waiting'); /* don't reset */ };
 
-      // IMPORTANT: attach listeners BEFORE setting src. If we set src first
-      // and listeners after, we race against Firefox's internal task queue
-      // and can miss an immediate 'error' from a cached-load code path.
-      // 'progress' fires whenever the browser appends bytes to the buffer.
-      // 'loadedmetadata' fires once the moov atom has been parsed.
-      // 'loadeddata' fires on the first decoded frame.
-      // 'suspend' fires when the browser pauses fetching (not an error, but
-      // activity). We add them as plain listeners (no {once: true}) so we
-      // can reset the stall timer on every tick.
-      v.addEventListener('canplay', onCanPlay, { once: true });
+      // Attach listeners BEFORE setting src. Firefox can fire events from
+      // the synchronous part of the resource selection algorithm when the
+      // resource is cached or when the load resolves very fast, and we
+      // need to catch those.
+      v.addEventListener('canplay', onReady);
+      v.addEventListener('loadeddata', onReady);
       v.addEventListener('error', onError, { once: true });
-      v.addEventListener('progress', onActivity);
-      v.addEventListener('loadedmetadata', onActivity);
-      v.addEventListener('loadeddata', onActivity);
-      v.addEventListener('suspend', onActivity);
+      v.addEventListener('progress', onProgress);
+      v.addEventListener('loadedmetadata', onLoadedMetadata);
+      v.addEventListener('loadstart', onLoadStart);
+      v.addEventListener('suspend', onSuspend);
+      v.addEventListener('stalled', onStalled);
+      v.addEventListener('waiting', onWaiting);
 
-      // Defensively reset the element before assigning a new src. If a
-      // previous playback attempt left it in an error or loading state,
-      // setting src alone can cause Firefox to fire a spurious
-      // MEDIA_ERR_SRC_NOT_SUPPORTED on the aborted load before the new
-      // load begins. Clearing src then calling load() drains any pending
-      // network activity and resets the media element's readyState.
-      try {
-        v.pause();
-        v.removeAttribute('src');
-        v.load();
-      } catch { /* ignore — element may be in a weird state */ }
-
+      // Assign src and start loading. No defensive reset — it introduced
+      // more bugs than it fixed. If the element was in an error state
+      // from a previous attempt, setting a fresh src triggers a new
+      // resource selection algorithm per HTML5 spec, which clears the
+      // prior error automatically.
       v.src = url;
       v.load();
+      logEvent('src set + load() called');
 
       resetStall();
     });

@@ -378,6 +378,14 @@ class LibraryManager {
     // Try "Episode 5" pattern
     const epMatch = base.match(/Episode\s*(\d+)/i);
     if (epMatch) return { season: dirSeason, episode: parseInt(epMatch[1], 10) };
+    // Try "Ep 14" / "Ep14" / "Ep.14" / "Ep_14" — shorthand episode marker.
+    // \b before E avoids matching mid-word ("Steps14" → no match), and the
+    // required digits after the optional separator avoid matching "Eps 14"
+    // (the "s" breaks the pattern). For packs whose filenames only carry
+    // episode info ("Ep 14 - Title.mkv") and rely on the pack's metadata
+    // for the season number.
+    const epShortMatch = base.match(/\bEp\.?[\s_]*(\d+)\b/i);
+    if (epShortMatch) return { season: dirSeason, episode: parseInt(epShortMatch[1], 10) };
     return { season: dirSeason, episode: null };
   }
 

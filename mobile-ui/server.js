@@ -2046,6 +2046,11 @@ app.use(express.static(path.join(__dirname, 'public'), {
   },
 }));
 
+// Lightweight health endpoint for Docker HEALTHCHECK
+app.get('/health', (req, res) => {
+  res.status(200).send('ok');
+});
+
 // Health endpoint for VPN detection (if the client can reach this, the server is accessible)
 app.get('/api/stats', (req, res) => {
   res.json({ ok: true });

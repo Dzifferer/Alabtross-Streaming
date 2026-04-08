@@ -193,12 +193,19 @@ class LibraryManager {
         // season=0 means "complete pack — detect seasons from filenames"
         const fallbackSeason = parseInt(season, 10) || 1;
 
+        // Log first 3 file names to debug season parsing
+        for (let i = 0; i < Math.min(3, videoFiles.length); i++) {
+          const f = videoFiles[i];
+          console.log(`[Library] Pack file.name[${i}]: "${f.name}" | dirname: "${path.dirname(f.name)}" | basename: "${path.basename(f.name)}"`);
+        }
+
         for (const file of videoFiles) {
           file.select();
 
           // Parse season and episode from filename
           const parsed = this._parseSeasonEpisode(file.name, fallbackSeason);
           const seasonNum = parsed.season || fallbackSeason;
+          console.log(`[Library] Parsed "${path.basename(file.name)}": season=${parsed.season}, episode=${parsed.episode}, using seasonNum=${seasonNum}`);
           const episodeNum = parsed.episode;
 
           const itemId = episodeNum

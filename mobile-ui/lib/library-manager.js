@@ -916,6 +916,65 @@ class LibraryManager {
   }
 
   /**
+   * Force-start a queued item immediately (if download slots are available).
+   */
+  startQueuedItem(id) {
+    const item = this._items.get(id);
+    if (!item) return false;
+    if (item.status !== 'queued') return false;
+
+    const activeItems = [...this._items.values()].filter(i => i.status === 'downloading');
+    const activePacks = new Set(activeItems.filter(i => i.packId).map(i => i.packId));
+    const activeSingles = activeItems.filter(i => !i.packId).length;
+    const effectiveActive = activePacks.size + activeSingles;
+
+    const packAlreadyActive = item.packId && activePacks.has(item.packId);
+    if (!packAlreadyActive && effectiveActive >= this._maxConcurrentDownloads) {
+      return false; // No slots available
+    }
+
+    item.status = 'downloading';
+    item.progress = item.progress || 0;
+    item.error = null;
+
+    if (item.packId) {
+      // Also start all other queued items in the same pack
+      const packItems = [...this._items.values()].filter(
+        i => i.packId === item.packId && i.status === 'queued'
+      );
+      for (const pi of packItems) {
+        pi.status = 'downloading';
+        pi.progress = pi.progress || 0;
+      }
+      if (!this._engines.has(item.packId)) {
+        const allDownloading = [...this._items.values()].filter(
+          i => i.packId === item.packId && i.status === 'downloading'
+        );
+        this._resumePackDownload(item.packId, allDownloading);
+      }
+    } else {
+      this._startDownload(id);
+    }
+
+    this._saveMetadata();
+    console.log(`[Library] Force-started queued: "${item.name}"`);
+    return true;
+  }
+
+  /**
+   * Returns the current effective active download count and max.
+   */
+  getDownloadSlots() {
+    const activeItems = [...this._items.values()].filter(i => i.status === 'downloading');
+    const activePacks = new Set(activeItems.filter(i => i.packId).map(i => i.packId));
+    const activeSingles = activeItems.filter(i => !i.packId).length;
+    return {
+      active: activePacks.size + activeSingles,
+      max: this._maxConcurrentDownloads,
+    };
+  }
+
+  /**
    * Retry a failed download. Resets status and re-starts the torrent engine.
    */
   retryItem(id) {
@@ -975,35 +1034,106 @@ class LibraryManager {
   }
 
   /**
-   * Reorder an item in the queue. newPosition is 0-based index within queued items.
+   * Reorder a single (non-pack) item in the queue. newPosition is 0-based among
+   * logical queue entries (each pack = 1 entry, each single = 1 entry).
    */
   reorderQueue(id, newPosition) {
     const item = this._items.get(id);
     if (!item || item.status !== 'queued') return false;
+    // Only for non-pack items; packs use reorderPackQueue
+    if (item.packId) return false;
 
-    // Get all queued items sorted by addedAt
+    // Build logical queue entries
     const queued = [...this._items.values()]
       .filter(i => i.status === 'queued')
       .sort((a, b) => a.addedAt - b.addedAt);
 
-    if (queued.length <= 1) return true;
-    newPosition = Math.max(0, Math.min(newPosition, queued.length - 1));
+    const entries = [];
+    const seenPacks = new Set();
+    for (const qi of queued) {
+      if (qi.packId) {
+        if (!seenPacks.has(qi.packId)) {
+          seenPacks.add(qi.packId);
+          entries.push({ type: 'pack', packId: qi.packId, items: queued.filter(x => x.packId === qi.packId) });
+        }
+      } else {
+        entries.push({ type: 'single', id: qi.id, items: [qi] });
+      }
+    }
 
-    // Reassign addedAt timestamps to reflect new order
-    const currentIdx = queued.findIndex(i => i.id === id);
+    if (entries.length <= 1) return true;
+    newPosition = Math.max(0, Math.min(newPosition, entries.length - 1));
+
+    const currentIdx = entries.findIndex(e => e.type === 'single' && e.id === id);
     if (currentIdx === -1) return false;
 
-    queued.splice(currentIdx, 1);
-    queued.splice(newPosition, 0, item);
+    const [entry] = entries.splice(currentIdx, 1);
+    entries.splice(newPosition, 0, entry);
 
-    // Reassign timestamps to maintain order
-    const baseTime = Date.now() - queued.length * 1000;
-    for (let i = 0; i < queued.length; i++) {
-      queued[i].addedAt = baseTime + i * 1000;
+    // Reassign timestamps to reflect new order
+    const baseTime = Date.now() - entries.length * 1000;
+    for (let i = 0; i < entries.length; i++) {
+      for (const ei of entries[i].items) {
+        ei.addedAt = baseTime + i * 1000;
+      }
     }
 
     this._saveMetadata();
     console.log(`[Library] Reordered queue: "${item.name}" to position ${newPosition}`);
+    return true;
+  }
+
+  /**
+   * Reorder a pack in the queue. newPosition is 0-based among queue entries
+   * (each pack = 1 entry, each single item = 1 entry).
+   */
+  reorderPackQueue(packId, newPosition) {
+    const packItems = [...this._items.values()].filter(
+      i => i.packId === packId && i.status === 'queued'
+    );
+    if (packItems.length === 0) return false;
+
+    // Build logical queue entries: each pack = 1 entry, each single = 1 entry
+    const queued = [...this._items.values()]
+      .filter(i => i.status === 'queued')
+      .sort((a, b) => a.addedAt - b.addedAt);
+
+    const entries = [];       // { type, id/packId, items[] }
+    const seenPacks = new Set();
+    for (const item of queued) {
+      if (item.packId) {
+        if (!seenPacks.has(item.packId)) {
+          seenPacks.add(item.packId);
+          entries.push({
+            type: 'pack',
+            packId: item.packId,
+            items: queued.filter(i => i.packId === item.packId),
+          });
+        }
+      } else {
+        entries.push({ type: 'single', items: [item] });
+      }
+    }
+
+    if (entries.length <= 1) return true;
+    newPosition = Math.max(0, Math.min(newPosition, entries.length - 1));
+
+    const currentIdx = entries.findIndex(e => e.type === 'pack' && e.packId === packId);
+    if (currentIdx === -1) return false;
+
+    const [entry] = entries.splice(currentIdx, 1);
+    entries.splice(newPosition, 0, entry);
+
+    // Reassign addedAt timestamps to reflect new order
+    const baseTime = Date.now() - entries.length * 1000;
+    for (let i = 0; i < entries.length; i++) {
+      for (const item of entries[i].items) {
+        item.addedAt = baseTime + i * 1000;
+      }
+    }
+
+    this._saveMetadata();
+    console.log(`[Library] Reordered pack queue: "${packId}" to position ${newPosition}`);
     return true;
   }
 

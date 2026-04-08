@@ -1028,7 +1028,8 @@ app.get('/api/torrent-status/:infoHash/bottleneck', (req, res) => {
 app.get('/api/library', (req, res) => {
   try {
     const items = library.getAll();
-    res.json({ items });
+    const slots = library.getDownloadSlots();
+    res.json({ items, slots });
   } catch (err) {
     console.error('[Library] getAll() failed:', err.message);
     res.status(500).json({ items: [], error: err.message });
@@ -1380,6 +1381,13 @@ app.post('/api/library/:id/retry', rateLimit, (req, res) => {
   res.json({ success: true });
 });
 
+// POST /api/library/:id/start — force-start a queued item (if slots available)
+app.post('/api/library/:id/start', rateLimit, (req, res) => {
+  const started = library.startQueuedItem(req.params.id);
+  if (!started) return res.status(400).json({ error: 'Cannot start this item (no available slots or not queued)' });
+  res.json({ success: true });
+});
+
 // POST /api/library/:id/reorder — reorder a queued item
 app.post('/api/library/:id/reorder', rateLimit, (req, res) => {
   const position = parseInt(req.body.position, 10);
@@ -1388,6 +1396,17 @@ app.post('/api/library/:id/reorder', rateLimit, (req, res) => {
   }
   const reordered = library.reorderQueue(req.params.id, position);
   if (!reordered) return res.status(400).json({ error: 'Cannot reorder this item' });
+  res.json({ success: true });
+});
+
+// POST /api/library/reorder-pack — reorder a queued pack in the queue
+app.post('/api/library/reorder-pack', rateLimit, (req, res) => {
+  const { packId, position } = req.body;
+  if (!packId) return res.status(400).json({ error: 'packId is required' });
+  const pos = parseInt(position, 10);
+  if (isNaN(pos) || pos < 0) return res.status(400).json({ error: 'Invalid position' });
+  const reordered = library.reorderPackQueue(packId, pos);
+  if (!reordered) return res.status(400).json({ error: 'Cannot reorder this pack' });
   res.json({ success: true });
 });
 

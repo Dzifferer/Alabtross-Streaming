@@ -347,22 +347,36 @@ class LibraryManager {
    */
   _parseSeasonEpisode(fileName, fallbackSeason) {
     const base = path.basename(fileName);
-    // Try S01E05 pattern
+    // Try S01E05 pattern in filename
     const seMatch = base.match(/S(\d+)E(\d+)/i);
     if (seMatch) return { season: parseInt(seMatch[1], 10), episode: parseInt(seMatch[2], 10) };
-    // Try 1x05 pattern
+    // Try 1x05 pattern in filename
     const xMatch = base.match(/(\d+)x(\d+)/i);
     if (xMatch) return { season: parseInt(xMatch[1], 10), episode: parseInt(xMatch[2], 10) };
+
+    // No season+episode combo in filename — try to extract season from directory path
+    // e.g. "Mad Men (2007) Season 2 S02 (...)/E01.mkv" or "Season 3/episode.mkv"
+    let dirSeason = fallbackSeason;
+    const dirPart = path.dirname(fileName);
+    if (dirPart && dirPart !== '.') {
+      const dirSeMatch = dirPart.match(/S(\d+)/i);
+      if (dirSeMatch) dirSeason = parseInt(dirSeMatch[1], 10);
+      else {
+        const dirSeasonMatch = dirPart.match(/Season\s*(\d+)/i);
+        if (dirSeasonMatch) dirSeason = parseInt(dirSeasonMatch[1], 10);
+      }
+    }
+
     // Try E05 pattern (without season)
     const eMatch = base.match(/\bE(\d+)\b/i);
-    if (eMatch) return { season: fallbackSeason, episode: parseInt(eMatch[1], 10) };
+    if (eMatch) return { season: dirSeason, episode: parseInt(eMatch[1], 10) };
     // Try "- 05 -" or "- 05." or "- 05 " at end before extension (anime fansub convention)
     const dashMatch = base.match(/[-–]\s*(\d{1,4})\s*(?:[-–.\s]|$)/);
-    if (dashMatch) return { season: fallbackSeason, episode: parseInt(dashMatch[1], 10) };
+    if (dashMatch) return { season: dirSeason, episode: parseInt(dashMatch[1], 10) };
     // Try "Episode 5" pattern
     const epMatch = base.match(/Episode\s*(\d+)/i);
-    if (epMatch) return { season: fallbackSeason, episode: parseInt(epMatch[1], 10) };
-    return { season: fallbackSeason, episode: null };
+    if (epMatch) return { season: dirSeason, episode: parseInt(epMatch[1], 10) };
+    return { season: dirSeason, episode: null };
   }
 
   /**
@@ -767,10 +781,9 @@ class LibraryManager {
     const first = packItems[0];
     const { imdbId, showName, poster, year, magnetUri, infoHash, quality, size } = first;
 
-    // Determine original season parameter: if all items share a season, use it;
-    // otherwise it was a complete pack (season=0)
-    const seasons = new Set(packItems.map(i => i.season).filter(Boolean));
-    const season = seasons.size === 1 ? [...seasons][0] : 0;
+    // Always use season=0 (complete pack mode) so addSeasonPack detects
+    // seasons from filenames/directories rather than assuming a single season
+    const season = 0;
 
     // Stop engine and remove all pack items from metadata (keep files on disk)
     this._stopPackEngine(packId);

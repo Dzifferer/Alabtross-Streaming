@@ -65,9 +65,10 @@ class LibraryManager {
     }
 
     // Generate a unique ID
+    const idPrefix = imdbId || 'manual';
     const id = season != null && episode != null
-      ? `${imdbId}_s${season}e${episode}_${infoHash.slice(0, 8)}`
-      : `${imdbId}_${infoHash.slice(0, 8)}`;
+      ? `${idPrefix}_s${season}e${episode}_${infoHash.slice(0, 8)}`
+      : `${idPrefix}_${infoHash.slice(0, 8)}`;
 
     // Check if already in library
     if (this._items.has(id)) {

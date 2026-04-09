@@ -51,17 +51,26 @@ hours per file.
 ### Optional install flags
 
 ```powershell
-.\install.ps1 -Port 9000 -NvencPreset p7 -NvencCq 19 -MaxWidth 1920 -Secret "long-random-string"
+.\install.ps1 -TempDir D:\alabtross-worker-temp -Port 9000 -NvencPreset p7 -NvencCq 19 -MaxWidth 1920 -Secret "long-random-string"
 ```
 
 | Flag | Default | Notes |
 |---|---|---|
 | `-InstallDir` | `C:\Tools\alabtross-worker` | Where `server.js` lives |
+| `-TempDir` | `%TEMP%\alabtross-worker` on C: | Scratch dir for in-flight uploads + ffmpeg output. **Point this at a drive with ≥100 GB free** — see note below. |
 | `-Port` | `8090` | Listen port. Match this in `WORKER_URL` |
 | `-NvencPreset` | `p6` | `p1`=fastest, `p7`=best quality. Sweet spot is p5–p6 |
 | `-NvencCq` | `21` | Lower = bigger file, higher quality. Default ≈ libx264 crf 23 |
 | `-MaxWidth` | `1920` | Output width cap. 4K sources downscale to fit |
 | `-Secret` | empty | If set, requires `X-Worker-Secret` header on every call |
+
+> **Scratch disk sizing.** Each in-flight job holds roughly **2× the source
+> file size** on the temp drive at peak — the source file is uploaded to
+> disk in full before ffmpeg runs, and ffmpeg writes a new MP4 next to it
+> before streaming back. For a library with 4K HEVC sources (15–50 GB per
+> file), the default `C:\WINDOWS\TEMP` on a small system drive will run
+> out of space with a `ENOSPC: no space left on device` error. Use
+> `-TempDir D:\alabtross-worker-temp` to put scratch on a larger drive.
 
 ## Configure the Orin
 

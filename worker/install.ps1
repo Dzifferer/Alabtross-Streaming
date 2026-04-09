@@ -37,7 +37,14 @@ param(
     [string]$Secret = '',
     [string]$NvencPreset = 'p6',
     [string]$NvencCq = '21',
-    [int]$MaxWidth = 1920
+    [int]$MaxWidth = 1920,
+    # Scratch directory for in-flight uploads + ffmpeg output. Needs to
+    # hold roughly 2x the largest source file size at peak (input + output
+    # before the output is streamed back to the Orin). For a library with
+    # 4K HEVC sources, point this at a drive with ≥100 GB free — the
+    # Windows default C:\WINDOWS\TEMP rarely has room for a 50 GB 4K rip
+    # plus its re-encode.
+    [string]$TempDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -170,6 +177,17 @@ $envBlock = @(
     "FFPROBE_PATH=$ffprobePath"
 )
 if ($Secret) { $envBlock += "WORKER_SECRET=$Secret" }
+if ($TempDir) {
+    # Create the user-specified temp dir (idempotent) so the worker
+    # doesn't have to MKDIR it at runtime and so we surface permission
+    # errors now, at install time, instead of mid-upload.
+    New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
+    $envBlock += "WORKER_TEMP=$TempDir"
+    Write-Ok "Scratch dir: $TempDir"
+} else {
+    Write-Warn 'No -TempDir given; worker will use %TEMP%\alabtross-worker on C:.'
+    Write-Warn 'If C: is small, re-run with: .\install.ps1 -TempDir D:\alabtross-worker-temp'
+}
 
 # We wrap node in a small launcher .cmd that sets env vars and logs to a
 # file. Easier than juggling -Argument quoting in the scheduled task XML.

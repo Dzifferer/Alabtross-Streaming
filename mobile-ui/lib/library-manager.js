@@ -16,6 +16,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const { VIDEO_EXTENSIONS, TRACKERS, isFileNameSafe, getMimeType } = require('./file-safety');
+const { PeerManager } = require('./peer-manager');
 
 const DEFAULT_MAX_CONCURRENT_DOWNLOADS = 5;
 const METADATA_SAVE_INTERVAL = 30 * 1000; // Save metadata every 30s during active downloads
@@ -74,6 +75,11 @@ class LibraryManager {
     this._maxConcurrentDownloads = opts.maxConcurrentDownloads || DEFAULT_MAX_CONCURRENT_DOWNLOADS;
     this._items = new Map();       // id -> library item
     this._engines = new Map();     // id -> torrent engine (active downloads only)
+    // PeerManager instances keyed by engine reference. WeakMap so entries are
+    // garbage-collected when the engine is released, and every engine.destroy
+    // site can look up its peer manager without a parallel id map. See
+    // lib/peer-manager.js for why this exists at all.
+    this._peerMgrByEngine = new WeakMap();
     this._progressTimers = new Map(); // id -> interval timer
     this._convertProcesses = new Map(); // id -> FFmpeg child process (active conversions)
     this._maxConcurrentConversions = 1;
@@ -800,15 +806,16 @@ class LibraryManager {
         path: packDir,
         trackers: TRACKERS,
       });
+      this._attachPeerManager(engine, `pack ${infoHash.slice(0, 8)}`);
 
       const timeout = setTimeout(() => {
-        engine.destroy();
+        this._destroyEngine(engine);
         reject(new Error('Torrent metadata timeout (90s) — try a torrent with more seeds'));
       }, 90000);
 
       engine.on('error', (err) => {
         clearTimeout(timeout);
-        try { engine.destroy(); } catch { /* ignore */ }
+        this._destroyEngine(engine);
         reject(err);
       });
 
@@ -823,7 +830,7 @@ class LibraryManager {
         );
 
         if (videoFiles.length === 0) {
-          engine.destroy();
+          this._destroyEngine(engine);
           return resolve({ status: 'no_video_files', items: [] });
         }
 
@@ -900,7 +907,7 @@ class LibraryManager {
         }
 
         if (createdItems.filter(i => i.status === 'started').length === 0) {
-          engine.destroy();
+          this._destroyEngine(engine);
           this._saveMetadata();
           return resolve({ status: 'all_exist', items: createdItems });
         }
@@ -959,15 +966,16 @@ class LibraryManager {
         path: scanDir,
         trackers: TRACKERS,
       });
+      this._attachPeerManager(engine, `scan ${infoHash.slice(0, 8)}`);
 
       const timeout = setTimeout(() => {
-        try { engine.destroy(); } catch { /* ignore */ }
+        this._destroyEngine(engine);
         reject(new Error('Torrent metadata timeout (90s) — try a torrent with more seeds'));
       }, 90000);
 
       engine.on('error', (err) => {
         clearTimeout(timeout);
-        try { engine.destroy(); } catch { /* ignore */ }
+        this._destroyEngine(engine);
         reject(err);
       });
 
@@ -982,7 +990,7 @@ class LibraryManager {
         );
 
         if (videoFiles.length === 0) {
-          try { engine.destroy(); } catch { /* ignore */ }
+          this._destroyEngine(engine);
           return resolve({ status: 'no_video_files', items: [] });
         }
 
@@ -990,7 +998,7 @@ class LibraryManager {
         // The redundant metadata fetch is a small cost (usually cached locally) in
         // exchange for reusing all of addItem's queue/dedup/start logic unchanged.
         if (videoFiles.length === 1) {
-          try { engine.destroy(); } catch { /* ignore */ }
+          this._destroyEngine(engine);
           try {
             const result = this.addItem({
               imdbId: imdbId || null,
@@ -1083,7 +1091,7 @@ class LibraryManager {
         }
 
         if (createdItems.filter(i => i.status === 'started').length === 0) {
-          try { engine.destroy(); } catch { /* ignore */ }
+          this._destroyEngine(engine);
           this._saveMetadata();
           return resolve({ status: 'all_exist', items: createdItems });
         }
@@ -1373,7 +1381,7 @@ class LibraryManager {
     }
     const engine = this._engines.get(packId);
     if (engine) {
-      try { engine.destroy(); } catch { /* ignore */ }
+      this._destroyEngine(engine);
       this._engines.delete(packId);
     }
 
@@ -1412,6 +1420,7 @@ class LibraryManager {
       path: packDir,
       trackers: TRACKERS,
     });
+    this._attachPeerManager(engine, `resume ${first.infoHash.slice(0, 8)}`);
 
     // Store engine immediately to prevent retryItem from creating duplicates
     // (engine is usable before 'ready' — it just won't have files yet)
@@ -1425,7 +1434,7 @@ class LibraryManager {
           item.error = 'Torrent metadata timeout (90s) on resume';
         }
       }
-      try { engine.destroy(); } catch {}
+      this._destroyEngine(engine);
       this._engines.delete(packId);
       this._saveMetadata();
       this._processQueue();
@@ -1439,7 +1448,7 @@ class LibraryManager {
           item.error = err.message;
         }
       }
-      try { engine.destroy(); } catch {}
+      this._destroyEngine(engine);
       this._engines.delete(packId);
       this._saveMetadata();
       this._processQueue();
@@ -2596,6 +2605,7 @@ class LibraryManager {
       path: itemDir,
       trackers: TRACKERS,
     });
+    this._attachPeerManager(engine, `dl ${item.infoHash.slice(0, 8)}`);
 
     this._engines.set(id, engine);
     this._startPeriodicSave();
@@ -2702,7 +2712,7 @@ class LibraryManager {
 
     const engine = this._engines.get(id);
     if (engine) {
-      try { engine.destroy(); } catch { /* ignore */ }
+      this._destroyEngine(engine);
       this._engines.delete(id);
     }
 
@@ -2710,6 +2720,32 @@ class LibraryManager {
     if (this._engines.size === 0 && this._convertProcesses.size === 0) {
       this._stopPeriodicSave();
     }
+  }
+
+  /**
+   * Attach a PeerManager to a freshly-created torrent-stream engine so dead
+   * peers get blocked instead of cycling back in on every tracker announce.
+   * See lib/peer-manager.js for the full rationale.
+   */
+  _attachPeerManager(engine, label) {
+    const mgr = new PeerManager(engine, { label });
+    this._peerMgrByEngine.set(engine, mgr);
+    return mgr;
+  }
+
+  /**
+   * Tear down a torrent-stream engine and its PeerManager in the right order.
+   * Safe to call on any engine — if no peer manager was attached it's a noop
+   * for that side. Use this in every place the old code called engine.destroy.
+   */
+  _destroyEngine(engine) {
+    if (!engine) return;
+    const mgr = this._peerMgrByEngine.get(engine);
+    if (mgr) {
+      this._peerMgrByEngine.delete(engine);
+      try { mgr.destroy(); } catch { /* ignore */ }
+    }
+    try { engine.destroy(); } catch { /* ignore */ }
   }
 
   _selectVideoFile(files) {

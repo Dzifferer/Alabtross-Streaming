@@ -22,6 +22,7 @@ const { Transform } = require('stream');
 const fs = require('fs');
 const path = require('path');
 const { TRACKERS, isFileNameSafe, getMimeType, sanitizeFilename } = require('./file-safety');
+const { PeerManager } = require('./peer-manager');
 
 const IDLE_TIMEOUT = 30 * 60 * 1000; // 30 minutes
 const ACTIVE_DL_RECHECK = 10 * 60 * 1000; // re-check in 10 min if still downloading
@@ -109,6 +110,11 @@ class TorrentEngine {
 
       placeholder.engine = engine;
 
+      // Ban dead peers so they don't cycle back through on every tracker
+      // re-announce. See lib/peer-manager.js for the full rationale.
+      const peerMgr = new PeerManager(engine, { label: hash.slice(0, 8) });
+      placeholder.peerMgr = peerMgr;
+
       // Log peer count when it changes, not every 10 seconds. The old
       // behavior spammed `peers: 0, queued: 0` for the full 90s metadata
       // window on dead torrents, which made logs noisy and was the only
@@ -120,7 +126,8 @@ class TorrentEngine {
         const peers = engine.swarm.wires.length;
         const queued = engine.swarm.queued;
         if (peers !== lastPeers || queued !== lastQueued) {
-          console.log(`[TorrentEngine] ${hash.slice(0,8)}... peers: ${peers}, queued: ${queued}`);
+          const mgr = peerMgr.stats();
+          console.log(`[TorrentEngine] ${hash.slice(0,8)}... peers: ${peers}, queued: ${queued}, banned: ${mgr.bannedIps}`);
           lastPeers = peers;
           lastQueued = queued;
         }
@@ -129,6 +136,7 @@ class TorrentEngine {
       const timeout = setTimeout(() => {
         clearInterval(peerLog);
         if (!this._active.has(hash) || !this._active.get(hash).files) {
+          try { peerMgr.destroy(); } catch { /* ignore */ }
           engine.destroy();
           this._active.delete(hash);
           reject(new Error('Torrent metadata timeout (90s) — try a torrent with more seeds'));
@@ -161,6 +169,7 @@ class TorrentEngine {
 
         const entry = {
           engine,
+          peerMgr,
           files: engine.files,
           name: engine.torrent.name,
           infoHash: hash,
@@ -176,6 +185,7 @@ class TorrentEngine {
       engine.on('error', (err) => {
         clearTimeout(timeout);
         clearInterval(peerLog);
+        try { peerMgr.destroy(); } catch { /* ignore */ }
         console.error(`[TorrentEngine] Engine error for ${hash}: ${err.message}`);
         this._active.delete(hash);
         reject(err);
@@ -517,6 +527,7 @@ class TorrentEngine {
   destroy() {
     for (const [hash, entry] of this._active) {
       clearTimeout(entry.timer);
+      if (entry.peerMgr) { try { entry.peerMgr.destroy(); } catch { /* ignore */ } }
       if (entry.engine) entry.engine.destroy();
     }
     this._active.clear();
@@ -748,6 +759,7 @@ class TorrentEngine {
     }
 
     clearTimeout(entry.timer);
+    if (entry.peerMgr) { try { entry.peerMgr.destroy(); } catch { /* ignore */ } }
     if (entry.engine) entry.engine.destroy();
     this._active.delete(hash);
     console.log(`[TorrentEngine] Removed idle torrent: ${hash}`);

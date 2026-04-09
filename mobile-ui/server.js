@@ -1837,8 +1837,11 @@ app.get('/api/library/:id/stream/remux', async (req, res) => {
 
 // GET /api/library/:id/stream/transcode?caps=...
 // Full video re-encode to H.264 + AAC in fragmented MP4. This is the
-// fallback for clients that can't play the source video codec (HEVC on
-// Linux browsers, mpeg4 on most browsers, vp9 in non-webm, etc).
+// LAST-RESORT fallback for clients that can't play the source video
+// codec AND the background pre-transcode hasn't produced a universal
+// MP4 yet. In the happy path this endpoint is never hit — the library
+// manager pre-converts non-universal sources to stored H.264/AAC/MP4
+// at download time and serves them through the plain /stream endpoint.
 //
 // Output target is intentionally conservative for maximum compatibility:
 //   Video : H.264 main profile, level 4.1, yuv420p, max 720p
@@ -1855,6 +1858,27 @@ app.get('/api/library/:id/stream/transcode', async (req, res) => {
   if (!item) return res.status(404).json({ error: 'Item not found' });
   if (item.status !== 'complete' && item.status !== 'converting') {
     return res.status(400).json({ error: 'Download not complete' });
+  }
+
+  // CPU contention guard: if a background conversion is actively running
+  // for THIS item, two ffmpeg processes on the same source starve each
+  // other on the Orin Nano's 6 cores and neither finishes in time to
+  // satisfy the client's stall timer. Tell the client to wait for the
+  // background job instead — it will produce a directly-playable MP4.
+  const convState = library.getConversionState(req.params.id);
+  if (convState && convState.active) {
+    res.status(503).set({
+      'Content-Type': 'application/json',
+      'X-Conversion-Kind': convState.kind || 'unknown',
+      'X-Conversion-Progress': String(convState.progress || 0),
+      'Retry-After': '60',
+    });
+    return res.json({
+      error: 'Background conversion in progress',
+      convertKind: convState.kind,
+      convertProgress: convState.progress,
+      message: 'A universal MP4 is being prepared. Try again in a few minutes.',
+    });
   }
 
   const filePath = library.getFilePath(req.params.id);
@@ -1887,6 +1911,11 @@ app.get('/api/library/:id/stream/transcode', async (req, res) => {
   const ffmpeg = spawn('ffmpeg', [
     '-hide_banner',
     '-fflags', '+genpts',
+    // Keep initial input parse cheap — 1MB / 1s probe is plenty for
+    // every container we ingest, and waiting any longer just delays
+    // the first MP4 fragment on the wire.
+    '-probesize', '1000000',
+    '-analyzeduration', '1000000',
     '-i', filePath,
 
     // Select first video + first audio stream, drop everything else.
@@ -1909,6 +1938,13 @@ app.get('/api/library/:id/stream/transcode', async (req, res) => {
     '-pix_fmt', 'yuv420p',
     '-crf', '23',
     '-vf', "scale='min(1280,iw)':'-2'",
+    // Short GOP so we get an IDR — and therefore a flushable fragment —
+    // within ~2 seconds regardless of the source's native keyframe
+    // interval. This is the single biggest knob for first-byte latency
+    // on a live transcode.
+    '-g', '48',
+    '-keyint_min', '48',
+    '-sc_threshold', '0',
 
     // Audio: AAC LC stereo. Even 5.1 sources get downmixed so phone
     // speakers and stereo laptops don't get a broken center channel.
@@ -1919,8 +1955,11 @@ app.get('/api/library/:id/stream/transcode', async (req, res) => {
 
     // Fragmented MP4 that can be streamed over a single HTTP response
     // with no server-side seeking. Browsers can play it back as it arrives
-    // but cannot seek past what's been received.
+    // but cannot seek past what's been received. 500ms fragment duration
+    // pairs with the short GOP to flush the first playable byte to the
+    // client well before any client-side stall timer fires.
     '-movflags', '+frag_keyframe+empty_moov+default_base_moof',
+    '-frag_duration', '500000',
     '-f', 'mp4',
     '-loglevel', 'warning',
     'pipe:1',
@@ -2021,6 +2060,11 @@ app.get('/api/library/:id/probe', async (req, res) => {
     transcode: `/api/library/${idParam}/stream/transcode?caps=${encodeURIComponent(req.query.caps || '')}`,
   };
 
+  // Expose background-conversion state so the client can show a
+  // "Converting X%" message instead of hammering live transcode while
+  // the permanent MP4 is being produced.
+  const convState = library.getConversionState(req.params.id);
+
   res.json({
     action: decision.action,
     reason: decision.reason,
@@ -2032,6 +2076,7 @@ app.get('/api/library/:id/probe', async (req, res) => {
     pixFmt: decision.pixFmt,
     audioCodec: decision.audioCodec,
     duration: decision.duration,
+    conversion: convState,
     // Legacy flag kept so older clients still get a sensible answer while
     // rolling out. TRUE only for the 'direct' action.
     directPlay: decision.action === 'direct',

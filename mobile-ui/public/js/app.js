@@ -4243,6 +4243,25 @@
       return;
     }
 
+    // ── 2b. Handle in-progress background conversion ─────────────────
+    // If the server is currently re-encoding this item to a universal
+    // MP4, don't spin up a competing live transcode — we'd peg CPU on
+    // the Jetson and starve both processes. Show a progress message
+    // and let the user come back when it's done.
+    if (probe.conversion && probe.conversion.active && probe.action === 'transcode') {
+      const pct = probe.conversion.progress || 0;
+      const kind = probe.conversion.kind || 'converting';
+      showPlayerError(
+        'Preparing file for playback',
+        `Background ${escapeHTML(kind)} is ${pct}% complete.<br>` +
+        `<span style="font-size:12px">` +
+          `We're storing a universally playable copy so this only happens once. ` +
+          `Try again in a few minutes.` +
+        `</span>`
+      );
+      return;
+    }
+
     // ── 3. Attempt playback with fallback to transcode ───────────────
     // Build an attempt list: first whatever the server recommended,
     // then transcode as a universal fallback if we weren't already
@@ -5873,27 +5892,68 @@
     // Video stall/buffering detection — re-show overlay during mid-playback stalls
     // Only activate after the video has played at least once (playerStarted) to avoid
     // clobbering the detailed loading overlay during initial torrent buffering.
+    //
+    // Why this is event-gated rather than purely event-driven:
+    //   - 'waiting' and 'stalled' can fire spuriously. The browser emits
+    //     'stalled' any time it hasn't received bytes for 3s; that can
+    //     happen during perfectly healthy playback when the client has
+    //     enough buffered data to keep going and the server goes quiet.
+    //   - 'playing' alone doesn't reliably dismiss the overlay, because
+    //     it only fires on a paused→playing transition, not on each
+    //     decoded frame. If 'stalled' fires mid-playback the overlay
+    //     would stay pinned forever even though currentTime keeps
+    //     advancing.
+    //
+    // Solution: track currentTime on every timeupdate. If the clock
+    // moved since the last stall/waiting event, the video is healthy
+    // and the overlay should go away. We also dismiss on canplay /
+    // canplaythrough which fire once the buffer is comfortable again.
+    let _lastVideoTime = 0;
+    let _stallOverlayShown = false;
+    const hideStallOverlay = () => {
+      if (!_stallOverlayShown) return;
+      _stallOverlayShown = false;
+      dom.playerOverlay.classList.add('hidden');
+    };
+    const showStallOverlay = (message) => {
+      if (state.currentView !== 'player' || !state.playerStarted || !dom.videoPlayer.src) return;
+      // Don't show the overlay if the stream is actually advancing; the
+      // 'stalled' event is unreliable enough that we verify with the
+      // clock before committing to a user-visible message.
+      if (dom.videoPlayer.readyState >= 3 && !dom.videoPlayer.paused) return;
+      _stallOverlayShown = true;
+      dom.playerOverlay.classList.remove('hidden');
+      dom.playerOverlay.innerHTML = `
+        <div class="spinner"></div>
+        <p>${message}</p>
+      `;
+    };
     dom.videoPlayer.addEventListener('waiting', () => {
-      if (state.currentView === 'player' && state.playerStarted && dom.videoPlayer.src) {
-        dom.playerOverlay.classList.remove('hidden');
-        dom.playerOverlay.innerHTML = `
-          <div class="spinner"></div>
-          <p>Buffering...</p>
-        `;
-      }
+      showStallOverlay('Buffering...');
     });
     dom.videoPlayer.addEventListener('stalled', () => {
-      if (state.currentView === 'player' && state.playerStarted && dom.videoPlayer.src) {
-        dom.playerOverlay.classList.remove('hidden');
-        dom.playerOverlay.innerHTML = `
-          <div class="spinner"></div>
-          <p>Stream stalled — waiting for data...</p>
-        `;
-      }
+      showStallOverlay('Stream stalled — waiting for data...');
     });
     dom.videoPlayer.addEventListener('playing', () => {
       state.playerStarted = true;
-      dom.playerOverlay.classList.add('hidden');
+      hideStallOverlay();
+    });
+    dom.videoPlayer.addEventListener('canplay', hideStallOverlay);
+    dom.videoPlayer.addEventListener('canplaythrough', hideStallOverlay);
+    dom.videoPlayer.addEventListener('timeupdate', () => {
+      // currentTime advanced since the last tick → the video is
+      // playing back fine, any earlier stall/waiting event was a blip.
+      if (dom.videoPlayer.currentTime > _lastVideoTime) {
+        _lastVideoTime = dom.videoPlayer.currentTime;
+        hideStallOverlay();
+      }
+    });
+    dom.videoPlayer.addEventListener('seeking', () => {
+      _lastVideoTime = dom.videoPlayer.currentTime;
+    });
+    dom.videoPlayer.addEventListener('emptied', () => {
+      _lastVideoTime = 0;
+      _stallOverlayShown = false;
     });
 
     // Auto-fade player controls on touch/mouse inactivity

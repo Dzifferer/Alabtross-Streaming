@@ -96,6 +96,32 @@ sudo systemctl start sshd
 sudo systemctl enable sshd
 ```
 
+## Downloads & Library
+
+```bash
+# What's downloading right now + what's on disk (SSH-friendly)
+./scripts/status.sh
+
+# Raw JSON (pipe into jq)
+./scripts/status.sh --json | jq
+
+# Cleanup: dry-run first (safe, no changes)
+./scripts/cleanup.sh
+
+# Actually delete broken downloads, temp files, and empty dirs
+./scripts/cleanup.sh --apply
+
+# Also remove orphaned video files the library doesn't know about
+./scripts/cleanup.sh --apply --aggressive
+
+# Deep audit: ffprobe-verify every file (slow, catches corrupt files)
+./scripts/cleanup.sh --apply --deep
+```
+
+Both scripts talk to the running `alabtross-mobile` container over
+`http://localhost:8080`. Pass `--host http://albatross:8080` to query a
+different host over the network / Tailscale.
+
 ## Full Setup (re-run)
 
 ```bash

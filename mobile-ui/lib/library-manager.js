@@ -2885,7 +2885,7 @@ class LibraryManager {
     // See torrent-engine.js for rationale on connections/uploads values.
     return {
       connections: 50,
-      uploads: 6,
+      uploads: 0,
       dht: true,
       verify: true,
       path: downloadPath,

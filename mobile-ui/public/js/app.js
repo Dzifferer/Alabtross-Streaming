@@ -4751,9 +4751,28 @@
       const totalSize = packItems.reduce((s, i) => s + (i.fileSize || 0), 0);
       const completedCount = packItems.filter(i => i.status === 'complete').length;
       const failedCount = packItems.filter(i => i.status === 'failed').length;
-      const totalProgress = packItems.length > 0
-        ? Math.round(packItems.reduce((s, i) => s + (i.progress || 0), 0) / packItems.length)
-        : 0;
+      // Weighted progress: aggregate by bytes actually downloaded, not by
+      // episode count. A simple average under-reports progress when episode
+      // sizes differ (common — S01E01 is often a double episode) and misleads
+      // the user about how much of the pack has landed on disk. Fall back to
+      // a per-episode average only if we don't have file sizes yet.
+      // 'complete' items are always counted as 100% regardless of stored
+      // progress — the bitfield-based progress can be 99 when the last piece
+      // rounds down, and stale metadata from older sessions may be missing
+      // progress entirely.
+      const effectivePct = (i) => (i.status === 'complete' ? 100 : (i.progress || 0));
+      let totalProgress;
+      if (totalSize > 0) {
+        const downloadedBytes = packItems.reduce(
+          (s, i) => s + ((i.fileSize || 0) * effectivePct(i) / 100),
+          0,
+        );
+        totalProgress = Math.round((downloadedBytes / totalSize) * 100);
+      } else {
+        totalProgress = packItems.length > 0
+          ? Math.round(packItems.reduce((s, i) => s + effectivePct(i), 0) / packItems.length)
+          : 0;
+      }
       // Aggregate speed/peers (shared engine, so take max — they're the same)
       const speed = Math.max(...packItems.map(i => i.downloadSpeed || 0));
       const peers = Math.max(...packItems.map(i => i.numPeers || 0));
@@ -4884,15 +4903,13 @@
       ? `<img class="download-poster" src="${escapeHTML(pack.poster)}" alt="" loading="lazy">`
       : '<div class="download-poster"></div>';
 
-    const speed = pack.downloadSpeed > 0
-      ? `${(pack.downloadSpeed / 1e6).toFixed(1)} MB/s`
-      : '';
+    // Use formatSpeed/formatSize so slow transfers show KB/s instead of "0.0 MB/s"
+    // and small packs render as "450 MB" instead of "0.4 GB".
+    const speed = pack.downloadSpeed > 0 ? formatSpeed(pack.downloadSpeed) : '';
     const peers = pack.numPeers > 0 ? `${pack.numPeers} peers` : '';
     const meta = [pack.quality, speed, peers].filter(Boolean).join(' \u00b7 ');
 
-    const totalSizeStr = pack.fileSize > 0
-      ? `${(pack.fileSize / 1e9).toFixed(1)} GB`
-      : '';
+    const totalSizeStr = pack.fileSize > 0 ? formatSize(pack.fileSize) : '';
 
     const seasonLabel = pack.season
       ? `S${String(pack.season).padStart(2, '0')}`
@@ -5021,15 +5038,13 @@
       ? `<img class="download-poster" src="${escapeHTML(item.poster)}" alt="" loading="lazy">`
       : '<div class="download-poster"></div>';
 
-    const speed = item.downloadSpeed > 0
-      ? `${(item.downloadSpeed / 1e6).toFixed(1)} MB/s`
-      : '';
+    // Use formatSpeed/formatSize helpers so sub-MB/s transfers don't render as
+    // "0.0 MB/s" and small files don't show "0.01 GB".
+    const speed = item.downloadSpeed > 0 ? formatSpeed(item.downloadSpeed) : '';
     const peers = item.numPeers > 0 ? `${item.numPeers} peers` : '';
     const meta = [item.quality, speed, peers].filter(Boolean).join(' \u00b7 ');
 
-    const sizeStr = item.fileSize > 0
-      ? `${(item.fileSize / 1e9).toFixed(2)} GB`
-      : item.size || '';
+    const sizeStr = item.fileSize > 0 ? formatSize(item.fileSize) : (item.size || '');
 
     const progressClass = item.status === 'complete' ? 'complete'
       : item.status === 'paused' ? 'paused' : '';
@@ -5116,62 +5131,56 @@
         const action = btn.dataset.action;
 
         if (action === 'remove-pack' && packId) {
-          // Remove all episodes in this pack
-          const packDetail = panel.querySelector(`[data-pack-detail="${CSS.escape(packId)}"]`);
-          const epRows = packDetail ? packDetail.querySelectorAll('.pack-episode-row') : [];
-          // Find all item IDs from the current library data
+          // Atomic server-side removal: stops the shared engine before deleting
+          // files and avoids the race window where parallel DELETEs would leave
+          // the engine writing to files we've just unlinked.
           try {
-            const resp = await fetch('/api/library');
-            const data = await resp.json();
-            const packItems = (data.items || []).filter(i => i.packId === packId);
-            await Promise.all(packItems.map(i =>
-              fetch(`/api/library/${encodeURIComponent(i.id)}`, { method: 'DELETE' })
-            ));
+            const r = await fetch(`/api/library/pack/${encodeURIComponent(packId)}`, { method: 'DELETE' });
+            if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || 'Remove failed'); }
             showToast('Season pack removed');
-          } catch { showToast('Failed to remove pack'); }
+          } catch (err) { showToast('Failed to remove pack: ' + err.message); }
           renderDownloads();
           return;
         }
 
         if (action === 'pause-pack' && packId) {
           try {
-            const resp = await fetch('/api/library');
-            const data = await resp.json();
-            const packItems = (data.items || []).filter(i => i.packId === packId && (i.status === 'downloading' || i.status === 'queued'));
-            await Promise.all(packItems.map(i =>
-              fetch(`/api/library/${encodeURIComponent(i.id)}/pause`, { method: 'POST' })
-            ));
+            const r = await fetch('/api/library/pause-pack', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ packId }),
+            });
+            if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || 'Pause failed'); }
             showToast('Pack downloads paused');
-          } catch { showToast('Failed to pause pack'); }
+          } catch (err) { showToast('Failed to pause pack: ' + err.message); }
           renderDownloads();
           return;
         }
 
         if (action === 'resume-pack' && packId) {
           try {
-            const resp = await fetch('/api/library');
-            const data = await resp.json();
-            const packItems = (data.items || []).filter(i => i.packId === packId && i.status === 'paused');
-            await Promise.all(packItems.map(i =>
-              fetch(`/api/library/${encodeURIComponent(i.id)}/resume`, { method: 'POST' })
-            ));
+            const r = await fetch('/api/library/resume-pack', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ packId }),
+            });
+            if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || 'Resume failed'); }
             showToast('Pack downloads resumed');
-          } catch { showToast('Failed to resume pack'); }
+          } catch (err) { showToast('Failed to resume pack: ' + err.message); }
           renderDownloads();
           return;
         }
 
         if (action === 'retry-pack' && packId) {
-          // Retry all failed episodes in this pack
           try {
-            const resp = await fetch('/api/library');
-            const data = await resp.json();
-            const packItems = (data.items || []).filter(i => i.packId === packId && i.status === 'failed');
-            await Promise.all(packItems.map(i =>
-              fetch(`/api/library/${encodeURIComponent(i.id)}/retry`, { method: 'POST' })
-            ));
+            const r = await fetch('/api/library/retry-pack', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ packId }),
+            });
+            if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || 'Retry failed'); }
             showToast('Retrying failed episodes...');
-          } catch { showToast('Failed to retry pack'); }
+          } catch (err) { showToast('Failed to retry pack: ' + err.message); }
           renderDownloads();
           return;
         }
@@ -5200,13 +5209,12 @@
           renderDownloads();
         } else if (action === 'start-pack' && packId) {
           try {
-            const resp = await fetch('/api/library');
-            const data = await resp.json();
-            const firstQueued = (data.items || []).find(i => i.packId === packId && i.status === 'queued');
-            if (firstQueued) {
-              const r = await fetch(`/api/library/${encodeURIComponent(firstQueued.id)}/start`, { method: 'POST' });
-              if (!r.ok) { const d = await r.json(); showToast(d.error || 'Cannot start pack'); }
-            }
+            const r = await fetch('/api/library/start-pack', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ packId }),
+            });
+            if (!r.ok) { const d = await r.json().catch(() => ({})); showToast(d.error || 'Cannot start pack'); }
           } catch { showToast('Failed to start pack'); }
           renderDownloads();
         } else if (action === 'pause') {

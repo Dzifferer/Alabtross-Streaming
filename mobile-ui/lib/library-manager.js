@@ -1890,6 +1890,75 @@ class LibraryManager {
   }
 
   /**
+   * Return one entry per active torrent-stream engine (not per library item).
+   *
+   * Pack engines are keyed by packId and shared by every episode in the pack,
+   * so iterating library items directly would inflate counts — e.g. a 55-ep
+   * Breaking Bad pack with 7 peers would look like 55 "torrents" × 7 peers =
+   * 385 peers, when there's actually one swarm with 7 peers. This method
+   * consolidates each engine into a single row, tags the currently-selected
+   * file in sequential pack mode, and exposes both download and upload speed.
+   *
+   * Used by /api/diagnostics/system.
+   */
+  getActiveEngineStats() {
+    const results = [];
+    for (const [engineKey, engine] of this._engines) {
+      if (!engine) continue;
+      const sw = engine.swarm;
+      const downloadBps = sw ? sw.downloadSpeed() : 0;
+      const uploadBps = sw ? sw.uploadSpeed() : 0;
+      const peers = sw ? sw.wires.length : 0;
+
+      // Collect every library item that maps to this engine. Pack engines
+      // are keyed by packId; standalone-item engines are keyed by item id.
+      const members = [];
+      for (const item of this._items.values()) {
+        if (item.packId === engineKey || item.id === engineKey) {
+          members.push(item);
+        }
+      }
+
+      const isPack = members.some(i => i.packId === engineKey);
+      let name;
+      let activeFileName = null;
+      if (isPack) {
+        const first = members[0];
+        name = (first && (first.showName || first.name)) || 'Unknown pack';
+        // In sequential pack mode, only one file is .select()ed at a time.
+        const activeItem = this._pickNextPackItem(engineKey);
+        if (activeItem) {
+          activeFileName = activeItem.fileName || activeItem.name || null;
+        }
+      } else if (members.length > 0) {
+        name = members[0].name || 'Unknown';
+        activeFileName = members[0].fileName || null;
+      } else {
+        // Engine exists but no item references it — shouldn't normally
+        // happen, but don't crash the diag endpoint over it.
+        name = 'Orphaned engine';
+      }
+
+      const downloadingCount = members.filter(i => i.status === 'downloading').length;
+      const completeCount = members.filter(i => i.status === 'complete').length;
+
+      results.push({
+        engineKey,
+        name,
+        isPack,
+        activeFileName,
+        downloadBps,
+        uploadBps,
+        peers,
+        itemCount: members.length,
+        downloadingCount,
+        completeCount,
+      });
+    }
+    return results;
+  }
+
+  /**
    * Retry a failed download. Resets status and re-starts the torrent engine.
    */
   retryItem(id) {

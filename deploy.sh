@@ -1,18 +1,28 @@
 #!/usr/bin/env bash
 # Quick deploy — pull latest from main and restart Albatross
 #
-# Usage: ./deploy.sh [--no-cache]
-#   --no-cache   Force a clean Docker rebuild (also re-pulls the base image).
-#                Use this when a base image or pinned dependency changed.
+# Usage: ./deploy.sh [--no-cache] [--skip-diagnostics]
+#   --no-cache          Force a clean Docker rebuild (also re-pulls the base
+#                       image). Use this when a base image or pinned
+#                       dependency changed.
+#   --skip-diagnostics  Don't run ./diagnostics.sh after the deploy completes.
 set -e
 
 cd "$(dirname "$0")"
 
 BUILD_FLAGS=""
-if [[ "${1:-}" == "--no-cache" ]]; then
-  BUILD_FLAGS="--no-cache --pull"
-  echo "==> Clean rebuild requested (--no-cache --pull)"
-fi
+RUN_DIAGNOSTICS=1
+for arg in "$@"; do
+  case "$arg" in
+    --no-cache)
+      BUILD_FLAGS="--no-cache --pull"
+      echo "==> Clean rebuild requested (--no-cache --pull)"
+      ;;
+    --skip-diagnostics)
+      RUN_DIAGNOSTICS=0
+      ;;
+  esac
+done
 
 # Load secrets from .env file (not tracked in git)
 if [ -f .env ]; then
@@ -66,3 +76,15 @@ if command -v tailscale &>/dev/null && tailscale status &>/dev/null; then
 fi
 
 echo "==> Done! Albatross is live at https://albatross (and http://localhost:8080)"
+
+# Run the master diagnostics so a deploy doesn't end with "looks fine" when
+# something downstream (Tailscale, Stremio container, external drive, etc.)
+# is actually broken. Skip with --skip-diagnostics if you're iterating fast.
+if (( RUN_DIAGNOSTICS )) && [[ -x ./diagnostics.sh ]]; then
+  echo ""
+  echo "==> Running post-deploy diagnostics..."
+  # Don't fail the deploy on warnings — diagnostics returns non-zero only on
+  # critical failures, which we want to surface but the container itself is
+  # already up at this point.
+  ./diagnostics.sh || echo "==> Diagnostics reported failures — review the output above."
+fi

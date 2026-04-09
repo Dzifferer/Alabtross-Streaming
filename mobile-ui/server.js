@@ -1688,6 +1688,40 @@ app.delete('/api/library/pack/:packId', rateLimit, (req, res) => {
   res.json({ success: true });
 });
 
+// POST /api/library/conversions/pause-all — manually freeze every running
+// background conversion via SIGSTOP so the CPU is free for other work.
+// The ffmpeg children stay alive holding their partial .converting.mp4
+// temp files, so resume-all picks up exactly where they stopped — no
+// re-encode from scratch. Also prevents new pending conversions from
+// starting until resume-all is called.
+app.post('/api/library/conversions/pause-all', rateLimit, (req, res) => {
+  const result = library.pauseAllConversions();
+  res.json({ success: true, ...result });
+});
+
+// POST /api/library/conversions/resume-all — SIGCONT every frozen
+// conversion and kick the pending queue so anything held while paused
+// starts running.
+app.post('/api/library/conversions/resume-all', rateLimit, (req, res) => {
+  const result = library.resumeAllConversions();
+  res.json({ success: true, ...result });
+});
+
+// POST /api/library/conversions/stop-queue — clear the pending-conversion
+// queue. Does NOT stop currently-running conversions; use pause-all for
+// that. Items fall back to on-the-fly remux/transcode for playback.
+app.post('/api/library/conversions/stop-queue', rateLimit, (req, res) => {
+  const result = library.stopConversionQueue();
+  res.json({ success: true, ...result });
+});
+
+// GET /api/library/conversions/status — snapshot of the conversion
+// pipeline: global manual-pause flag, active conversions (with per-proc
+// paused state + progress), and the pending queue.
+app.get('/api/library/conversions/status', (req, res) => {
+  res.json(library.getConversionsPauseState());
+});
+
 // POST /api/library/reorder-pack — reorder a queued pack in the queue
 app.post('/api/library/reorder-pack', rateLimit, (req, res) => {
   const { packId, position } = req.body;

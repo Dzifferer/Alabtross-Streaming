@@ -83,6 +83,14 @@ class LibraryManager {
     this._progressTimers = new Map(); // id -> interval timer
     this._convertProcesses = new Map(); // id -> FFmpeg child process (active conversions)
     this._maxConcurrentConversions = 1;
+    // Manual global pause flag for the background-conversion pipeline.
+    // Set by pauseAllConversions (SIGSTOP's every running ffmpeg), cleared
+    // by resumeAllConversions. While set, _processConversionQueue and
+    // _checkAndConvert hold items as _pendingConversion instead of
+    // spawning new ffmpeg children. In-memory only — does NOT persist
+    // across restarts by design (interrupted conversions auto-resume on
+    // next startup via _resumeInterruptedConversions).
+    this._conversionsPaused = false;
     this._metadataSaveTimer = null;
     this._discoveryCache = null;      // cached result of _discoverUntrackedFiles
     this._discoveryCacheTs = 0;       // timestamp of last discovery scan
@@ -2517,12 +2525,14 @@ class LibraryManager {
   getConversionState(id) {
     const item = this._items.get(id);
     if (!item) return null;
-    const active = this._convertProcesses.has(id);
+    const proc = this._convertProcesses.get(id);
+    const active = !!proc;
     const pending = !!item._pendingConversion;
     if (!active && !pending && item.status !== 'converting') return null;
     return {
       active,
       pending,
+      paused: active ? !!proc._manuallyPaused : false,
       kind: item.convertKind || item._pendingConvertKind || null,
       progress: item.convertProgress || 0,
     };
@@ -2539,7 +2549,13 @@ class LibraryManager {
     }
     // Kill active conversions — they keep status='converting' for auto-resume on restart
     for (const [id, proc] of this._convertProcesses) {
-      try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+      try {
+        if (proc._manuallyPaused) {
+          proc.kill('SIGCONT');
+          proc._manuallyPaused = false;
+        }
+        proc.kill('SIGTERM');
+      } catch { /* ignore */ }
     }
     this._convertProcesses.clear();
     // Downloads keep status='downloading' so they auto-resume on next startup
@@ -3537,6 +3553,16 @@ class LibraryManager {
       return;
     }
 
+    // Same story under a manual pause — hold the item pending until
+    // resumeAllConversions kicks _processConversionQueue.
+    if (this._conversionsPaused) {
+      console.log(`[Library] Holding conversion of "${item.name}" (${kind}) — manually paused`);
+      item._pendingConversion = true;
+      item._pendingConvertKind = kind;
+      item._probeDuration = probe.duration;
+      return;
+    }
+
     item.status = 'converting';
     item.convertKind = kind;
     item.convertProgress = 0;
@@ -3853,12 +3879,20 @@ class LibraryManager {
   }
 
   /**
-   * Kill an active conversion process for the given item.
+   * Kill an active conversion process for the given item. If the process
+   * is currently SIGSTOP'd by pauseAllConversions it has to be SIGCONT'd
+   * first — a stopped process won't act on SIGTERM until it's resumed.
    */
   _stopConversion(id) {
     const proc = this._convertProcesses.get(id);
     if (proc) {
-      try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+      try {
+        if (proc._manuallyPaused) {
+          proc.kill('SIGCONT');
+          proc._manuallyPaused = false;
+        }
+        proc.kill('SIGTERM');
+      } catch { /* ignore */ }
       this._convertProcesses.delete(id);
     }
   }
@@ -3871,6 +3905,8 @@ class LibraryManager {
   _processConversionQueue() {
     if (this._convertProcesses.size >= this._maxConcurrentConversions) return;
     if (this._hasActiveDownloads()) return;
+    // Manual pause: hold everything until resumeAllConversions fires.
+    if (this._conversionsPaused) return;
 
     const pending = [...this._items.values()].find(i => i._pendingConversion);
     if (!pending) return;
@@ -3931,7 +3967,15 @@ class LibraryManager {
       const name = item ? item.name : id;
       console.log(`[Library] Pausing conversion "${name}" to free CPU for downloads`);
       proc._pausedForDownloads = true;
-      try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+      try {
+        // SIGTERM to a SIGSTOP'd child is queued until SIGCONT, so
+        // unfreeze it first if the manual-pause path had it stopped.
+        if (proc._manuallyPaused) {
+          proc.kill('SIGCONT');
+          proc._manuallyPaused = false;
+        }
+        proc.kill('SIGTERM');
+      } catch { /* ignore */ }
     }
   }
 
@@ -3972,6 +4016,129 @@ class LibraryManager {
     delete item._probeDuration;
 
     this._saveMetadata();
+  }
+
+  /**
+   * Manually pause every running background conversion to free CPU for
+   * other work. Sends SIGSTOP to each ffmpeg child — unlike the SIGTERM
+   * path used by _pauseRunningConversionsForDownloads, SIGSTOP freezes
+   * the process in place without killing it, so the partial
+   * `.converting.mp4` temp file is preserved and resumeAllConversions
+   * picks up exactly where it stopped (no re-encode from scratch).
+   *
+   * Also sets this._conversionsPaused so _processConversionQueue and
+   * _checkAndConvert hold newly-eligible items as _pendingConversion
+   * instead of spawning new ffmpegs while the pause is active.
+   *
+   * Returns { paused, pending }: count of active conversions frozen and
+   * count of items that are currently held in the pending queue.
+   */
+  pauseAllConversions() {
+    this._conversionsPaused = true;
+    let paused = 0;
+    for (const [id, proc] of this._convertProcesses) {
+      if (proc._manuallyPaused) continue;
+      try {
+        proc.kill('SIGSTOP');
+        proc._manuallyPaused = true;
+        paused++;
+        const item = this._items.get(id);
+        console.log(`[Library] Paused conversion "${item ? item.name : id}" (SIGSTOP)`);
+      } catch (err) {
+        console.error(`[Library] Failed to pause conversion ${id}: ${err.message}`);
+      }
+    }
+    const pending = [...this._items.values()].filter(i => i._pendingConversion).length;
+    console.log(`[Library] Conversions paused: ${paused} active frozen, ${pending} pending held`);
+    return { paused, pending };
+  }
+
+  /**
+   * Resume every manually-paused conversion. Clears this._conversionsPaused,
+   * sends SIGCONT to each frozen ffmpeg child so it picks up from where
+   * SIGSTOP paused it, then kicks _processConversionQueue so any items
+   * that became pending while paused can start.
+   *
+   * Returns { resumed }: count of active conversions un-frozen.
+   */
+  resumeAllConversions() {
+    this._conversionsPaused = false;
+    let resumed = 0;
+    for (const [id, proc] of this._convertProcesses) {
+      if (!proc._manuallyPaused) continue;
+      try {
+        proc.kill('SIGCONT');
+        proc._manuallyPaused = false;
+        resumed++;
+        const item = this._items.get(id);
+        console.log(`[Library] Resumed conversion "${item ? item.name : id}" (SIGCONT)`);
+      } catch (err) {
+        console.error(`[Library] Failed to resume conversion ${id}: ${err.message}`);
+      }
+    }
+    // Start anything that was held in the pending queue while paused.
+    this._processConversionQueue();
+    return { resumed };
+  }
+
+  /**
+   * Clear the background-conversion pending queue without touching any
+   * currently-running conversion. Items marked _pendingConversion are
+   * reverted to plain 'complete' state; on-the-fly remux/transcode
+   * continues to handle playback for those files, and the startup
+   * sweep will re-queue them on the next restart unless they also
+   * get `conversionCheckedAt` stamped externally.
+   *
+   * Use pauseAllConversions (not this) to stop the in-flight ffmpeg.
+   *
+   * Returns { cleared }: count of pending items dropped from the queue.
+   */
+  stopConversionQueue() {
+    let cleared = 0;
+    for (const item of this._items.values()) {
+      if (!item._pendingConversion) continue;
+      delete item._pendingConversion;
+      delete item._pendingConvertKind;
+      delete item._probeDuration;
+      cleared++;
+      console.log(`[Library] Cleared pending conversion for "${item.name}"`);
+    }
+    if (cleared > 0) this._saveMetadata();
+    return { cleared };
+  }
+
+  /**
+   * Snapshot of the conversion pipeline for the UI: global manual-pause
+   * flag, the currently-active conversion(s) with per-process paused
+   * state, and the pending queue.
+   */
+  getConversionsPauseState() {
+    const active = [];
+    for (const [id, proc] of this._convertProcesses) {
+      const item = this._items.get(id);
+      if (!item) continue;
+      active.push({
+        id,
+        name: item.name,
+        kind: item.convertKind || null,
+        progress: item.convertProgress || 0,
+        paused: !!proc._manuallyPaused,
+      });
+    }
+    const pending = [];
+    for (const item of this._items.values()) {
+      if (!item._pendingConversion) continue;
+      pending.push({
+        id: item.id,
+        name: item.name,
+        kind: item._pendingConvertKind || null,
+      });
+    }
+    return {
+      paused: !!this._conversionsPaused,
+      active,
+      pending,
+    };
   }
 
   _sanitizeItem(item) {

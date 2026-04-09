@@ -15,7 +15,13 @@ const torrentStream = require('torrent-stream');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
-const { VIDEO_EXTENSIONS, TRACKERS, isFileNameSafe, getMimeType } = require('./file-safety');
+const {
+  VIDEO_EXTENSIONS,
+  TRACKERS,
+  isFileNameSafe,
+  getMimeType,
+  scheduleMetadataTimeout,
+} = require('./file-safety');
 const { PeerManager } = require('./peer-manager');
 
 const DEFAULT_MAX_CONCURRENT_DOWNLOADS = 5;
@@ -172,11 +178,13 @@ class LibraryManager {
    *
    * Fixes the common failure mode where a container restart triggers
    * _resumeInterruptedDownloads() for items whose torrents can no longer
-   * reach metadata within the 90s timeout — even though the underlying
+   * reach metadata within the adaptive window — even though the underlying
    * files had long since finished downloading to disk. Without this
    * recovery, those items get stuck permanently in 'failed' with
-   * "Torrent metadata timeout (90s) on resume" until the user manually
-   * retries each one.
+   * "Torrent metadata timeout on resume" until the user manually
+   * retries each one. (The adaptive timeout in file-safety.js made this
+   * much rarer, but the recovery path stays as a safety net for dead
+   * torrents whose files happen to be on disk from a prior run.)
    *
    * Runs once at startup via the async init chain. Stats are issued in
    * bounded-concurrency batches using fs.promises.stat so the event
@@ -809,19 +817,21 @@ class LibraryManager {
       this._attachPeerManager(engine, `pack ${infoHash.slice(0, 8)}`);
       this._startIncomingListener(engine, `pack ${infoHash.slice(0, 8)}`);
 
-      const timeout = setTimeout(() => {
+      // Adaptive metadata timeout — see scheduleMetadataTimeout() in
+      // file-safety.js. 180s baseline + 90s extension if peers are connected.
+      const timeout = scheduleMetadataTimeout(engine, `pack ${infoHash.slice(0, 8)}`, () => {
         this._destroyEngine(engine);
-        reject(new Error('Torrent metadata timeout (90s) — try a torrent with more seeds'));
-      }, 90000);
+        reject(new Error('Torrent metadata timeout — try a torrent with more seeds'));
+      });
 
       engine.on('error', (err) => {
-        clearTimeout(timeout);
+        timeout.clear();
         this._destroyEngine(engine);
         reject(err);
       });
 
       engine.on('ready', () => {
-        clearTimeout(timeout);
+        timeout.clear();
 
         // Find all video files, excluding samples/trailers/promos and tiny junk files
         const PACK_MIN_FILE_SIZE = 10 * 1024 * 1024; // 10 MB — skip promo/ad files
@@ -970,19 +980,21 @@ class LibraryManager {
       this._attachPeerManager(engine, `scan ${infoHash.slice(0, 8)}`);
       this._startIncomingListener(engine, `scan ${infoHash.slice(0, 8)}`);
 
-      const timeout = setTimeout(() => {
+      // Adaptive metadata timeout — see scheduleMetadataTimeout() in
+      // file-safety.js. 180s baseline + 90s extension if peers are connected.
+      const timeout = scheduleMetadataTimeout(engine, `scan ${infoHash.slice(0, 8)}`, () => {
         this._destroyEngine(engine);
-        reject(new Error('Torrent metadata timeout (90s) — try a torrent with more seeds'));
-      }, 90000);
+        reject(new Error('Torrent metadata timeout — try a torrent with more seeds'));
+      });
 
       engine.on('error', (err) => {
-        clearTimeout(timeout);
+        timeout.clear();
         this._destroyEngine(engine);
         reject(err);
       });
 
       engine.on('ready', () => {
-        clearTimeout(timeout);
+        timeout.clear();
 
         // Find all usable video files, excluding samples/trailers/promos and tiny junk files
         const PACK_MIN_FILE_SIZE = 10 * 1024 * 1024; // 10 MB — skip promo/ad files
@@ -1429,22 +1441,27 @@ class LibraryManager {
     // (engine is usable before 'ready' — it just won't have files yet)
     this._engines.set(packId, engine);
 
-    const timeout = setTimeout(() => {
+    // Adaptive metadata timeout — see scheduleMetadataTimeout() in
+    // file-safety.js. Resume hits this path particularly hard on cold
+    // container restarts because the DHT routing table is empty, so a
+    // flat 90s budget used to strand every pack whose torrent still had
+    // live peers but couldn't exchange infoDict fast enough.
+    const timeout = scheduleMetadataTimeout(engine, `resume ${first.infoHash.slice(0, 8)}`, () => {
       // Fail ALL downloading items for this pack, not just the ones passed in
       for (const [, item] of this._items) {
         if (item.packId === packId && item.status === 'downloading') {
           item.status = 'failed';
-          item.error = 'Torrent metadata timeout (90s) on resume';
+          item.error = 'Torrent metadata timeout on resume';
         }
       }
       this._destroyEngine(engine);
       this._engines.delete(packId);
       this._saveMetadata();
       this._processQueue();
-    }, 90000);
+    });
 
     engine.on('error', (err) => {
-      clearTimeout(timeout);
+      timeout.clear();
       for (const [, item] of this._items) {
         if (item.packId === packId && item.status === 'downloading') {
           item.status = 'failed';
@@ -1458,7 +1475,7 @@ class LibraryManager {
     });
 
     engine.on('ready', () => {
-      clearTimeout(timeout);
+      timeout.clear();
 
       // Deselect all files first
       for (const f of engine.files) f.deselect();
@@ -2614,19 +2631,21 @@ class LibraryManager {
     this._engines.set(id, engine);
     this._startPeriodicSave();
 
-    const timeout = setTimeout(() => {
+    // Adaptive metadata timeout — see scheduleMetadataTimeout() in
+    // file-safety.js. 180s baseline + 90s extension if peers are connected.
+    const timeout = scheduleMetadataTimeout(engine, `dl ${item.infoHash.slice(0, 8)}`, () => {
       if (item.status === 'downloading' && !item.filePath) {
         console.error(`[Library] Metadata timeout for "${item.name}"`);
         item.status = 'failed';
-        item.error = 'Torrent metadata timeout (90s) — try a torrent with more seeds';
+        item.error = 'Torrent metadata timeout — try a torrent with more seeds';
         this._stopDownload(id);
         this._saveMetadata();
         this._processQueue();
       }
-    }, 90000);
+    });
 
     engine.on('ready', () => {
-      clearTimeout(timeout);
+      timeout.clear();
 
       // Find the best video file
       const file = this._selectVideoFile(engine.files);
@@ -2697,7 +2716,7 @@ class LibraryManager {
     });
 
     engine.on('error', (err) => {
-      clearTimeout(timeout);
+      timeout.clear();
       console.error(`[Library] Download error for "${item.name}": ${err.message}`);
       item.status = 'failed';
       item.error = err.message;

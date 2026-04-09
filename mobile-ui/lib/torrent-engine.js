@@ -21,7 +21,13 @@ const { spawn } = require('child_process');
 const { Transform } = require('stream');
 const fs = require('fs');
 const path = require('path');
-const { TRACKERS, isFileNameSafe, getMimeType, sanitizeFilename } = require('./file-safety');
+const {
+  TRACKERS,
+  isFileNameSafe,
+  getMimeType,
+  sanitizeFilename,
+  scheduleMetadataTimeout,
+} = require('./file-safety');
 const { PeerManager } = require('./peer-manager');
 
 const IDLE_TIMEOUT = 30 * 60 * 1000; // 30 minutes
@@ -135,7 +141,7 @@ class TorrentEngine {
       }
 
       // Log peer count when it changes, not every 10 seconds. The old
-      // behavior spammed `peers: 0, queued: 0` for the full 90s metadata
+      // behavior spammed `peers: 0, queued: 0` for the full metadata
       // window on dead torrents, which made logs noisy and was the only
       // signal coming from a torrent that was going nowhere.
       let lastPeers = -1;
@@ -152,18 +158,23 @@ class TorrentEngine {
         }
       }, 10000);
 
-      const timeout = setTimeout(() => {
+      // Adaptive metadata timeout — see scheduleMetadataTimeout() in
+      // file-safety.js for the full rationale. Fires at 180s baseline
+      // (instead of the old 90s flat), with a one-shot 90s extension
+      // when peers are connected so we don't kill an in-progress
+      // ut_metadata exchange.
+      const timeout = scheduleMetadataTimeout(engine, `stream ${hash.slice(0, 8)}`, () => {
         clearInterval(peerLog);
         if (!this._active.has(hash) || !this._active.get(hash).files) {
           try { peerMgr.destroy(); } catch { /* ignore */ }
           engine.destroy();
           this._active.delete(hash);
-          reject(new Error('Torrent metadata timeout (90s) — try a torrent with more seeds'));
+          reject(new Error('Torrent metadata timeout — try a torrent with more seeds'));
         }
-      }, 90000);
+      });
 
       engine.on('ready', () => {
-        clearTimeout(timeout);
+        timeout.clear();
         clearInterval(peerLog);
         const peerCount = engine.swarm ? engine.swarm.wires.length : 0;
         console.log(`[TorrentEngine] Torrent ready: "${engine.torrent.name}", ${engine.files.length} files, ${peerCount} peers`);
@@ -202,7 +213,7 @@ class TorrentEngine {
       });
 
       engine.on('error', (err) => {
-        clearTimeout(timeout);
+        timeout.clear();
         clearInterval(peerLog);
         try { peerMgr.destroy(); } catch { /* ignore */ }
         console.error(`[TorrentEngine] Engine error for ${hash}: ${err.message}`);

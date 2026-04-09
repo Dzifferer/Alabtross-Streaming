@@ -101,12 +101,101 @@ function sanitizeFilename(filename) {
   return path.basename(filename).replace(/[^\w\s.\-()[\]]/g, '_').replace(/["\\]/g, '_').substring(0, 200);
 }
 
+// ─── Metadata-fetch timeout ─────────────────────────
+//
+// How long to wait for a torrent engine to emit 'ready' (i.e. finish
+// fetching the infoDict via ut_metadata) before giving up.
+//
+// The old flat 90s limit was the single biggest cause of download failures
+// in practice. On a cold container start, DHT bootstrap + tracker announce
+// + peer handshake + ut_metadata exchange legitimately take well over 90s
+// for anything but the most heavily-seeded torrents. Resumes are hit
+// particularly hard because there is no warm DHT routing table to reuse,
+// so every pack that failed to reach metadata within 90s on resume got
+// permanently stuck in 'failed' — even though the files were usually
+// already complete on disk.
+//
+// The fix has two parts:
+//   1. Raise the baseline from 90s → 180s. This alone covers the majority
+//      of real-world cold-start metadata fetches observed in the field.
+//   2. Adaptive extension. If the baseline expires AND the engine has
+//      connected peers, grant one 90s extension. Connected peers almost
+//      always means we're actively receiving the metadata piece stream
+//      but just haven't finished reassembling it yet — killing the engine
+//      in that window throws away real progress and guarantees another
+//      cold start on the next retry.
+//
+// Worst-case wait is METADATA_TIMEOUT_MS + METADATA_EXTENSION_MS = 270s.
+// Torrents that truly have no peers fall through the extension check
+// immediately, so dead torrents still fail at the baseline (no regression).
+const METADATA_TIMEOUT_MS = 180 * 1000;
+const METADATA_EXTENSION_MS = 90 * 1000;
+
+/**
+ * Schedule an adaptive metadata-fetch timeout on a torrent-stream engine.
+ *
+ * Returns an object with a `clear()` method that MUST be called from the
+ * engine's 'ready' and 'error' handlers to cancel the pending timer(s).
+ *
+ * When the baseline fires we look at engine.swarm.wires: if any peers are
+ * connected, log and extend once by METADATA_EXTENSION_MS before giving up.
+ * If no peers are connected, fail immediately — there is nothing to wait
+ * for and extending would just defer the inevitable user-visible error.
+ *
+ * onTimeout is invoked at most once, either at the baseline (dead torrent)
+ * or after the extension (connected peers that still couldn't deliver the
+ * infoDict). It is the caller's responsibility to destroy the engine and
+ * mark the item failed — this helper only owns the timer.
+ *
+ * The label parameter is used purely for log output so operators can tell
+ * which download is extending its metadata window.
+ */
+function scheduleMetadataTimeout(engine, label, onTimeout) {
+  let handle = null;
+  let extended = false;
+  let cancelled = false;
+
+  const fire = () => {
+    if (cancelled) return;
+    const peers = (engine && engine.swarm && engine.swarm.wires)
+      ? engine.swarm.wires.length
+      : 0;
+    if (peers > 0 && !extended) {
+      extended = true;
+      console.warn(
+        `[MetadataTimeout] ${label}: baseline ${METADATA_TIMEOUT_MS / 1000}s ` +
+        `elapsed with ${peers} peer(s) connected — extending ` +
+        `${METADATA_EXTENSION_MS / 1000}s for metadata exchange to complete`
+      );
+      handle = setTimeout(fire, METADATA_EXTENSION_MS);
+      return;
+    }
+    handle = null;
+    onTimeout();
+  };
+
+  handle = setTimeout(fire, METADATA_TIMEOUT_MS);
+
+  return {
+    clear() {
+      cancelled = true;
+      if (handle) {
+        clearTimeout(handle);
+        handle = null;
+      }
+    },
+  };
+}
+
 module.exports = {
   VIDEO_EXTENSIONS,
   DANGEROUS_EXTENSIONS,
   TRACKERS,
   MIME_TYPES,
+  METADATA_TIMEOUT_MS,
+  METADATA_EXTENSION_MS,
   isFileNameSafe,
   getMimeType,
   sanitizeFilename,
+  scheduleMetadataTimeout,
 };

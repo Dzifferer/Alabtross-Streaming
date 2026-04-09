@@ -108,9 +108,17 @@ class LibraryManager {
       // Auto-resume any downloads/conversions that were interrupted
       // (power loss, crash, restart).
       this._resumeInterruptedDownloads();
-      this._resumeInterruptedConversions();
+      await this._resumeInterruptedConversions();
       // Auto-repair season metadata for packs.
       this.repairPackMetadata();
+      // Sweep the library for files that should be pre-transcoded to
+      // universal H.264/AAC/MP4 so live transcoding never has to run.
+      // Fire-and-forget: the sweep yields between probes and queues
+      // conversions through the normal concurrency cap, so it's safe
+      // to let it run alongside Express and active downloads.
+      this._scanCompleteItemsForConversion().catch(err => {
+        console.error('[Library] Conversion sweep failed:', err);
+      });
     } catch (err) {
       console.error('[Library] Async init failed:', err);
     }
@@ -2169,6 +2177,26 @@ class LibraryManager {
     return this._probeFile(filePath);
   }
 
+  /**
+   * Return the current background-conversion state for an item, or null
+   * if none is running or queued. Used by the live transcode endpoint
+   * to detect CPU contention (and tell the client to wait) and by the
+   * probe endpoint to expose convertKind + progress in its response.
+   */
+  getConversionState(id) {
+    const item = this._items.get(id);
+    if (!item) return null;
+    const active = this._convertProcesses.has(id);
+    const pending = !!item._pendingConversion;
+    if (!active && !pending && item.status !== 'converting') return null;
+    return {
+      active,
+      pending,
+      kind: item.convertKind || item._pendingConvertKind || null,
+      progress: item.convertProgress || 0,
+    };
+  }
+
   destroy() {
     console.log('[Library] Shutting down — saving download state for resumption...');
     if (this._metadataSaveTimer) {
@@ -2542,7 +2570,7 @@ class LibraryManager {
     this._processQueue();
   }
 
-  _resumeInterruptedConversions() {
+  async _resumeInterruptedConversions() {
     const toConvert = [...this._items.values()].filter(i => i._needsConversion);
     if (toConvert.length === 0) return;
 
@@ -2578,8 +2606,43 @@ class LibraryManager {
         item.filePath = item.originalFilePath;
       }
 
-      console.log(`[Library] Resuming conversion: "${item.name}"`);
-      this._startConversion(item.id);
+      // Re-probe to recover convertKind — it may not be in metadata if
+      // the item was written out before this field existed, and we
+      // want to be sure the kind still matches the current source
+      // (e.g. user replaced the file).
+      const probe = await this._probeFile(fullPath);
+      if (!probe.probeOk) {
+        console.error(`[Library] Cannot resume conversion for "${item.name}" — probe failed: ${probe.reason}`);
+        item.status = 'complete';
+        item.convertError = `Resume probe failed: ${probe.reason}`;
+        item.convertKind = null;
+        continue;
+      }
+      const kind = this._classifyConversionKind(probe);
+      if (!kind) {
+        console.log(`[Library] "${item.name}" no longer needs conversion — marking complete`);
+        item.status = 'complete';
+        item.convertKind = null;
+        item.convertProgress = null;
+        item.conversionCheckedAt = Date.now();
+        continue;
+      }
+      item.convertKind = kind;
+      item._probeDuration = probe.duration;
+
+      console.log(`[Library] Resuming ${kind}: "${item.name}"`);
+      // Go through _checkAndConvert so the concurrency cap is honoured —
+      // 10 interrupted conversions should NOT spawn 10 ffmpeg at once.
+      if (this._convertProcesses.size >= this._maxConcurrentConversions) {
+        item._pendingConversion = true;
+        item._pendingConvertKind = kind;
+        item.status = 'complete'; // keep out of the "in-flight" set until started
+      } else {
+        item.status = 'converting';
+        item.convertProgress = 0;
+        this._startPeriodicSave();
+        this._startConversion(item.id);
+      }
     }
 
     this._saveMetadata();
@@ -2588,7 +2651,14 @@ class LibraryManager {
   _saveMetadata() {
     try {
       const data = [...this._items.values()].map(item => {
-        const { _needsResume, _needsConversion, _pendingConversion, _probeDuration, ...clean } = item;
+        const {
+          _needsResume,
+          _needsConversion,
+          _pendingConversion,
+          _pendingConvertKind,
+          _probeDuration,
+          ...clean
+        } = item;
         return clean;
       });
       const json = JSON.stringify(data, null, 2);
@@ -2780,25 +2850,68 @@ class LibraryManager {
   }
 
   /**
-   * Decide what the server should do on permanent (background) conversion.
-   * This is capability-AGNOSTIC — it runs at download time when we don't
-   * know which client will eventually play the file. The goal is to fix
-   * cheap problems (MKV container, AC-3 audio) with a stream-copy remux.
-   * HEVC video is left alone because transcoding is expensive; the
-   * on-the-fly /stream/transcode endpoint handles HEVC for clients that
-   * can't decode it.
+   * Decide what background conversion (if any) should run against a probed
+   * file. This is capability-AGNOSTIC — it runs at download time when we
+   * don't know which client will eventually play the file. The goal is to
+   * land every file on disk as a UNIVERSALLY direct-playable MP4 so we
+   * NEVER have to transcode on the fly. On-the-fly libx264 on Jetson Orin
+   * Nano CPU is borderline real-time for 1080p and hopeless for 4K /
+   * HEVC sources, which is exactly why the live /stream/transcode path
+   * times out on files like 10-bit x265 or DV/HDR rips.
    *
-   * Returns true when the file would benefit from a cheap remux.
+   * Universal direct-play target (what every modern browser can decode
+   * without any server ffmpeg in the loop):
+   *   Video : H.264 Baseline/Main/High, 8-bit, 4:2:0 (yuv420p / yuvj420p)
+   *   Audio : AAC (stereo or surround — the client downmixes if needed)
+   *   Container : .mp4 or .m4v with a faststart moov
+   *
+   * Returns one of:
+   *   null         — already universal, leave it alone
+   *   'remux'      — video is universal but container/audio need a cheap
+   *                  stream-copy remux (no video re-encode, fast)
+   *   'transcode'  — video must be re-encoded to hit the universal target
+   *                  (HEVC, 10-bit, VP9, MPEG4, DV, HDR, high-profile
+   *                  variants browsers can't decode in software). This
+   *                  is the slow path but runs once per file and the
+   *                  stored result plays instantly forever after.
    */
-  _isServerConvertible(probe) {
-    if (!probe || !probe.probeOk) return false;
-    // Video codec must be stream-copyable (h264 or hevc). For anything else
-    // we'd need a full transcode — too expensive for background conversion.
-    if (!['h264', 'hevc'].includes(probe.videoCodec)) return false;
+  _classifyConversionKind(probe) {
+    if (!probe || !probe.probeOk || !probe.videoCodec) return null;
+
+    // Strict allowlist for the video side. Anything outside this must
+    // be re-encoded. Note that HEVC is INTENTIONALLY excluded even
+    // though some clients can decode it — browser HEVC support is so
+    // uneven across platforms (Firefox/Linux has none; Chrome needs HW;
+    // Safari mostly works) that storing it guarantees on-the-fly
+    // transcode for a non-trivial slice of playbacks, which is exactly
+    // what this classifier exists to prevent.
+    const H264_OK_PROFILES = new Set([
+      '', // profile unknown — trust pix_fmt
+      'baseline',
+      'constrained baseline',
+      'main',
+      'high',
+      'high progressive',
+      'progressive high',
+    ]);
+    const H264_OK_PIXFMTS = new Set(['', 'yuv420p', 'yuvj420p']);
+
+    const profile = (probe.videoProfile || '').toLowerCase();
+    const pix = (probe.pixFmt || '').toLowerCase();
+
+    const videoUniversal = (
+      probe.videoCodec === 'h264' &&
+      H264_OK_PROFILES.has(profile) &&
+      H264_OK_PIXFMTS.has(pix)
+    );
+
+    if (!videoUniversal) return 'transcode';
+
     const containerOk = probe.ext === '.mp4' || probe.ext === '.m4v';
-    const audioOk = !probe.hasAudio || ['aac', 'mp3'].includes(probe.audioCodec);
-    // Only convert if at least one thing is wrong that a remux can fix.
-    return !containerOk || !audioOk;
+    const audioOk = !probe.hasAudio || probe.audioCodec === 'aac';
+
+    if (!containerOk || !audioOk) return 'remux';
+    return null;
   }
 
   /**
@@ -2807,14 +2920,21 @@ class LibraryManager {
    * NOT enough — Firefox will happily parse the metadata of a 10-bit
    * H.264 High 10 file, report codec_name=h264, and then stall forever
    * at readyState=1 because its software decoder can't produce frames.
+   * Same trap with HEVC Main 10: canPlayType() says "probably" on
+   * Chrome/Linux because the HW decoder registers, but the actual
+   * decode path refuses 10-bit and the <video> element sits at
+   * readyState=1 until the watchdog gives up.
    *
-   * Browser-decodable matrix (conservative, confirmed for Firefox/Chrome):
+   * Conservative browser-decodable matrix:
    *   H.264:
    *     profile in  {Baseline, Main, High, Constrained Baseline, High Progressive}
    *     pix_fmt in  {yuv420p, yuvj420p}
    *   HEVC:
-   *     profile in  {Main, Main 10}      (Main 10 works on clients with HEVC HW)
-   *     pix_fmt in  {yuv420p, yuv420p10le}
+   *     NOT browser-decodable — coverage is too uneven across platforms
+   *     (Firefox/Linux: none, Chrome: HW-only and flaky on 10-bit,
+   *     Safari: OK) to trust canPlayType(). Always route HEVC to
+   *     transcode. Background conversion will produce an H.264 mirror
+   *     so the retranscode cost is paid once per file.
    *
    * Anything else → must transcode, not direct-play.
    */
@@ -2844,22 +2964,9 @@ class LibraryManager {
       return h264Ok;
     }
 
-    if (codec === 'hevc') {
-      // HEVC Main and Main 10 are both browser-playable on clients that
-      // report hevc capability (they go through the hardware decoder,
-      // which handles both 8- and 10-bit 4:2:0). 4:2:2 / 4:4:4 variants
-      // aren't in any browser.
-      if (pix && pix !== 'yuv420p' && pix !== 'yuv420p10le') return false;
-      const hevcOk = (
-        profile === '' ||
-        profile === 'main' ||
-        profile === 'main 10' ||
-        profile === 'main10'
-      );
-      return hevcOk;
-    }
-
-    // All other codecs (vp9, av1, mpeg4, mpeg2, etc.) need transcoding.
+    // HEVC + everything else (vp9, av1, mpeg4, mpeg2, …) → transcode.
+    // Pre-transcoding in the background removes the "wait for live
+    // transcode" penalty after the file has been through conversion.
     return false;
   }
 
@@ -2945,6 +3052,10 @@ class LibraryManager {
 
   /**
    * Check if a completed library item needs conversion and start it if so.
+   * Probes the source, classifies via _classifyConversionKind, and either:
+   *   - marks the item conversionCheckedAt and returns (already universal)
+   *   - queues for conversion (no free slot)
+   *   - starts conversion immediately
    */
   async _checkAndConvert(id) {
     const item = this._items.get(id);
@@ -2960,29 +3071,82 @@ class LibraryManager {
       return;
     }
 
-    if (!this._isServerConvertible(probe)) {
-      console.log(`[Library] "${item.name}" needs no background conversion (${probe.ext}, video=${probe.videoCodec}, audio=${probe.audioCodec || 'none'})`);
+    const kind = this._classifyConversionKind(probe);
+
+    if (!kind) {
+      // Already universal direct-playable — stamp it so the startup sweep
+      // doesn't re-probe this file on every restart.
+      if (!item.conversionCheckedAt) {
+        item.conversionCheckedAt = Date.now();
+        this._saveMetadata();
+      }
+      console.log(`[Library] "${item.name}" is already direct-play (${probe.ext}, video=${probe.videoCodec} ${probe.videoProfile || ''} ${probe.pixFmt || ''}, audio=${probe.audioCodec || 'none'})`);
       return;
     }
 
     // Respect concurrent conversion limit
     if (this._convertProcesses.size >= this._maxConcurrentConversions) {
-      console.log(`[Library] Conversion queued for "${item.name}" — waiting for active conversion to finish`);
+      console.log(`[Library] Conversion queued for "${item.name}" (${kind}) — waiting for active conversion to finish`);
       // Store that this needs conversion and check again when a conversion completes
       item._pendingConversion = true;
+      item._pendingConvertKind = kind;
       item._probeDuration = probe.duration;
       return;
     }
 
     item.status = 'converting';
+    item.convertKind = kind;
     item.convertProgress = 0;
     item.convertError = null;
     item._probeDuration = probe.duration;
     this._saveMetadata();
     this._startPeriodicSave();
 
-    console.log(`[Library] Starting conversion: "${item.name}" (${probe.ext} → .mp4, video: ${probe.videoCodec}, audio: ${probe.audioCodec || 'none'})`);
+    const pretty = kind === 'transcode' ? 'full transcode' : 'remux';
+    console.log(`[Library] Starting ${pretty}: "${item.name}" (${probe.ext}, video=${probe.videoCodec} ${probe.videoProfile || ''} ${probe.pixFmt || ''} → H.264 main yuv420p, audio=${probe.audioCodec || 'none'} → aac)`);
     this._startConversion(id);
+  }
+
+  /**
+   * Walk every 'complete' library item that hasn't been classified for
+   * conversion yet and run _checkAndConvert on it. This is the "retrofit"
+   * path for libraries that existed before background transcoding was
+   * enabled — without this sweep, old files would sit on disk requiring
+   * live transcode on every play until someone re-downloaded them.
+   *
+   * Runs serially with a small yield between probes so it doesn't starve
+   * the event loop, and relies on _checkAndConvert's queueing to cap
+   * concurrent ffmpeg processes at _maxConcurrentConversions.
+   */
+  async _scanCompleteItemsForConversion() {
+    const candidates = [];
+    for (const item of this._items.values()) {
+      if (item.status !== 'complete') continue;
+      if (!item.filePath) continue;
+      if (item.conversionCheckedAt) continue;
+      // Skip items whose last conversion attempt failed — don't retry
+      // forever on every restart. The user can trigger a manual retry.
+      if (item.convertError) continue;
+      candidates.push(item.id);
+    }
+
+    if (candidates.length === 0) return;
+
+    console.log(`[Library] Sweep: probing ${candidates.length} unchecked item(s) for background conversion`);
+
+    for (const id of candidates) {
+      try {
+        await this._checkAndConvert(id);
+      } catch (err) {
+        console.error(`[Library] Sweep: _checkAndConvert(${id}) failed: ${err.message}`);
+      }
+      // Yield to the event loop between probes so HTTP and downloads
+      // stay responsive during the sweep. ffprobe itself is cheap
+      // (~50-200ms per file) but a library of thousands adds up.
+      await new Promise(resolve => setImmediate(resolve));
+    }
+
+    console.log('[Library] Sweep complete');
   }
 
   /**
@@ -3004,11 +3168,93 @@ class LibraryManager {
   }
 
   /**
+   * Build the FFmpeg command line for a background conversion. Kind:
+   *   'remux'     — stream-copy video, transcode audio to AAC, re-wrap
+   *                 in an MP4 with +faststart (seekable). Cheap; bound
+   *                 by disk I/O.
+   *   'transcode' — full re-encode to H.264 main L4.1 yuv420p 8-bit +
+   *                 AAC, 1080p-capped. Slow (CPU-bound on Orin Nano
+   *                 without NVENC) but runs once per file and the
+   *                 stored result is universally direct-playable so
+   *                 no ffmpeg touches it on future plays.
+   */
+  _buildConversionArgs(inputPath, tempOutputPath, kind) {
+    const common = [
+      '-hide_banner',
+      '-fflags', '+genpts',
+      '-i', inputPath,
+      // Keep the first video stream and (optionally) the first audio
+      // stream. Strip subtitles and data streams explicitly — muxing
+      // them into MP4 is a well-known source of ffmpeg errors and the
+      // browser player can't render them anyway.
+      '-map', '0:v:0',
+      '-map', '0:a:0?',
+      '-sn',
+      '-dn',
+    ];
+
+    if (kind === 'remux') {
+      return [
+        ...common,
+        '-c:v', 'copy',
+        '-c:a', 'aac',
+        '-b:a', '192k',
+        '-movflags', '+faststart',
+        '-f', 'mp4',
+        '-y',
+        '-progress', 'pipe:1',
+        '-loglevel', 'warning',
+        tempOutputPath,
+      ];
+    }
+
+    // kind === 'transcode' — full video re-encode.
+    // Preset choice rationale: libx264 on Jetson Orin Nano is the only
+    // game in town (no NVENC). 'veryfast' gives a much better
+    // size/quality tradeoff than 'ultrafast' while still averaging
+    // ~15-25 fps at 1080p on the 6-core Cortex-A78AE, i.e. a 2-hour
+    // movie lands in 2-4 hours wall-clock. Acceptable for a background
+    // task and the stored file is half the size of an ultrafast output.
+    //
+    // 1920px cap (not 1280) preserves resolution when the source is
+    // already 1080p — we're storing permanently, not transcoding for
+    // an unknown mobile screen, so there's no reason to throw pixels
+    // away. Sources above 1080p get downscaled to fit 1080p width,
+    // which keeps libx264 realtime-adjacent and cuts file size for
+    // 4K inputs significantly.
+    return [
+      ...common,
+      '-c:v', 'libx264',
+      '-preset', 'veryfast',
+      '-profile:v', 'main',
+      '-level', '4.1',
+      '-pix_fmt', 'yuv420p',
+      '-crf', '23',
+      '-vf', "scale='min(1920,iw)':'-2'",
+      '-c:a', 'aac',
+      '-b:a', '192k',
+      '-ac', '2',
+      '-ar', '48000',
+      '-movflags', '+faststart',
+      '-f', 'mp4',
+      '-y',
+      '-progress', 'pipe:1',
+      '-loglevel', 'warning',
+      tempOutputPath,
+    ];
+  }
+
+  /**
    * Start FFmpeg conversion of a library item to browser-compatible MP4.
+   * The kind of conversion (remux vs full transcode) is read from
+   * item.convertKind, which must have been set by _checkAndConvert or
+   * the resume path before calling this.
    */
   _startConversion(id) {
     const item = this._items.get(id);
     if (!item || !item.filePath) return;
+
+    const kind = item.convertKind === 'transcode' ? 'transcode' : 'remux';
 
     const inputPath = path.join(this._libraryPath, item.filePath);
     const tempOutputPath = this._getConvertTempPath(inputPath);
@@ -3021,20 +3267,7 @@ class LibraryManager {
 
     const duration = item._probeDuration || 0;
 
-    const ffmpeg = spawn('ffmpeg', [
-      '-i', inputPath,
-      '-map', '0:v:0',
-      '-map', '0:a:0?',
-      '-c:v', 'copy',
-      '-c:a', 'aac',
-      '-b:a', '192k',
-      '-movflags', '+faststart',
-      '-f', 'mp4',
-      '-y',
-      '-progress', 'pipe:1',
-      '-loglevel', 'warning',
-      tempOutputPath,
-    ]);
+    const ffmpeg = spawn('ffmpeg', this._buildConversionArgs(inputPath, tempOutputPath, kind));
 
     this._convertProcesses.set(id, ffmpeg);
 
@@ -3105,7 +3338,10 @@ class LibraryManager {
       item.fileSize = stat.size;
       item.status = 'complete';
       item.convertProgress = 100;
+      item.convertKind = null;
+      item.convertError = null;
       item.originalFilePath = null;
+      item.conversionCheckedAt = Date.now();
       delete item._probeDuration;
 
       this._saveMetadata();
@@ -3140,7 +3376,9 @@ class LibraryManager {
       if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
     } catch { /* ignore */ }
 
-    // Revert to original file — on-the-fly remux still works
+    // Revert to original file — on-the-fly transcode still works as a
+    // fallback but we stamp convertError so the startup sweep doesn't
+    // retry this file indefinitely on every restart.
     if (item.originalFilePath) {
       item.filePath = item.originalFilePath;
       item.originalFilePath = null;
@@ -3148,6 +3386,7 @@ class LibraryManager {
     item.status = 'complete';
     item.convertError = reason;
     item.convertProgress = null;
+    item.convertKind = null;
     delete item._probeDuration;
 
     this._saveMetadata();
@@ -3178,14 +3417,17 @@ class LibraryManager {
     const pending = [...this._items.values()].find(i => i._pendingConversion);
     if (!pending) return;
 
+    const kind = pending._pendingConvertKind === 'transcode' ? 'transcode' : 'remux';
     delete pending._pendingConversion;
+    delete pending._pendingConvertKind;
     pending.status = 'converting';
+    pending.convertKind = kind;
     pending.convertProgress = 0;
     pending.convertError = null;
     this._saveMetadata();
     this._startPeriodicSave();
 
-    console.log(`[Library] Starting queued conversion: "${pending.name}"`);
+    console.log(`[Library] Starting queued ${kind}: "${pending.name}"`);
     this._startConversion(pending.id);
   }
 
@@ -3210,6 +3452,7 @@ class LibraryManager {
       addedAt: item.addedAt,
       completedAt: item.completedAt,
       error: item.error,
+      convertKind: item.convertKind || null,
       convertProgress: item.convertProgress || null,
       convertError: item.convertError || null,
       packId: item.packId || null,

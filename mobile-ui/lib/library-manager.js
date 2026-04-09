@@ -4134,6 +4134,29 @@ class LibraryManager {
       // Force the next probe of worker health so a transient blip doesn't
       // keep us locked out of the remote path for the full 30s interval.
       this._refreshWorkerHealth().catch(() => {});
+
+      // If downloads are active, don't start libx264 immediately — it
+      // would just get killed by _pauseRunningConversionsForDownloads on
+      // the next torrent engine event and thrash back through the queue.
+      // Put it in the pending set instead and let the queue dispatch it
+      // once downloads are idle.
+      if (this._hasActiveDownloads()) {
+        console.log(`[Library] Deferring local fallback for "${item.name}" — downloads active`);
+        item._pendingConversion = true;
+        item._pendingConvertKind = item.convertKind || 'transcode';
+        if (item.originalFilePath) {
+          item.filePath = item.originalFilePath;
+          item.originalFilePath = null;
+        }
+        item.status = 'complete';
+        item.convertKind = null;
+        item.convertProgress = null;
+        if (this._engines.size === 0 && this._convertProcesses.size === 0) {
+          this._stopPeriodicSave();
+        }
+        return;
+      }
+
       this._startLocalConversion(id);
     });
   }
@@ -4239,18 +4262,48 @@ class LibraryManager {
   }
 
   /**
-   * Check for items pending conversion and start them if a slot is available.
-   * Gated on _hasActiveDownloads() so we never transcode while BT downloads
-   * are running — see _pauseRunningConversionsForDownloads for the rationale.
+   * Check for items pending conversion and start them if a slot is
+   * available. The gate is per-ITEM, not global: an item that will run
+   * on the remote GPU worker is allowed during downloads (its cost is
+   * disk read + Tailscale egress, not CPU), but an item that will run
+   * LOCALLY must wait for downloads to drain so libx264 doesn't starve
+   * the BT pipeline. This matters in the "remote attempt failed, fall
+   * back to libx264" path — without the per-item check the queue thrashes,
+   * alternating between pause-for-downloads and restart-from-queue.
    */
   _processConversionQueue() {
     if (this._convertProcesses.size >= this._maxConcurrentConversions) return;
-    // _canStartConversionNow() returns true when downloads are idle OR
-    // when the remote GPU worker is online (since remote conversions
-    // don't compete with downloads on the Orin).
-    if (!this._canStartConversionNow()) return;
 
-    const pending = [...this._items.values()].find(i => i._pendingConversion);
+    const downloadsActive = this._hasActiveDownloads();
+    const workerAvailable = !!(this._workerClient &&
+                               this._workerClient.enabled() &&
+                               this._workerHealth);
+
+    // Walk every pending item and pick the first one that can actually
+    // run RIGHT NOW. Items that can't run (local-only + downloads active)
+    // are left in the pending set; _processConversionQueue will be called
+    // again from _stopDownload / _onConversionSuccess when something
+    // changes.
+    let pending = null;
+    for (const item of this._items.values()) {
+      if (!item._pendingConversion) continue;
+
+      const wouldGoRemote =
+        item._pendingConvertKind === 'transcode' &&
+        workerAvailable &&
+        !item._workerFailed;
+
+      if (wouldGoRemote) {
+        pending = item;
+        break;
+      }
+      if (!downloadsActive) {
+        pending = item;
+        break;
+      }
+      // else: local-only + downloads active → skip, try next pending item
+    }
+
     if (!pending) return;
 
     const kind = pending._pendingConvertKind === 'transcode' ? 'transcode' : 'remux';

@@ -93,16 +93,15 @@ class TorrentEngine {
       // retry storms on low-power hardware when multiple torrents run at once.
       // libtorrent/qBittorrent default to ~50 per torrent for this reason.
       //
-      // uploads: 6 — enables BitTorrent tit-for-tat. The protocol's "optimistic
-      // unchoke" algorithm expects ~4 upload slots; with fewer, most peers
-      // will choke us and per-peer download throughput collapses. Going from
-      // uploads:0 (pure leech) or uploads:1 (minimal) to uploads:6 typically
-      // yields a 5-10x improvement on well-seeded swarms because many more
-      // peers will reciprocally unchoke us. Upload bandwidth cost is modest:
-      // peers only take as much as they need, and choking rotates every 10s.
+      // uploads: 0 — pure leech mode. No upload slots are offered to peers.
+      // NOTE: this disables BitTorrent tit-for-tat. Without upload slots,
+      // most peers will choke us and per-peer download throughput can drop
+      // significantly on well-seeded swarms (the protocol's "optimistic
+      // unchoke" algorithm expects ~4 upload slots). Set to 0 by request to
+      // eliminate upload bandwidth usage entirely.
       const engine = torrentStream(uri, {
         connections: 50,
-        uploads: 6,
+        uploads: 0,
         dht: true,
         path: this._downloadPath,
         trackers: TRACKERS,

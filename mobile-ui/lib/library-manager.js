@@ -72,6 +72,18 @@ class LibraryManager {
   constructor(opts = {}) {
     this._libraryPath = opts.libraryPath || path.join(process.cwd(), 'library');
     this._metadataFile = path.join(this._libraryPath, '_metadata.json');
+    // Persistent cache for torrent-stream's BEP-9 metadata (.torrent files).
+    // torrent-stream writes each successfully-received torrent metadata blob
+    // to `<opts.tmp>/<opts.name>/<infoHash>.torrent` and, on subsequent
+    // engine starts, reads that file instead of re-running the ut_metadata
+    // handshake. The default location is /tmp/torrent-stream, which is
+    // wiped on container/system restart — so after every restart every
+    // resume must re-fetch metadata from peers, and usually times out for
+    // old / low-seed packs even though we already have several episodes on
+    // disk. Pointing `tmp`/`name` here keeps the cache alive with the
+    // library volume so resume becomes instant.
+    this._torrentCacheName = '_torrent-cache';
+    this._torrentCachePath = path.join(this._libraryPath, this._torrentCacheName);
     this._maxConcurrentDownloads = opts.maxConcurrentDownloads || DEFAULT_MAX_CONCURRENT_DOWNLOADS;
     this._items = new Map();       // id -> library item
     this._engines = new Map();     // id -> torrent engine (active downloads only)
@@ -91,6 +103,12 @@ class LibraryManager {
     if (!fs.existsSync(this._libraryPath)) {
       fs.mkdirSync(this._libraryPath, { recursive: true });
     }
+    // Ensure the persistent torrent-metadata cache directory exists so
+    // torrent-stream can write .torrent files into it immediately.
+    if (!fs.existsSync(this._torrentCachePath)) {
+      fs.mkdirSync(this._torrentCachePath, { recursive: true });
+    }
+    this._migrateLegacyTorrentCache();
 
     this._cleanupStaleTmpFiles();
     this._loadMetadata();
@@ -465,6 +483,12 @@ class LibraryManager {
           continue;
         }
 
+        // Skip the persistent torrent-metadata cache directory at the root.
+        if (!relDir && entry.name === this._torrentCacheName) {
+          hadFiles = true;
+          continue;
+        }
+
         if (entry.isDirectory()) {
           const childResult = walk(absPath, relPath);
           if (childResult.hadFiles) hadFiles = true;
@@ -796,19 +820,15 @@ class LibraryManager {
       ? path.join(this._libraryPath, packDirOverride)
       : path.join(this._libraryPath, this._safeDirectoryName({ name: packLabel, infoHash }));
 
+    const cacheHit = this._hasCachedTorrentMetadata(infoHash);
     return new Promise((resolve, reject) => {
-      // See torrent-engine.js for rationale on connections/uploads values.
-      const engine = torrentStream(magnetUri, {
-        connections: 50,
-        uploads: 6,
-        dht: true,
-        verify: true,
-        path: packDir,
-        trackers: TRACKERS,
-      });
+      const engine = torrentStream(magnetUri, this._baseTorrentOpts(packDir));
       this._pauseRunningConversionsForDownloads();
       this._attachPeerManager(engine, `pack ${infoHash.slice(0, 8)}`);
       this._startIncomingListener(engine, `pack ${infoHash.slice(0, 8)}`);
+      if (cacheHit) {
+        console.log(`[Library] pack ${infoHash.slice(0, 8)}: using cached torrent metadata (skipping BEP-9)`);
+      }
 
       const timeout = setTimeout(() => {
         const { diag, reason } = this._metadataTimeoutDiag(engine);
@@ -960,19 +980,15 @@ class LibraryManager {
     const scanLabel = name || `Torrent ${infoHash.slice(0, 8)}`;
     const scanDir = path.join(this._libraryPath, this._safeDirectoryName({ name: scanLabel, infoHash }));
 
+    const cacheHit = this._hasCachedTorrentMetadata(infoHash);
     return new Promise((resolve, reject) => {
-      // See torrent-engine.js for rationale on connections/uploads values.
-      const engine = torrentStream(magnetUri, {
-        connections: 50,
-        uploads: 6,
-        dht: true,
-        verify: true,
-        path: scanDir,
-        trackers: TRACKERS,
-      });
+      const engine = torrentStream(magnetUri, this._baseTorrentOpts(scanDir));
       this._pauseRunningConversionsForDownloads();
       this._attachPeerManager(engine, `scan ${infoHash.slice(0, 8)}`);
       this._startIncomingListener(engine, `scan ${infoHash.slice(0, 8)}`);
+      if (cacheHit) {
+        console.log(`[Library] scan ${infoHash.slice(0, 8)}: using cached torrent metadata (skipping BEP-9)`);
+      }
 
       const timeout = setTimeout(() => {
         const { diag, reason } = this._metadataTimeoutDiag(engine);
@@ -1422,17 +1438,10 @@ class LibraryManager {
       ? path.join(this._libraryPath, packDirName)
       : path.join(this._libraryPath, this._safeDirectoryName({ name: first.showName || first.name, infoHash: first.infoHash }));
 
-    console.log(`[Library] Resuming pack "${first.showName || first.name}" (${items.length} episodes) in ${packDir}`);
+    const cacheHit = this._hasCachedTorrentMetadata(first.infoHash);
+    console.log(`[Library] Resuming pack "${first.showName || first.name}" (${items.length} episodes) in ${packDir}${cacheHit ? ' — cached metadata available' : ' — no cached metadata'}`);
 
-    // See torrent-engine.js for rationale on connections/uploads values.
-    const engine = torrentStream(first.magnetUri, {
-      connections: 50,
-      uploads: 6,
-      dht: true,
-      verify: true,
-      path: packDir,
-      trackers: TRACKERS,
-    });
+    const engine = torrentStream(first.magnetUri, this._baseTorrentOpts(packDir));
     this._pauseRunningConversionsForDownloads();
     this._attachPeerManager(engine, `resume ${first.infoHash.slice(0, 8)}`);
     this._startIncomingListener(engine, `resume ${first.infoHash.slice(0, 8)}`);
@@ -2613,18 +2622,14 @@ class LibraryManager {
 
     const itemDir = path.join(this._libraryPath, this._safeDirectoryName(item));
 
-    // See torrent-engine.js for rationale on connections/uploads values.
-    const engine = torrentStream(item.magnetUri, {
-      connections: 50,
-      uploads: 6,
-      dht: true,
-      verify: true,
-      path: itemDir,
-      trackers: TRACKERS,
-    });
+    const cacheHit = this._hasCachedTorrentMetadata(item.infoHash);
+    const engine = torrentStream(item.magnetUri, this._baseTorrentOpts(itemDir));
     this._pauseRunningConversionsForDownloads();
     this._attachPeerManager(engine, `dl ${item.infoHash.slice(0, 8)}`);
     this._startIncomingListener(engine, `dl ${item.infoHash.slice(0, 8)}`);
+    if (cacheHit) {
+      console.log(`[Library] dl ${item.infoHash.slice(0, 8)}: using cached torrent metadata (skipping BEP-9)`);
+    }
 
     this._engines.set(id, engine);
     this._startPeriodicSave();
@@ -2862,6 +2867,73 @@ class LibraryManager {
       clearInterval(this._metadataSaveTimer);
       this._metadataSaveTimer = null;
     }
+  }
+
+  // ─── Torrent metadata cache ────────────────────
+
+  /**
+   * Default torrent-stream options used by every engine this manager
+   * spins up. The `tmp`/`name` fields redirect torrent-stream's built-in
+   * .torrent metadata cache from the ephemeral /tmp/torrent-stream
+   * directory to `<libraryPath>/_torrent-cache/<infoHash>.torrent`, which
+   * lives alongside the library volume and therefore survives container
+   * restarts. Once the cache is populated for a given infoHash, restart /
+   * retry / click-pack-in-library loads metadata instantly instead of
+   * rolling the BEP-9 dice against slow peers.
+   */
+  _baseTorrentOpts(downloadPath) {
+    // See torrent-engine.js for rationale on connections/uploads values.
+    return {
+      connections: 50,
+      uploads: 6,
+      dht: true,
+      verify: true,
+      path: downloadPath,
+      trackers: TRACKERS,
+      tmp: this._libraryPath,
+      name: this._torrentCacheName,
+    };
+  }
+
+  /**
+   * Returns true if torrent-stream already has cached metadata for this
+   * infoHash in our persistent cache. When true, the next engine start
+   * for this torrent will skip peer metadata exchange entirely.
+   */
+  _hasCachedTorrentMetadata(infoHash) {
+    if (!infoHash) return false;
+    try {
+      return fs.existsSync(path.join(this._torrentCachePath, `${infoHash}.torrent`));
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * On first run after this fix lands, /tmp/torrent-stream may still hold
+   * the cached .torrent files from the previous process (if the box
+   * hasn't been rebooted yet). Copy any such files into our persistent
+   * cache so the very next restart benefits, not just the one after it.
+   */
+  _migrateLegacyTorrentCache() {
+    try {
+      const legacy = path.join('/tmp', 'torrent-stream');
+      if (!fs.existsSync(legacy)) return;
+      let migrated = 0;
+      for (const entry of fs.readdirSync(legacy)) {
+        if (!entry.endsWith('.torrent')) continue;
+        const src = path.join(legacy, entry);
+        const dst = path.join(this._torrentCachePath, entry);
+        if (fs.existsSync(dst)) continue;
+        try {
+          fs.copyFileSync(src, dst);
+          migrated++;
+        } catch { /* non-fatal — skip unreadable entry */ }
+      }
+      if (migrated > 0) {
+        console.log(`[Library] Migrated ${migrated} torrent metadata cache file(s) from ${legacy}`);
+      }
+    } catch { /* non-fatal */ }
   }
 
   // ─── Metadata Persistence ──────────────────────
@@ -3130,6 +3202,7 @@ class LibraryManager {
 
       for (const entry of entries) {
         if (entry.name.startsWith('_metadata')) continue;
+        if (entry.name === this._torrentCacheName) continue;
         if (entry.name.endsWith('.tmp')) continue;
 
         const entryPath = path.join(this._libraryPath, entry.name);

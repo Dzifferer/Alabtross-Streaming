@@ -23,6 +23,15 @@ class StremioAPI {
     this._streamCacheTimestamps = new Map();
   }
 
+  /**
+   * Clear all cached stream results. Useful when poisoned cache entries
+   * need to be invalidated (e.g., after a title mismatch bug).
+   */
+  clearStreamCache() {
+    this._streamCache.clear();
+    this._streamCacheTimestamps.clear();
+  }
+
   // ─── Addon Management ────────────────────────────
 
   _loadAddons() {
@@ -206,7 +215,6 @@ class StremioAPI {
         if (resp.ok) {
           const data = await resp.json();
           if (data.meta) {
-            this._lastTitle = data.meta.name || null;
             return data.meta;
           }
         }
@@ -223,7 +231,6 @@ class StremioAPI {
         if (resp.ok) {
           const data = await resp.json();
           if (data.meta) {
-            this._lastTitle = data.meta.name || null;
             if (data.meta.imdb_id) {
               data.meta._resolvedImdbId = data.meta.imdb_id;
             }
@@ -249,7 +256,6 @@ class StremioAPI {
         if (!resp.ok) continue;
         const data = await resp.json();
         if (data.meta) {
-          this._lastTitle = data.meta.name || null;
           return data.meta;
         }
       } catch (e) {
@@ -266,15 +272,18 @@ class StremioAPI {
    * Fetch streams from both backend scrapers and configured Stremio addons,
    * then merge and deduplicate into a single list.
    */
-  async getStreams(type, id, seasonEpisode) {
-    const cacheKey = `${type}:${id}:${seasonEpisode?.season}:${seasonEpisode?.episode}`;
+  async getStreams(type, id, seasonEpisode, title) {
+    // Include title in the cache key so a fetch with a stale/wrong title
+    // can't shadow (or be shadowed by) a fetch with the correct title.
+    const titleKey = title ? title.toLowerCase() : '';
+    const cacheKey = `${type}:${id}:${seasonEpisode?.season}:${seasonEpisode?.episode}:${titleKey}`;
     const cachedTs = this._streamCacheTimestamps.get(cacheKey) || 0;
     if (this._streamCache.has(cacheKey) && (Date.now() - cachedTs) < 300000) {
       return this._streamCache.get(cacheKey);
     }
 
     const [custom, addon] = await Promise.all([
-      this._getCustomStreams(type, id, seasonEpisode),
+      this._getCustomStreams(type, id, seasonEpisode, title),
       this._getAddonStreams(type, id).catch(() => []),
     ]);
     const merged = this._mergeStreams(custom, addon);
@@ -351,13 +360,13 @@ class StremioAPI {
   /**
    * Fetch streams from the backend, which queries Torrentio + scrapers server-side.
    */
-  async _getCustomStreams(type, id, seasonEpisode) {
+  async _getCustomStreams(type, id, seasonEpisode, title) {
     const imdbId = id.match(/^tt\d+/) ? id.match(/^(tt\d+)/)[1] : id;
 
     // Build backend scraper URL
     let backendUrl;
     const params = new URLSearchParams();
-    if (this._lastTitle) params.set('title', this._lastTitle);
+    if (title) params.set('title', title);
     if (type === 'movie') {
       backendUrl = `/api/streams/movie/${imdbId}`;
     } else {
@@ -389,11 +398,11 @@ class StremioAPI {
    * Fetch season pack streams from the backend.
    * Returns torrents containing full seasons (not individual episodes).
    */
-  async getSeasonPackStreams(id, season) {
+  async getSeasonPackStreams(id, season, title) {
     const imdbId = id.match(/^tt\d+/) ? id.match(/^(tt\d+)/)[1] : id;
     const params = new URLSearchParams();
     params.set('season', season);
-    if (this._lastTitle) params.set('title', this._lastTitle);
+    if (title) params.set('title', title);
     const url = `/api/streams/season-pack/${imdbId}?${params.toString()}`;
     try {
       const resp = await fetch(url);
@@ -410,10 +419,10 @@ class StremioAPI {
    * Fetch complete series/movie streams from the backend.
    * Returns torrents containing all seasons in a bulk download.
    */
-  async getCompleteStreams(id) {
+  async getCompleteStreams(id, title) {
     const imdbId = id.match(/^tt\d+/) ? id.match(/^(tt\d+)/)[1] : id;
     const params = new URLSearchParams();
-    if (this._lastTitle) params.set('title', this._lastTitle);
+    if (title) params.set('title', title);
     const url = `/api/streams/complete/${imdbId}?${params.toString()}`;
     try {
       const resp = await fetch(url);
@@ -708,8 +717,8 @@ class StremioAPI {
     };
   }
 
-  async getStreamsRanked(type, id, onProgress, seasonEpisode) {
-    const streams = await this.getStreams(type, id, seasonEpisode);
+  async getStreamsRanked(type, id, onProgress, seasonEpisode, title) {
+    const streams = await this.getStreams(type, id, seasonEpisode, title);
     if (streams.length === 0) return { streams: [], bestStream: null };
 
     const ranked = await this.testAndRankStreams(streams, onProgress);

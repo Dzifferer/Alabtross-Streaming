@@ -739,9 +739,10 @@
     const title = escapeHTML(item.name || 'Unknown');
     const year = item.releaseInfo || item.year || '';
     const id = item.imdb_id || item.id;
+    const rawName = escapeHTML(item.name || '');
 
     return `
-      <div class="card" data-type="${type}" data-id="${id}">
+      <div class="card" data-type="${type}" data-id="${id}" data-name="${rawName}">
         <div class="card-poster">
           ${poster
             ? `<img src="${poster}" alt="${title}" loading="lazy" class="loading">`
@@ -761,7 +762,7 @@
     container.addEventListener('click', (e) => {
       const card = e.target.closest('.card');
       if (card) {
-        openDetail(card.dataset.type, card.dataset.id);
+        openDetail(card.dataset.type, card.dataset.id, card.dataset.name);
       }
     });
 
@@ -1288,7 +1289,7 @@
 
   // ─── Detail View ─────────────────────────────────
 
-  async function openDetail(type, id) {
+  async function openDetail(type, id, hintTitle) {
     navigateTo('detail', { title: 'Loading...' });
     preload.cancel(); // invalidate any preload from a previously viewed title
     if (api._speedTestController) api._speedTestController.abort(); // cancel stale speed tests
@@ -1299,8 +1300,12 @@
       <div class="loading-state"><div class="spinner"></div><p>Loading details...</p></div>
     `;
 
-    // For movies with IMDB IDs, start fetching streams in parallel with metadata
-    let streamsPromise = (type === 'movie' && !id.startsWith('tmdb:')) ? api.getStreams(type, id) : null;
+    // For movies with IMDB IDs, start fetching streams in parallel with metadata.
+    // Passing hintTitle (from the card the user clicked) ensures the provider
+    // query uses the correct title, not a stale global.
+    let streamsPromise = (type === 'movie' && !id.startsWith('tmdb:'))
+      ? api.getStreams(type, id, undefined, hintTitle)
+      : null;
 
     const meta = await api.getMeta(type, id);
     if (!meta) {
@@ -1315,7 +1320,7 @@
       id = meta._resolvedImdbId;
       // Start the movie stream fetch now that we have a real IMDB ID
       if (type === 'movie' && !streamsPromise) {
-        streamsPromise = api.getStreams(type, id);
+        streamsPromise = api.getStreams(type, id, undefined, meta.name || hintTitle);
       }
     }
 
@@ -1618,9 +1623,10 @@
     // Use pre-fetched streams if available (from parallel fetch in openDetail)
     let streams;
     try {
+      const currentTitle = (state.currentMeta && state.currentMeta.name) || '';
       streams = prefetchedStreamsPromise
         ? await prefetchedStreamsPromise
-        : await api.getStreams(type, id, seasonEpisode);
+        : await api.getStreams(type, id, seasonEpisode, currentTitle);
     } catch (e) {
       console.warn('[loadStreams] Failed to fetch streams:', e.message);
       streams = [];
@@ -2433,7 +2439,7 @@
     });
 
     try {
-      const streams = await api.getStreams(type, id, seasonEpisode);
+      const streams = await api.getStreams(type, id, seasonEpisode, title);
       if (!streams || streams.length === 0) {
         showPlayerError('No streams found', 'Could not find a stream for the next item');
         return;
@@ -2697,7 +2703,7 @@
     const sc = document.getElementById('stream-container');
     if (!sc) return;
 
-    const streams = await api.getSeasonPackStreams(showId, season);
+    const streams = await api.getSeasonPackStreams(showId, season, meta && meta.name);
 
     if (streams.length === 0) {
       sc.innerHTML = `
@@ -2835,7 +2841,7 @@
     const sc = document.getElementById(containerId || 'stream-container');
     if (!sc) return;
 
-    const streams = await api.getCompleteStreams(showId);
+    const streams = await api.getCompleteStreams(showId, meta && meta.name);
 
     if (streams.length === 0) {
       sc.innerHTML = `

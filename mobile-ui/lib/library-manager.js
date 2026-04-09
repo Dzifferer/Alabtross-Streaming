@@ -779,10 +779,9 @@ class LibraryManager {
 
     return new Promise((resolve, reject) => {
       // See torrent-engine.js for rationale on connections/uploads values.
-      // uploads:0 is intentional leech-only mode (legal/privacy).
       const engine = torrentStream(magnetUri, {
-        connections: 100,
-        uploads: 0,
+        connections: 50,
+        uploads: 6,
         dht: true,
         verify: true,
         path: packDir,
@@ -940,8 +939,8 @@ class LibraryManager {
     return new Promise((resolve, reject) => {
       // See torrent-engine.js for rationale on connections/uploads values.
       const engine = torrentStream(magnetUri, {
-        connections: 100,
-        uploads: 0,
+        connections: 50,
+        uploads: 6,
         dht: true,
         verify: true,
         path: scanDir,
@@ -1390,8 +1389,8 @@ class LibraryManager {
 
     // See torrent-engine.js for rationale on connections/uploads values.
     const engine = torrentStream(first.magnetUri, {
-      connections: 100,
-      uploads: 0,
+      connections: 50,
+      uploads: 6,
       dht: true,
       verify: true,
       path: packDir,
@@ -2254,8 +2253,8 @@ class LibraryManager {
 
     // See torrent-engine.js for rationale on connections/uploads values.
     const engine = torrentStream(item.magnetUri, {
-      connections: 100,
-      uploads: 0,
+      connections: 50,
+      uploads: 6,
       dht: true,
       verify: true,
       path: itemDir,

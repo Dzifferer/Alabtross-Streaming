@@ -293,9 +293,13 @@ class PeerManager {
     const swarm = this._engine && this._engine.swarm;
     const wires = swarm && swarm.wires ? swarm.wires.length : 0;
     const queued = swarm ? swarm.queued : 0;
+    // engine.port is set by engine.listen's findPort callback, which is
+    // async — it'll be undefined for the first summary or two. Print "-"
+    // while the listener is still binding so the column stays aligned.
+    const port = (this._engine && this._engine.port) || '-';
     console.log(
-      `[PeerManager] ${this._label}: wires=${wires} queued=${queued} watching=${this._watch.size} ` +
-      `tracked=${this._state.size} bannedIps=${this._bannedIps.size}`
+      `[PeerManager] ${this._label}: port=${port} wires=${wires} queued=${queued} ` +
+      `watching=${this._watch.size} tracked=${this._state.size} bannedIps=${this._bannedIps.size}`
     );
   }
 

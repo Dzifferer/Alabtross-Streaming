@@ -806,6 +806,7 @@ class LibraryManager {
         path: packDir,
         trackers: TRACKERS,
       });
+      this._pauseRunningConversionsForDownloads();
       this._attachPeerManager(engine, `pack ${infoHash.slice(0, 8)}`);
       this._startIncomingListener(engine, `pack ${infoHash.slice(0, 8)}`);
 
@@ -969,6 +970,7 @@ class LibraryManager {
         path: scanDir,
         trackers: TRACKERS,
       });
+      this._pauseRunningConversionsForDownloads();
       this._attachPeerManager(engine, `scan ${infoHash.slice(0, 8)}`);
       this._startIncomingListener(engine, `scan ${infoHash.slice(0, 8)}`);
 
@@ -1391,6 +1393,11 @@ class LibraryManager {
       this._engines.delete(packId);
     }
 
+    // Same reasoning as _stopDownload: downloads may have just ended, so
+    // poke the conversion queue in case a pending transcode was waiting
+    // for all engines to clear.
+    this._processConversionQueue();
+
     if (this._engines.size === 0 && this._convertProcesses.size === 0) {
       this._stopPeriodicSave();
     }
@@ -1426,6 +1433,7 @@ class LibraryManager {
       path: packDir,
       trackers: TRACKERS,
     });
+    this._pauseRunningConversionsForDownloads();
     this._attachPeerManager(engine, `resume ${first.infoHash.slice(0, 8)}`);
     this._startIncomingListener(engine, `resume ${first.infoHash.slice(0, 8)}`);
 
@@ -2614,6 +2622,7 @@ class LibraryManager {
       path: itemDir,
       trackers: TRACKERS,
     });
+    this._pauseRunningConversionsForDownloads();
     this._attachPeerManager(engine, `dl ${item.infoHash.slice(0, 8)}`);
     this._startIncomingListener(engine, `dl ${item.infoHash.slice(0, 8)}`);
 
@@ -2726,6 +2735,13 @@ class LibraryManager {
       this._destroyEngine(engine);
       this._engines.delete(id);
     }
+
+    // Downloads just ended. If there are pending conversions waiting on us,
+    // _processConversionQueue will no-op if any OTHER download is still
+    // running (via _hasActiveDownloads) or kick off the next transcode if
+    // we were the last one. Must be called AFTER the engine is removed
+    // from _engines so _hasActiveDownloads sees the updated state.
+    this._processConversionQueue();
 
     // Stop periodic save when no downloads or conversions are active
     if (this._engines.size === 0 && this._convertProcesses.size === 0) {
@@ -3509,6 +3525,18 @@ class LibraryManager {
       return;
     }
 
+    // Don't start a transcode while BT downloads are active — libx264 would
+    // starve the download pipeline of CPU and disk bandwidth. The item is
+    // queued with _pendingConversion so _processConversionQueue picks it up
+    // as soon as _stopDownload fires on the last active download.
+    if (this._hasActiveDownloads()) {
+      console.log(`[Library] Deferring conversion of "${item.name}" (${kind}) — downloads active`);
+      item._pendingConversion = true;
+      item._pendingConvertKind = kind;
+      item._probeDuration = probe.duration;
+      return;
+    }
+
     item.status = 'converting';
     item.convertKind = kind;
     item.convertProgress = 0;
@@ -3715,6 +3743,18 @@ class LibraryManager {
     ffmpeg.on('close', (code) => {
       this._convertProcesses.delete(id);
 
+      // Intentional SIGTERM from _pauseRunningConversionsForDownloads —
+      // don't treat as failure, just requeue. Must check before the
+      // code === 0 branch because a SIGTERM'd ffmpeg can sometimes
+      // exit cleanly if it happened to be between frames.
+      if (ffmpeg._pausedForDownloads) {
+        this._onConversionPausedForDownloads(id);
+        if (this._engines.size === 0 && this._convertProcesses.size === 0) {
+          this._stopPeriodicSave();
+        }
+        return;
+      }
+
       if (code === 0) {
         this._onConversionSuccess(id, inputPath, tempOutputPath, finalOutputPath);
       } else {
@@ -3825,9 +3865,12 @@ class LibraryManager {
 
   /**
    * Check for items pending conversion and start them if a slot is available.
+   * Gated on _hasActiveDownloads() so we never transcode while BT downloads
+   * are running — see _pauseRunningConversionsForDownloads for the rationale.
    */
   _processConversionQueue() {
     if (this._convertProcesses.size >= this._maxConcurrentConversions) return;
+    if (this._hasActiveDownloads()) return;
 
     const pending = [...this._items.values()].find(i => i._pendingConversion);
     if (!pending) return;
@@ -3844,6 +3887,91 @@ class LibraryManager {
 
     console.log(`[Library] Starting queued ${kind}: "${pending.name}"`);
     this._startConversion(pending.id);
+  }
+
+  /**
+   * True if any library item has an active torrent-stream engine OR is
+   * marked as 'downloading' in metadata. Used to decide whether it's safe
+   * to run an ffmpeg conversion right now.
+   */
+  _hasActiveDownloads() {
+    if (this._engines.size > 0) return true;
+    for (const item of this._items.values()) {
+      if (item.status === 'downloading') return true;
+    }
+    return false;
+  }
+
+  /**
+   * Kill every running ffmpeg conversion and requeue it as pending. Called
+   * whenever a torrent-stream engine is about to start (or is already
+   * running) so downloads don't have to fight a libx264 software transcode
+   * for CPU, disk, and memory bandwidth.
+   *
+   * Why this exists: on Jetson-class hardware a single 1080p libx264
+   * veryfast encode will peg 4-6 ARM cores, saturate the disk write queue,
+   * and starve the Node event loop handling BT piece I/O. Observed effect
+   * was 0 KB/s on swarms with 10+ healthy wires because piece verification
+   * (SHA-1) couldn't keep up with incoming blocks and seeders started
+   * choking us. Once the transcode is out of the picture the same swarm
+   * immediately climbs to 200-500 KB/s per wire.
+   *
+   * The killed conversions lose any partial progress — the `.converting.mp4`
+   * temp file is cleaned up via _onConversionPausedForDownloads — and will
+   * restart from scratch when _processConversionQueue runs after the last
+   * download finishes. Accepting the lost CPU time is the right tradeoff:
+   * the transcode was actively starving downloads, and it will finish much
+   * faster from a cold start in an idle system than limping along under
+   * contention.
+   */
+  _pauseRunningConversionsForDownloads() {
+    if (this._convertProcesses.size === 0) return;
+    for (const [id, proc] of this._convertProcesses) {
+      const item = this._items.get(id);
+      const name = item ? item.name : id;
+      console.log(`[Library] Pausing conversion "${name}" to free CPU for downloads`);
+      proc._pausedForDownloads = true;
+      try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+    }
+  }
+
+  /**
+   * Cleanup path for a conversion that was intentionally killed by
+   * _pauseRunningConversionsForDownloads. Reverts the item to 'complete'
+   * with _pendingConversion set so _processConversionQueue picks it back
+   * up once downloads are idle. Distinct from _onConversionFailure — we
+   * don't want to surface a convertError to the user or stamp the item
+   * as a failed conversion when nothing actually went wrong.
+   */
+  _onConversionPausedForDownloads(id) {
+    const item = this._items.get(id);
+    if (!item) return;
+
+    // Discard the partial temp file — we're restarting from scratch later.
+    const sourcePath = item.originalFilePath || item.filePath;
+    if (sourcePath) {
+      const tempPath = this._getConvertTempPath(path.join(this._libraryPath, sourcePath));
+      try { if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); } catch { /* ignore */ }
+    }
+
+    // Revert filePath if _startConversion stashed the original.
+    if (item.originalFilePath) {
+      item.filePath = item.originalFilePath;
+      item.originalFilePath = null;
+    }
+
+    // Requeue for the pending-conversion queue. Keep the kind so
+    // _processConversionQueue picks it up unchanged when it fires.
+    const kind = item.convertKind || 'transcode';
+    item.status = 'complete';
+    item._pendingConversion = true;
+    item._pendingConvertKind = kind;
+    item.convertKind = null;
+    item.convertProgress = null;
+    item.convertError = null;
+    delete item._probeDuration;
+
+    this._saveMetadata();
   }
 
   _sanitizeItem(item) {

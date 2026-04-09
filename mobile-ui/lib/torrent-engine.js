@@ -115,6 +115,25 @@ class TorrentEngine {
       const peerMgr = new PeerManager(engine, { label: hash.slice(0, 8) });
       placeholder.peerMgr = peerMgr;
 
+      // Start a TCP listener so remote peers can initiate connections to
+      // us (PEX advertisements, DHT lookups). Without this the engine is
+      // outbound-only and the swarm is capped at whatever the tracker
+      // response gives us. First engine in the process grabs 6881 (BT
+      // tradition — the port a user is most likely to port-forward);
+      // later engines get OS-assigned ports. Whichever port wins is
+      // announced to tracker + DHT via discovery.updatePort internally.
+      try {
+        engine.listen((err) => {
+          if (err) {
+            console.warn(`[TorrentEngine] ${hash.slice(0,8)}... incoming listener failed: ${err.message}`);
+            return;
+          }
+          console.log(`[TorrentEngine] ${hash.slice(0,8)}... listening for incoming peers on :${engine.port}`);
+        });
+      } catch (err) {
+        console.warn(`[TorrentEngine] ${hash.slice(0,8)}... engine.listen threw: ${err.message}`);
+      }
+
       // Log peer count when it changes, not every 10 seconds. The old
       // behavior spammed `peers: 0, queued: 0` for the full 90s metadata
       // window on dead torrents, which made logs noisy and was the only

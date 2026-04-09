@@ -807,6 +807,7 @@ class LibraryManager {
         trackers: TRACKERS,
       });
       this._attachPeerManager(engine, `pack ${infoHash.slice(0, 8)}`);
+      this._startIncomingListener(engine, `pack ${infoHash.slice(0, 8)}`);
 
       const timeout = setTimeout(() => {
         this._destroyEngine(engine);
@@ -967,6 +968,7 @@ class LibraryManager {
         trackers: TRACKERS,
       });
       this._attachPeerManager(engine, `scan ${infoHash.slice(0, 8)}`);
+      this._startIncomingListener(engine, `scan ${infoHash.slice(0, 8)}`);
 
       const timeout = setTimeout(() => {
         this._destroyEngine(engine);
@@ -1421,6 +1423,7 @@ class LibraryManager {
       trackers: TRACKERS,
     });
     this._attachPeerManager(engine, `resume ${first.infoHash.slice(0, 8)}`);
+    this._startIncomingListener(engine, `resume ${first.infoHash.slice(0, 8)}`);
 
     // Store engine immediately to prevent retryItem from creating duplicates
     // (engine is usable before 'ready' — it just won't have files yet)
@@ -2606,6 +2609,7 @@ class LibraryManager {
       trackers: TRACKERS,
     });
     this._attachPeerManager(engine, `dl ${item.infoHash.slice(0, 8)}`);
+    this._startIncomingListener(engine, `dl ${item.infoHash.slice(0, 8)}`);
 
     this._engines.set(id, engine);
     this._startPeriodicSave();
@@ -2731,6 +2735,38 @@ class LibraryManager {
     const mgr = new PeerManager(engine, { label });
     this._peerMgrByEngine.set(engine, mgr);
     return mgr;
+  }
+
+  /**
+   * Start a TCP listener on the engine so remote peers can initiate
+   * connections to us. Without this the engine is outbound-only: we can
+   * talk to peers the tracker tells us about, but no peer can reach US
+   * via PEX advertisements or DHT lookups, which caps the effective
+   * swarm size at whatever the tracker hands back.
+   *
+   * torrent-stream's engine.listen(cb) starts at port 6881 (BT tradition)
+   * and falls back to an OS-assigned port if 6881 is busy. The first
+   * engine to start in a given session grabs 6881 — that's the port a
+   * user will typically forward on their router, giving at least one of
+   * our concurrent downloads maximum reachability. Other engines end up
+   * on ephemeral ports and only benefit from UPnP/DHT.
+   *
+   * Whichever port is chosen is automatically announced to the tracker
+   * and advertised via DHT, because engine.listen() ends with
+   * discovery.updatePort(engine.port) internally.
+   */
+  _startIncomingListener(engine, label) {
+    try {
+      engine.listen((err) => {
+        if (err) {
+          console.warn(`[Library] ${label}: incoming listener failed: ${err.message}`);
+          return;
+        }
+        console.log(`[Library] ${label}: listening for incoming peers on :${engine.port}`);
+      });
+    } catch (err) {
+      console.warn(`[Library] ${label}: engine.listen threw: ${err.message}`);
+    }
   }
 
   /**

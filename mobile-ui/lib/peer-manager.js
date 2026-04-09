@@ -141,6 +141,11 @@ class PeerManager {
   _onPeer(addr) {
     if (this._destroyed || typeof addr !== 'string') return;
 
+    // Drop garbage tracker entries (unspecified address, port 0, localhost,
+    // broadcast) before they enter the watch list. These are never going to
+    // become a real connection and spamming ban logs for 0.0.0.0:0 is noise.
+    if (isBogusAddr(addr)) return;
+
     // Banned peer re-announced: block() is idempotent on the underlying
     // ip-set, but calling it keeps the log chain honest if a new port of
     // an already-blocked IP slips through.
@@ -161,7 +166,7 @@ class PeerManager {
   _onWire(wire) {
     if (this._destroyed || !wire) return;
     const addr = wire.peerAddress;
-    if (!addr) return;
+    if (!addr || isBogusAddr(addr)) return;
 
     this._connected.add(addr);
     this._watch.delete(addr);
@@ -342,6 +347,27 @@ function ipOf(addr) {
   // addr.split(':')[0] in engine.block().
   const idx = addr.lastIndexOf(':');
   return idx > 0 ? addr.slice(0, idx) : addr;
+}
+
+/**
+ * Reject peer addresses that can never represent a real, reachable host:
+ * the unspecified address, localhost (we are not our own peer), broadcast,
+ * port 0, malformed strings. Trackers and DHT occasionally return these
+ * — silently drop them at intake rather than letting them clog the watch
+ * list and spam ban logs.
+ */
+function isBogusAddr(addr) {
+  if (typeof addr !== 'string' || addr.length === 0) return true;
+  const idx = addr.lastIndexOf(':');
+  if (idx <= 0) return true;
+  const ip = addr.slice(0, idx);
+  const portStr = addr.slice(idx + 1);
+  const port = Number.parseInt(portStr, 10);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) return true;
+  if (ip === '0.0.0.0') return true;
+  if (ip === '255.255.255.255') return true;
+  if (ip === '127.0.0.1' || ip === 'localhost') return true;
+  return false;
 }
 
 module.exports = { PeerManager };

@@ -2773,26 +2773,80 @@ class LibraryManager {
    * to interpret the result — this method does NOT decide playability,
    * it only reports what's in the file.
    */
+  /**
+   * Returns a Promise resolving to {
+   *   probeOk, videoCodec, audioCodec, container, duration, ext, reason
+   * }. Callers should use classifyForClient() or _classifyConversionKind()
+   * to interpret the result — this method does NOT decide playability,
+   * it only reports what's in the file.
+   *
+   * Error reporting is deliberately verbose: the probe endpoint surfaces
+   * `reason` straight to the client and to the server logs, and "ffprobe
+   * failed" with no further detail makes diagnosing a failed playback
+   * essentially impossible. Sanity-check the file on disk first, then
+   * capture ffprobe stderr on non-zero exits so the caller sees the
+   * actual ffmpeg error line (e.g. "moov atom not found", "Invalid data
+   * found", "Permission denied").
+   */
   _probeFile(filePath) {
     return new Promise((resolve) => {
       const ext = path.extname(filePath).toLowerCase();
+
+      // File-level sanity checks before spawning ffprobe. These catch
+      // the "item metadata is stale" case — file moved / deleted /
+      // zero-length on disk — with a clear reason instead of the
+      // opaque "ffprobe failed".
+      let stat;
+      try {
+        stat = fs.statSync(filePath);
+      } catch (err) {
+        return resolve({
+          probeOk: false,
+          ext,
+          reason: err.code === 'ENOENT'
+            ? 'file not found on disk (metadata out of sync)'
+            : `stat failed: ${err.code || err.message}`,
+        });
+      }
+      if (!stat.isFile()) {
+        return resolve({ probeOk: false, ext, reason: 'path is not a regular file' });
+      }
+      if (stat.size === 0) {
+        return resolve({ probeOk: false, ext, reason: 'file is empty (0 bytes)' });
+      }
+
       const ffprobe = spawn('ffprobe', [
-        '-v', 'quiet',
+        // Keep ffprobe quiet on stdout logging but NOT silent on
+        // stderr — we want to see the actual error when the probe
+        // can't read the file. -loglevel error caps it to the
+        // one-line summary we care about.
+        '-v', 'error',
         '-print_format', 'json',
         '-show_format',
         '-show_streams',
         filePath,
       ]);
 
-      let output = '';
-      ffprobe.stdout.on('data', (d) => { output += d.toString(); });
+      let stdout = '';
+      let stderr = '';
+      ffprobe.stdout.on('data', (d) => { stdout += d.toString(); });
+      ffprobe.stderr.on('data', (d) => { stderr += d.toString(); });
 
       ffprobe.on('close', (code) => {
         if (code !== 0) {
-          return resolve({ probeOk: false, ext, reason: 'ffprobe failed' });
+          // Include the one-line error from ffprobe in the reason so
+          // the probe endpoint's UNPLAYABLE log line is actually
+          // diagnosable ("moov atom not found in foo.mp4",
+          // "Invalid data found when processing input", etc.).
+          const msg = stderr.trim().split('\n').pop() || `exit ${code}`;
+          return resolve({
+            probeOk: false,
+            ext,
+            reason: `ffprobe failed: ${msg}`,
+          });
         }
         try {
-          const info = JSON.parse(output);
+          const info = JSON.parse(stdout);
           const videoStream = (info.streams || []).find(s => s.codec_type === 'video');
           const audioStream = (info.streams || []).find(s => s.codec_type === 'audio');
 
@@ -2823,7 +2877,7 @@ class LibraryManager {
               videoCodec: null,
               audioCodec,
               duration,
-              reason: 'no video stream (file may still be downloading)',
+              reason: 'no video stream (file may still be downloading or truncated)',
             });
           }
 
@@ -2838,13 +2892,21 @@ class LibraryManager {
             duration,
             hasAudio: !!audioStream,
           });
-        } catch {
-          resolve({ probeOk: false, ext, reason: 'probe parse error' });
+        } catch (parseErr) {
+          resolve({
+            probeOk: false,
+            ext,
+            reason: `probe parse error: ${parseErr.message}`,
+          });
         }
       });
 
-      ffprobe.on('error', () => {
-        resolve({ probeOk: false, ext, reason: 'ffprobe not available' });
+      ffprobe.on('error', (err) => {
+        resolve({
+          probeOk: false,
+          ext,
+          reason: `ffprobe spawn error: ${err.code || err.message}`,
+        });
       });
     });
   }

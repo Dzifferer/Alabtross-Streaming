@@ -91,13 +91,13 @@ class TorrentEngine {
       // file-descriptor pressure and TCP retry storms on low-power hardware,
       // especially when multiple torrents are active at once.
       //
-      // uploads: 1 — minimal reciprocity mode. A single upload slot lets us
-      // participate in BitTorrent tit-for-tat so peers are less likely to
-      // choke us, improving per-peer download throughput compared to the
-      // previous uploads:0 leech-only configuration.
+      // uploads: 4 — modest reciprocity mode. Four upload slots give us
+      // enough BitTorrent tit-for-tat to stay unchoked by more peers,
+      // improving per-peer download throughput over the previous uploads:1
+      // configuration.
       const engine = torrentStream(uri, {
         connections: 100,
-        uploads: 1,
+        uploads: 4,
         dht: true,
         path: this._downloadPath,
         trackers: TRACKERS,

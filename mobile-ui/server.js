@@ -1624,6 +1624,49 @@ app.post('/api/library/:id/reorder', rateLimit, (req, res) => {
   res.json({ success: true });
 });
 
+// POST /api/library/pause-pack — atomically pause every item in a pack
+app.post('/api/library/pause-pack', rateLimit, (req, res) => {
+  const { packId } = req.body;
+  if (!packId) return res.status(400).json({ error: 'packId is required' });
+  const paused = library.pausePack(packId);
+  if (!paused) return res.status(400).json({ error: 'Cannot pause this pack' });
+  res.json({ success: true });
+});
+
+// POST /api/library/resume-pack — atomically resume every paused item in a pack
+app.post('/api/library/resume-pack', rateLimit, (req, res) => {
+  const { packId } = req.body;
+  if (!packId) return res.status(400).json({ error: 'packId is required' });
+  const resumed = library.resumePack(packId);
+  if (!resumed) return res.status(400).json({ error: 'Cannot resume this pack' });
+  res.json({ success: true });
+});
+
+// POST /api/library/retry-pack — atomically retry every failed item in a pack
+app.post('/api/library/retry-pack', rateLimit, (req, res) => {
+  const { packId } = req.body;
+  if (!packId) return res.status(400).json({ error: 'packId is required' });
+  const retried = library.retryPack(packId);
+  if (!retried) return res.status(400).json({ error: 'Cannot retry this pack' });
+  res.json({ success: true });
+});
+
+// POST /api/library/start-pack — force-start a queued pack (if slots available)
+app.post('/api/library/start-pack', rateLimit, (req, res) => {
+  const { packId } = req.body;
+  if (!packId) return res.status(400).json({ error: 'packId is required' });
+  const started = library.startPack(packId);
+  if (!started) return res.status(400).json({ error: 'Cannot start this pack (no free slots or no queued items)' });
+  res.json({ success: true });
+});
+
+// DELETE /api/library/pack/:packId — atomically remove every item in a pack
+app.delete('/api/library/pack/:packId', rateLimit, (req, res) => {
+  const removed = library.removePack(req.params.packId);
+  if (!removed) return res.status(404).json({ error: 'Pack not found' });
+  res.json({ success: true });
+});
+
 // POST /api/library/reorder-pack — reorder a queued pack in the queue
 app.post('/api/library/reorder-pack', rateLimit, (req, res) => {
   const { packId, position } = req.body;

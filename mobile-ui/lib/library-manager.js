@@ -1227,7 +1227,10 @@ class LibraryManager {
     for (const item of this._items.values()) {
       if (item.packId !== packId) continue;
       if (item.status !== 'downloading') continue;
-      if ((item.progress || 0) >= 100) continue;
+      // Don't skip on progress >= 100: pct is rounded, so a file can read 100
+      // while a piece or two is still missing. _trackPackProgress transitions
+      // to status='complete' only when all pieces are verifiably present, so
+      // filtering by status alone is the authoritative "done" check.
       candidates.push(item);
     }
     if (candidates.length === 0) return null;
@@ -1861,11 +1864,8 @@ class LibraryManager {
    * Returns the current effective active download count and max.
    */
   getDownloadSlots() {
-    const activeItems = [...this._items.values()].filter(i => i.status === 'downloading');
-    const activePacks = new Set(activeItems.filter(i => i.packId).map(i => i.packId));
-    const activeSingles = activeItems.filter(i => !i.packId).length;
     return {
-      active: activePacks.size + activeSingles,
+      active: this._countActiveSlots(),
       max: this._maxConcurrentDownloads,
     };
   }
@@ -2030,6 +2030,205 @@ class LibraryManager {
   }
 
   /**
+   * Count active download slots in a pack-aware way: each pack with an active
+   * engine counts as 1 slot, regardless of how many items it contains, plus
+   * each non-pack 'downloading' item counts as 1 slot.
+   */
+  _countActiveSlots() {
+    const activeItems = [...this._items.values()].filter(i => i.status === 'downloading');
+    const activePacks = new Set(activeItems.filter(i => i.packId).map(i => i.packId));
+    const activeSingles = activeItems.filter(i => !i.packId).length;
+    return activePacks.size + activeSingles;
+  }
+
+  /**
+   * Atomically pause every active/queued item in a pack with one shared engine
+   * teardown. This avoids the race where the frontend fires parallel pause
+   * requests per-item, each triggering engine reselection or partial state.
+   */
+  pausePack(packId) {
+    const packItems = [...this._items.values()].filter(i => i.packId === packId);
+    if (packItems.length === 0) return false;
+
+    let changed = 0;
+    for (const item of packItems) {
+      if (item.status !== 'downloading' && item.status !== 'queued') continue;
+      item.status = 'paused';
+      item.downloadSpeed = 0;
+      item.numPeers = 0;
+      changed++;
+    }
+
+    if (changed === 0) return false;
+
+    // Tear down the shared engine once — everything in the pack is now paused.
+    if (this._engines.has(packId)) {
+      this._stopPackEngine(packId);
+    }
+
+    this._saveMetadata();
+    this._processQueue();
+    console.log(`[Library] Paused pack: ${packId} (${changed} items)`);
+    return true;
+  }
+
+  /**
+   * Atomically resume every paused item in a pack. Starts the shared engine
+   * once, then lets it download files sequentially. If the concurrent-download
+   * limit is reached, the items are re-queued instead.
+   */
+  resumePack(packId) {
+    const packItems = [...this._items.values()].filter(i => i.packId === packId);
+    if (packItems.length === 0) return false;
+
+    const pausedItems = packItems.filter(i => i.status === 'paused');
+    if (pausedItems.length === 0) return false;
+
+    // Pack-aware slot check: a single pack engine counts as 1 slot.
+    const activePacks = new Set(
+      [...this._items.values()]
+        .filter(i => i.status === 'downloading' && i.packId)
+        .map(i => i.packId),
+    );
+    const packAlreadyActive = activePacks.has(packId);
+    if (!packAlreadyActive && this._countActiveSlots() >= this._maxConcurrentDownloads) {
+      // No free slots — re-queue the items so they start later.
+      for (const item of pausedItems) {
+        item.status = 'queued';
+      }
+      this._saveMetadata();
+      console.log(`[Library] Resume-pack queued (at capacity): ${packId}`);
+      return true;
+    }
+
+    for (const item of pausedItems) {
+      item.status = 'downloading';
+      item.error = null;
+    }
+
+    const engine = this._engines.get(packId);
+    if (!engine) {
+      const allDownloading = [...this._items.values()].filter(
+        i => i.packId === packId && i.status === 'downloading',
+      );
+      this._resumePackDownload(packId, allDownloading);
+    } else if (engine.files) {
+      this._selectOnePackFile(packId, engine);
+    }
+
+    this._saveMetadata();
+    console.log(`[Library] Resumed pack: ${packId} (${pausedItems.length} items)`);
+    return true;
+  }
+
+  /**
+   * Atomically force-start a queued pack. Used by the "Start Now" button on
+   * queued packs in the downloads UI.
+   */
+  startPack(packId) {
+    const packItems = [...this._items.values()].filter(i => i.packId === packId);
+    if (packItems.length === 0) return false;
+
+    const queuedItems = packItems.filter(i => i.status === 'queued');
+    if (queuedItems.length === 0) return false;
+
+    const activePacks = new Set(
+      [...this._items.values()]
+        .filter(i => i.status === 'downloading' && i.packId)
+        .map(i => i.packId),
+    );
+    const packAlreadyActive = activePacks.has(packId);
+    if (!packAlreadyActive && this._countActiveSlots() >= this._maxConcurrentDownloads) {
+      return false;
+    }
+
+    for (const item of queuedItems) {
+      item.status = 'downloading';
+      item.progress = item.progress || 0;
+      item.error = null;
+    }
+
+    if (!this._engines.has(packId)) {
+      const allDownloading = [...this._items.values()].filter(
+        i => i.packId === packId && i.status === 'downloading',
+      );
+      this._resumePackDownload(packId, allDownloading);
+    }
+
+    this._saveMetadata();
+    console.log(`[Library] Force-started pack: ${packId} (${queuedItems.length} items)`);
+    return true;
+  }
+
+  /**
+   * Atomically retry every failed item in a pack.
+   */
+  retryPack(packId) {
+    const packItems = [...this._items.values()].filter(i => i.packId === packId);
+    if (packItems.length === 0) return false;
+
+    const failedItems = packItems.filter(i => i.status === 'failed');
+    if (failedItems.length === 0) return false;
+
+    const activePacks = new Set(
+      [...this._items.values()]
+        .filter(i => i.status === 'downloading' && i.packId)
+        .map(i => i.packId),
+    );
+    const packAlreadyActive = activePacks.has(packId);
+    const atCapacity = !packAlreadyActive && this._countActiveSlots() >= this._maxConcurrentDownloads;
+
+    for (const item of failedItems) {
+      item.status = atCapacity ? 'queued' : 'downloading';
+      item.error = null;
+      item.downloadSpeed = 0;
+      item.numPeers = 0;
+    }
+
+    if (!atCapacity) {
+      if (!this._engines.has(packId)) {
+        const allDownloading = [...this._items.values()].filter(
+          i => i.packId === packId && i.status === 'downloading',
+        );
+        this._resumePackDownload(packId, allDownloading);
+      } else {
+        const engine = this._engines.get(packId);
+        if (engine && engine.files) {
+          this._selectOnePackFile(packId, engine);
+        }
+      }
+    }
+
+    this._saveMetadata();
+    console.log(`[Library] Retry pack: ${packId} (${failedItems.length} items${atCapacity ? ' queued' : ''})`);
+    return true;
+  }
+
+  /**
+   * Atomically remove every item in a pack. Stops the shared engine BEFORE
+   * deleting files so the engine no longer holds file handles to paths we are
+   * about to unlink, then removes items one at a time (removeItem handles the
+   * per-item filesystem cleanup).
+   */
+  removePack(packId) {
+    const packItems = [...this._items.values()].filter(i => i.packId === packId);
+    if (packItems.length === 0) return false;
+
+    // Stop the shared engine first so it releases file handles and the
+    // sequential file-picker doesn't try to re-select a file we're deleting.
+    if (this._engines.has(packId)) {
+      this._stopPackEngine(packId);
+    }
+
+    for (const item of packItems) {
+      this.removeItem(item.id);
+    }
+
+    console.log(`[Library] Removed pack: ${packId} (${packItems.length} items)`);
+    return true;
+  }
+
+  /**
    * Re-link a library item to a different IMDB entry.
    * Updates the imdbId, name, poster, year, and optionally showName
    * without touching the downloaded file.
@@ -2078,15 +2277,13 @@ class LibraryManager {
     // Stop download if active
     this._stopDownload(id);
 
-    // If this item belongs to a pack, check if we should stop the shared engine
-    if (item.packId) {
-      const remainingPackItems = [...this._items.values()].filter(
-        i => i.packId === item.packId && i.id !== id && i.status === 'downloading'
-      );
-      if (remainingPackItems.length === 0) {
-        this._stopPackEngine(item.packId);
-      }
-    }
+    // If this item belongs to a pack, decide whether to stop the shared
+    // engine or re-pick a different file. Note: we intentionally do NOT call
+    // _selectOnePackFile while this item is still in this._items — if the
+    // removed item's file was the one currently being downloaded, the sequential
+    // picker might re-select it. We remove the item from the map first (below)
+    // and do the reselect afterwards.
+    const packIdForRemoval = item.packId;
 
     // Kill conversion process if active
     this._stopConversion(id);
@@ -2123,6 +2320,27 @@ class LibraryManager {
 
     this._items.delete(id);
     this._discoveryCache = null; // invalidate discovery cache after deletion
+
+    // After removal, fix up the shared pack engine (if any):
+    //   - If no other items remain downloading in the pack, stop the engine.
+    //   - Otherwise, re-pick the next file so the engine doesn't keep
+    //     downloading bytes for the item we just removed.
+    if (packIdForRemoval) {
+      const remainingActive = [...this._items.values()].filter(
+        i => i.packId === packIdForRemoval && i.status === 'downloading',
+      );
+      if (remainingActive.length === 0) {
+        if (this._engines.has(packIdForRemoval)) {
+          this._stopPackEngine(packIdForRemoval);
+        }
+      } else {
+        const engine = this._engines.get(packIdForRemoval);
+        if (engine && engine.files) {
+          this._selectOnePackFile(packIdForRemoval, engine);
+        }
+      }
+    }
+
     this._saveMetadata();
     this._processQueue();
     return true;
@@ -2218,8 +2436,10 @@ class LibraryManager {
   // ─── Queue Processing ──────────────────────────
 
   _processQueue() {
-    const activeDownloads = [...this._items.values()].filter(i => i.status === 'downloading').length;
-    const available = this._maxConcurrentDownloads - activeDownloads;
+    // Pack-aware slot counting: a single pack engine counts as 1 slot
+    // regardless of how many episodes share it. Otherwise a single active
+    // pack would lock out every queued item because raw counts see N>=max.
+    const available = this._maxConcurrentDownloads - this._countActiveSlots();
     if (available <= 0) return;
 
     const queued = [...this._items.values()]

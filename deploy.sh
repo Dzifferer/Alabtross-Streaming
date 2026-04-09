@@ -47,6 +47,12 @@ sudo docker build $BUILD_FLAGS -t alabtross-mobile ./mobile-ui
 
 BIND_IP=$(ip route get 8.8.8.8 | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')
 
+# Ensure the torrent-cache host dir is owned by the container's UID (1001 — see
+# mobile-ui/Dockerfile). Without this the node process gets EACCES when it tries
+# to create /app/torrent-cache/library and the container crash-loops.
+sudo mkdir -p /mnt/movies/torrent-cache/library
+sudo chown -R 1001:1001 /mnt/movies/torrent-cache
+
 echo "==> Starting container (bind IP: $BIND_IP)..."
 sudo docker run -d \
   --name alabtross-mobile \

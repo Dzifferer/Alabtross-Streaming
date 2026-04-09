@@ -794,10 +794,14 @@ if [[ "$MOBILE_ALREADY_OK" != "true" ]]; then
     docker build -t alabtross-mobile "$MOBILE_UI_DIR" \
       || die "Failed to build Mobile UI. Check: ls $MOBILE_UI_DIR"
 
-    # Create torrent cache and library directories on host for persistent storage
+    # Create torrent cache and library directories on host for persistent storage.
+    # The container runs as UID 1001 (see mobile-ui/Dockerfile), so the host dirs
+    # must be owned by 1001:1001 — otherwise the node process gets EACCES when
+    # it tries to mkdir /app/torrent-cache/library and the container crash-loops.
     TORRENT_CACHE_HOST_DIR="${MOUNT_POINT:-$HOME/.stremio-data}/torrent-cache"
     LIBRARY_HOST_DIR="${TORRENT_CACHE_HOST_DIR}/library"
     mkdir -p "$LIBRARY_HOST_DIR"
+    chown -R 1001:1001 "$TORRENT_CACHE_HOST_DIR"
 
     info "Starting Albatross Mobile UI..."
     # --net=host is required for SSDP multicast (local device discovery for

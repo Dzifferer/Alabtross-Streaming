@@ -102,7 +102,18 @@ function getEngine() {
 }
 
 // ─── Library Manager (initialized on startup) ─────────────────────────
-const library = new LibraryManager({ libraryPath: LIBRARY_PATH, maxConcurrentDownloads: MAX_CONCURRENT_STREAMS });
+// WORKER_URL points at the optional remote GPU conversion worker (a small
+// HTTP service running on a Windows PC with NVENC). When set AND reachable,
+// background transcodes are streamed there over Tailscale instead of
+// running libx264 on the Orin's CPU. See worker/README.md.
+const WORKER_URL    = process.env.WORKER_URL || '';
+const WORKER_SECRET = process.env.WORKER_SECRET || '';
+const library = new LibraryManager({
+  libraryPath: LIBRARY_PATH,
+  maxConcurrentDownloads: MAX_CONCURRENT_STREAMS,
+  workerUrl: WORKER_URL,
+  workerSecret: WORKER_SECRET,
+});
 
 // Security headers
 app.use((req, res, next) => {

@@ -9,6 +9,7 @@ A fully automated setup that turns an NVIDIA Jetson Orin Nano into a secure home
 - **Tailscale VPN** — secure peer-to-peer tunnel so your streaming server is never exposed to the public internet (no port forwarding needed, works behind CGNAT)
 - **DuckDNS** (optional) — keeps your server reachable when your home IP changes
 - **Health Monitoring** — auto-restarts crashed containers every 5 minutes
+- **GPU Conversion Worker** (optional) — offload background video transcodes from the Orin's CPU to a Windows PC with an NVIDIA RTX card. Cuts a 2-hour HEVC re-encode from ~6 hours of `libx264` to ~10 minutes of `h264_nvenc` over Tailscale. See [`worker/README.md`](worker/README.md) to set it up. Set `WORKER_URL` (and optionally `WORKER_SECRET`) in your `.env` file and `deploy.sh` will pick it up.
 
 ## Requirements
 

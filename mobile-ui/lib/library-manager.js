@@ -17,6 +17,7 @@ const path = require('path');
 const fs = require('fs');
 const { VIDEO_EXTENSIONS, TRACKERS, isFileNameSafe, getMimeType } = require('./file-safety');
 const { PeerManager } = require('./peer-manager');
+const { WorkerClient } = require('./worker-client');
 
 const DEFAULT_MAX_CONCURRENT_DOWNLOADS = 5;
 const METADATA_SAVE_INTERVAL = 30 * 1000; // Save metadata every 30s during active downloads
@@ -93,11 +94,27 @@ class LibraryManager {
     // lib/peer-manager.js for why this exists at all.
     this._peerMgrByEngine = new WeakMap();
     this._progressTimers = new Map(); // id -> interval timer
-    this._convertProcesses = new Map(); // id -> FFmpeg child process (active conversions)
+    this._convertProcesses = new Map(); // id -> conversion handle (local ffmpeg or remote worker)
     this._maxConcurrentConversions = 1;
     this._metadataSaveTimer = null;
     this._discoveryCache = null;      // cached result of _discoverUntrackedFiles
     this._discoveryCacheTs = 0;       // timestamp of last discovery scan
+
+    // Optional remote GPU conversion worker. When configured AND reachable
+    // we route full transcodes to a Windows PC with NVENC instead of
+    // running libx264 on the Orin's CPU. See lib/worker-client.js and
+    // worker/README.md for the worker side.
+    //
+    // _workerHealth is null when the worker is offline / unconfigured and
+    // a JSON object (the /health response) when it's reachable. Refreshed
+    // every WORKER_HEALTH_INTERVAL_MS by _startWorkerHealthProbe(). Used
+    // by _canStartConversionNow() to gate the download/conversion conflict.
+    this._workerClient = new WorkerClient({
+      workerUrl: opts.workerUrl || '',
+      secret:    opts.workerSecret || '',
+    });
+    this._workerHealth = null;
+    this._workerHealthTimer = null;
 
     // Ensure library directory exists
     if (!fs.existsSync(this._libraryPath)) {
@@ -125,6 +142,15 @@ class LibraryManager {
 
   async _initAsync() {
     try {
+      // If a remote GPU worker is configured, probe it now and start the
+      // periodic health refresh. We do this BEFORE the conversion sweep so
+      // the very first batch of background conversions can route to the
+      // worker if it's online.
+      if (this._workerClient.enabled()) {
+        await this._refreshWorkerHealth();
+        this._startWorkerHealthProbe();
+      }
+
       // Recover items that are fully downloaded on disk but stuck in the
       // wrong status (most commonly 'failed' from a torrent-metadata-timeout
       // during resume, or 'downloading' from a container crash mid-download).
@@ -146,6 +172,34 @@ class LibraryManager {
     } catch (err) {
       console.error('[Library] Async init failed:', err);
     }
+  }
+
+  /**
+   * Probe the GPU worker's /health endpoint and stash the result. Called
+   * once at startup and then every 30s by _startWorkerHealthProbe(). Logs
+   * transitions (offline ↔ online) so the operator can see what's going on.
+   */
+  async _refreshWorkerHealth() {
+    if (!this._workerClient.enabled()) return;
+    const prev = this._workerHealth;
+    const next = await this._workerClient.checkHealth();
+    this._workerHealth = next;
+    if (!prev && next) {
+      console.log(`[Library] GPU worker reachable: ${next.encoder} preset=${next.preset} cq=${next.cq} maxWidth=${next.maxWidth}${next.gpu ? ` (${next.gpu})` : ''}`);
+    } else if (prev && !next) {
+      console.warn('[Library] GPU worker became unreachable — falling back to local libx264 for new conversions');
+    }
+  }
+
+  _startWorkerHealthProbe() {
+    if (this._workerHealthTimer) return;
+    // 30s cadence is enough — the only thing this gates is whether new
+    // conversions go remote or local, and we always re-probe right before
+    // dispatching anyway.
+    this._workerHealthTimer = setInterval(() => {
+      this._refreshWorkerHealth().catch(() => {});
+    }, 30000);
+    if (this._workerHealthTimer.unref) this._workerHealthTimer.unref();
   }
 
   /**
@@ -3131,12 +3185,15 @@ class LibraryManager {
         continue;
       }
       item.convertKind = kind;
-      item._probeDuration = probe.duration;
+      this._stashProbeForConversion(item, probe);
 
       console.log(`[Library] Resuming ${kind}: "${item.name}"`);
       // Go through _checkAndConvert so the concurrency cap is honoured —
       // 10 interrupted conversions should NOT spawn 10 ffmpeg at once.
-      if (this._convertProcesses.size >= this._maxConcurrentConversions) {
+      // Also defer to the queue when downloads are active and the remote
+      // worker isn't online; _processConversionQueue picks up pending
+      // items as soon as either condition flips.
+      if (this._convertProcesses.size >= this._maxConcurrentConversions || !this._canStartConversionNow()) {
         item._pendingConversion = true;
         item._pendingConvertKind = kind;
         item.status = 'complete'; // keep out of the "in-flight" set until started
@@ -3160,6 +3217,13 @@ class LibraryManager {
           _pendingConversion,
           _pendingConvertKind,
           _probeDuration,
+          _probeVideoCodec,
+          _probeAudioCodec,
+          _probeAudioProfile,
+          _probeAudioChannels,
+          _probeAudioSampleRate,
+          _probeHasAudio,
+          _workerFailed,
           ...clean
         } = item;
         return clean;
@@ -3312,6 +3376,19 @@ class LibraryManager {
           // to /stream/transcode instead of falsely marking them direct-play.
           const videoProfile = videoStream ? (videoStream.profile || null) : null;
           const pixFmt = videoStream ? (videoStream.pix_fmt || null) : null;
+          // Audio profile / channel layout / sample rate let us decide
+          // whether the source audio is already universal enough to
+          // stream-copy through the conversion (skip the AAC re-encode).
+          // Browsers reliably play AAC LC stereo (or mono) at ≤48 kHz; HE-AAC,
+          // 5.1 layouts, and high sample rates can confuse the mp4 audio
+          // pipeline so we still re-encode those.
+          const audioProfile = audioStream ? (audioStream.profile || null) : null;
+          const audioChannels = audioStream && audioStream.channels != null
+            ? parseInt(audioStream.channels, 10)
+            : null;
+          const audioSampleRate = audioStream && audioStream.sample_rate != null
+            ? parseInt(audioStream.sample_rate, 10)
+            : null;
           const container = info.format ? info.format.format_name : null;
           const duration = info.format && info.format.duration != null
             ? parseFloat(info.format.duration)
@@ -3339,6 +3416,9 @@ class LibraryManager {
             videoProfile,
             pixFmt,
             audioCodec,
+            audioProfile,
+            audioChannels,
+            audioSampleRate,
             duration,
             hasAudio: !!audioStream,
           });
@@ -3594,19 +3674,20 @@ class LibraryManager {
       // Store that this needs conversion and check again when a conversion completes
       item._pendingConversion = true;
       item._pendingConvertKind = kind;
-      item._probeDuration = probe.duration;
+      this._stashProbeForConversion(item, probe);
       return;
     }
 
     // Don't start a transcode while BT downloads are active — libx264 would
-    // starve the download pipeline of CPU and disk bandwidth. The item is
-    // queued with _pendingConversion so _processConversionQueue picks it up
-    // as soon as _stopDownload fires on the last active download.
-    if (this._hasActiveDownloads()) {
-      console.log(`[Library] Deferring conversion of "${item.name}" (${kind}) — downloads active`);
+    // starve the download pipeline of CPU and disk bandwidth. EXCEPT if a
+    // remote GPU worker is online, in which case the encode runs off-box
+    // and the only Orin-side cost is reading the source and streaming it
+    // over Tailscale, neither of which competes meaningfully with BT.
+    if (!this._canStartConversionNow()) {
+      console.log(`[Library] Deferring conversion of "${item.name}" (${kind}) — downloads active and no GPU worker available`);
       item._pendingConversion = true;
       item._pendingConvertKind = kind;
-      item._probeDuration = probe.duration;
+      this._stashProbeForConversion(item, probe);
       return;
     }
 
@@ -3614,7 +3695,7 @@ class LibraryManager {
     item.convertKind = kind;
     item.convertProgress = 0;
     item.convertError = null;
-    item._probeDuration = probe.duration;
+    this._stashProbeForConversion(item, probe);
     this._saveMetadata();
     this._startPeriodicSave();
 
@@ -3684,17 +3765,22 @@ class LibraryManager {
   }
 
   /**
-   * Build the FFmpeg command line for a background conversion. Kind:
-   *   'remux'     — stream-copy video, transcode audio to AAC, re-wrap
-   *                 in an MP4 with +faststart (seekable). Cheap; bound
-   *                 by disk I/O.
+   * Build the FFmpeg command line for a LOCAL background conversion. Kind:
+   *   'remux'     — stream-copy video, transcode audio to AAC (or copy if
+   *                 already universal), re-wrap in an MP4 with +faststart.
+   *                 Cheap; bound by disk I/O.
    *   'transcode' — full re-encode to H.264 main L4.1 yuv420p 8-bit +
-   *                 AAC, 1080p-capped. Slow (CPU-bound on Orin Nano
-   *                 without NVENC) but runs once per file and the
-   *                 stored result is universally direct-playable so
-   *                 no ffmpeg touches it on future plays.
+   *                 AAC (or copy if already universal), 1080p-capped.
+   *                 Slow (CPU-bound on Orin Nano without NVENC) but runs
+   *                 once per file and the stored result is universally
+   *                 direct-playable so no ffmpeg touches it on future plays.
+   *
+   * `audioCopy=true` skips the AAC re-encode when _canCopyAudio() said the
+   * source audio is already universal (AAC LC stereo @ ≤48 kHz). This
+   * shaves a small but real chunk off both remux and transcode wall clock
+   * and avoids a generation-loss step on already-clean audio.
    */
-  _buildConversionArgs(inputPath, tempOutputPath, kind) {
+  _buildConversionArgs(inputPath, tempOutputPath, kind, audioCopy) {
     const common = [
       '-hide_banner',
       '-fflags', '+genpts',
@@ -3709,12 +3795,15 @@ class LibraryManager {
       '-dn',
     ];
 
+    const audioArgs = audioCopy
+      ? ['-c:a', 'copy']
+      : ['-c:a', 'aac', '-b:a', '192k', '-ac', '2', '-ar', '48000'];
+
     if (kind === 'remux') {
       return [
         ...common,
         '-c:v', 'copy',
-        '-c:a', 'aac',
-        '-b:a', '192k',
+        ...audioArgs,
         '-movflags', '+faststart',
         '-f', 'mp4',
         '-y',
@@ -3726,11 +3815,12 @@ class LibraryManager {
 
     // kind === 'transcode' — full video re-encode.
     // Preset choice rationale: libx264 on Jetson Orin Nano is the only
-    // game in town (no NVENC). 'veryfast' gives a much better
-    // size/quality tradeoff than 'ultrafast' while still averaging
-    // ~15-25 fps at 1080p on the 6-core Cortex-A78AE, i.e. a 2-hour
-    // movie lands in 2-4 hours wall-clock. Acceptable for a background
-    // task and the stored file is half the size of an ultrafast output.
+    // game in town WHEN the remote GPU worker is unreachable. 'veryfast'
+    // gives a much better size/quality tradeoff than 'ultrafast' while
+    // still averaging ~15-25 fps at 1080p on the 6-core Cortex-A78AE, i.e.
+    // a 2-hour movie lands in 2-4 hours wall-clock. When WORKER_URL is set
+    // and the worker is online, _startConversion routes around this path
+    // entirely and the encode runs on a desktop NVIDIA card in minutes.
     //
     // 1920px cap (not 1280) preserves resolution when the source is
     // already 1080p — we're storing permanently, not transcoding for
@@ -3747,10 +3837,7 @@ class LibraryManager {
       '-pix_fmt', 'yuv420p',
       '-crf', '23',
       '-vf', "scale='min(1920,iw)':'-2'",
-      '-c:a', 'aac',
-      '-b:a', '192k',
-      '-ac', '2',
-      '-ar', '48000',
+      ...audioArgs,
       '-movflags', '+faststart',
       '-f', 'mp4',
       '-y',
@@ -3761,17 +3848,115 @@ class LibraryManager {
   }
 
   /**
-   * Start FFmpeg conversion of a library item to browser-compatible MP4.
-   * The kind of conversion (remux vs full transcode) is read from
-   * item.convertKind, which must have been set by _checkAndConvert or
-   * the resume path before calling this.
+   * Decide if the source audio is universal enough to stream-copy through
+   * the conversion. Browsers reliably play AAC LC, stereo (or mono), at
+   * sample rates ≤48 kHz, inside an MP4 container. Anything else (HE-AAC,
+   * 5.1+, 96 kHz, AC-3, EAC-3, DTS, TrueHD, FLAC, Opus-in-mp4) gets
+   * re-encoded to AAC LC stereo 48k for portability.
+   */
+  _canCopyAudio(probe) {
+    if (!probe || !probe.hasAudio) return false;
+    if (probe.audioCodec !== 'aac') return false;
+    const prof = (probe.audioProfile || '').toLowerCase();
+    // ffprobe reports the AAC profile as e.g. "LC", "HE-AAC", "HE-AACv2".
+    // Anything that isn't plain LC gets re-encoded — HE-AAC playback in
+    // mp4 is patchy across browsers.
+    if (prof && prof !== 'lc' && prof !== 'main') return false;
+    if (probe.audioChannels && probe.audioChannels > 2) return false;
+    if (probe.audioSampleRate && probe.audioSampleRate > 48000) return false;
+    return true;
+  }
+
+  /**
+   * Stash the bits of a probe result that downstream conversion code
+   * (local libx264 args, remote worker hints, audio-copy decision) needs
+   * to see when the conversion eventually runs. We don't want to re-probe
+   * inside _startConversion because the file might not even exist anymore
+   * (deleted, renamed) and the probe is the wrong place to retry that.
+   */
+  _stashProbeForConversion(item, probe) {
+    if (!item || !probe) return;
+    item._probeDuration       = probe.duration;
+    item._probeVideoCodec     = probe.videoCodec || null;
+    item._probeAudioCodec     = probe.audioCodec || null;
+    item._probeAudioProfile   = probe.audioProfile || null;
+    item._probeAudioChannels  = probe.audioChannels || null;
+    item._probeAudioSampleRate = probe.audioSampleRate || null;
+    item._probeHasAudio       = !!probe.hasAudio;
+  }
+
+  /**
+   * Build the audioCopy boolean for a queued conversion from the stashed
+   * probe fields on the item. Mirrors _canCopyAudio() but reads from the
+   * item-side cache so we don't have to keep the original probe object
+   * around between queue and dispatch.
+   */
+  _itemCanCopyAudio(item) {
+    return this._canCopyAudio({
+      hasAudio:        item._probeHasAudio,
+      audioCodec:      item._probeAudioCodec,
+      audioProfile:    item._probeAudioProfile,
+      audioChannels:   item._probeAudioChannels,
+      audioSampleRate: item._probeAudioSampleRate,
+    });
+  }
+
+  /**
+   * Decide whether it's safe to start a new conversion right now. The
+   * historical rule was "no conversions while downloads are active" because
+   * libx264 on the Orin starves the BT pipeline. With a remote GPU worker
+   * online the encode runs off-box, so the rule relaxes to "always OK".
+   */
+  _canStartConversionNow() {
+    if (this._workerClient && this._workerClient.enabled() && this._workerHealth) {
+      return true;
+    }
+    return !this._hasActiveDownloads();
+  }
+
+  /**
+   * Start a background conversion of a library item to browser-compatible
+   * MP4. Dispatches to either the remote GPU worker (when configured and
+   * reachable) or the local libx264 path. The kind of conversion (remux
+   * vs full transcode) is read from item.convertKind, which must have
+   * been set by _checkAndConvert or the resume path before calling this.
    */
   _startConversion(id) {
     const item = this._items.get(id);
     if (!item || !item.filePath) return;
 
+    // Route to the remote GPU worker when:
+    //   - it's configured (WORKER_URL set)
+    //   - we last saw it healthy in the periodic probe
+    //   - this item hasn't already failed once on the worker (avoids loops
+    //     on a file the worker can't actually decode)
+    //   - the kind is 'transcode' — remux is so cheap on the Orin's CPU
+    //     that round-tripping over the network would be a net loss
     const kind = item.convertKind === 'transcode' ? 'transcode' : 'remux';
+    const useRemote =
+      kind === 'transcode' &&
+      this._workerClient &&
+      this._workerClient.enabled() &&
+      this._workerHealth &&
+      !item._workerFailed;
 
+    if (useRemote) {
+      this._startRemoteConversion(id);
+    } else {
+      this._startLocalConversion(id);
+    }
+  }
+
+  /**
+   * Run a conversion locally with libx264 (or stream-copy for remux).
+   * This is the fallback path when the GPU worker is unavailable, plus
+   * the only path for cheap remux jobs.
+   */
+  _startLocalConversion(id) {
+    const item = this._items.get(id);
+    if (!item || !item.filePath) return;
+
+    const kind = item.convertKind === 'transcode' ? 'transcode' : 'remux';
     const inputPath = path.join(this._libraryPath, item.filePath);
     const tempOutputPath = this._getConvertTempPath(inputPath);
     const finalOutputPath = this._getConvertOutputPath(inputPath);
@@ -3782,10 +3967,19 @@ class LibraryManager {
     }
 
     const duration = item._probeDuration || 0;
+    const audioCopy = this._itemCanCopyAudio(item);
 
-    const ffmpeg = spawn('ffmpeg', this._buildConversionArgs(inputPath, tempOutputPath, kind));
+    const ffmpeg = spawn('ffmpeg', this._buildConversionArgs(inputPath, tempOutputPath, kind, audioCopy));
 
-    this._convertProcesses.set(id, ffmpeg);
+    // Wrap the child process in a uniform handle so the pause / shutdown
+    // path can treat local and remote conversions the same way.
+    const handle = {
+      isRemote: false,
+      process: ffmpeg,
+      kill: () => { try { ffmpeg.kill('SIGTERM'); } catch { /* ignore */ } },
+      _pausedForDownloads: false,
+    };
+    this._convertProcesses.set(id, handle);
 
     // Parse progress from FFmpeg stdout
     let progressBuf = '';
@@ -3820,7 +4014,7 @@ class LibraryManager {
       // don't treat as failure, just requeue. Must check before the
       // code === 0 branch because a SIGTERM'd ffmpeg can sometimes
       // exit cleanly if it happened to be between frames.
-      if (ffmpeg._pausedForDownloads) {
+      if (handle._pausedForDownloads) {
         this._onConversionPausedForDownloads(id);
         if (this._engines.size === 0 && this._convertProcesses.size === 0) {
           this._stopPeriodicSave();
@@ -3833,6 +4027,114 @@ class LibraryManager {
       } else {
         this._onConversionFailure(id, `FFmpeg exited with code ${code}`);
       }
+    });
+  }
+
+  /**
+   * Run a conversion on the remote GPU worker. Streams the source file to
+   * the worker over HTTP, gets the H.264/AAC MP4 back, and lets the normal
+   * _onConversionSuccess path take over from there. On any worker failure
+   * (network, ffmpeg error, GPU error, …) we set _workerFailed on the item
+   * and fall through to libx264 — the remote attempt is best-effort, never
+   * a hard dependency.
+   */
+  _startRemoteConversion(id) {
+    const item = this._items.get(id);
+    if (!item || !item.filePath) return;
+
+    const inputPath = path.join(this._libraryPath, item.filePath);
+    const tempOutputPath = this._getConvertTempPath(inputPath);
+    const finalOutputPath = this._getConvertOutputPath(inputPath);
+
+    if (!item.originalFilePath) {
+      item.originalFilePath = item.filePath;
+    }
+
+    const audioCopy = this._itemCanCopyAudio(item);
+    const totalIn = (() => {
+      try { return fs.statSync(inputPath).size; }
+      catch { return 0; }
+    })();
+
+    // Uniform handle — the kill() function gets filled in by the worker
+    // client's registerHandle callback once the request is in flight.
+    const handle = {
+      isRemote: true,
+      kill: () => { /* replaced via registerHandle */ },
+      _pausedForDownloads: false,
+    };
+    this._convertProcesses.set(id, handle);
+
+    console.log(`[Library] Starting REMOTE transcode: "${item.name}" (${(totalIn / 1e9).toFixed(2)} GB, codec=${item._probeVideoCodec || '?'}, audio=${item._probeAudioCodec || '?'}${audioCopy ? ' COPY' : ''})`);
+
+    this._workerClient.transcode(inputPath, tempOutputPath, {
+      filename:    path.basename(inputPath),
+      sourceCodec: item._probeVideoCodec || undefined,
+      sourceAudio: item._probeAudioCodec || undefined,
+      audioCopy,
+      onProgress: ({ phase, bytesUp, bytesDown, totalUp }) => {
+        // Map (upload → encode → download) phases onto the 0-99% scale
+        // the UI uses. We don't have per-frame progress on the remote
+        // path, so the bands are coarse but they're enough for the
+        // converting indicator to look like it's moving.
+        let p;
+        if (phase === 'upload') {
+          p = totalUp > 0 ? Math.round((bytesUp / totalUp) * 33) : 0;
+        } else if (phase === 'encode') {
+          p = 40;
+        } else {
+          // download phase — we don't know the output size up front, so
+          // crawl from 60 → 99 based on bytes received vs the input size
+          // (output is typically 30-70% of input for H.264 from HEVC).
+          const denom = Math.max(totalUp * 0.6, 1);
+          p = 60 + Math.min(39, Math.round((bytesDown / denom) * 39));
+        }
+        item.convertProgress = Math.min(99, Math.max(0, p));
+      },
+      registerHandle: (workerHandle) => {
+        handle.kill = () => workerHandle.kill();
+      },
+    }).then((result) => {
+      this._convertProcesses.delete(id);
+
+      // Pause path: a download started while we were converting, the
+      // pause was a no-op for remote (see _pauseRunningConversionsForDownloads)
+      // so this branch should normally not fire — but if some other code
+      // path called handle.kill() with the flag set, honour it.
+      if (handle._pausedForDownloads) {
+        this._onConversionPausedForDownloads(id);
+        if (this._engines.size === 0 && this._convertProcesses.size === 0) {
+          this._stopPeriodicSave();
+        }
+        return;
+      }
+
+      console.log(`[Library] Remote transcode finished for "${item.name}": ${(result.outputBytes / 1e9).toFixed(2)} GB in ${result.encodeSec}s (${(result.outputBytes / Math.max(result.inputBytes, 1) * 100).toFixed(0)}% of source)`);
+      this._onConversionSuccess(id, inputPath, tempOutputPath, finalOutputPath);
+    }).catch((err) => {
+      this._convertProcesses.delete(id);
+
+      // Clean up any partial output the worker may have left behind.
+      try { if (fs.existsSync(tempOutputPath)) fs.unlinkSync(tempOutputPath); } catch { /* ignore */ }
+
+      if (handle._pausedForDownloads) {
+        this._onConversionPausedForDownloads(id);
+        if (this._engines.size === 0 && this._convertProcesses.size === 0) {
+          this._stopPeriodicSave();
+        }
+        return;
+      }
+
+      // Mark this item so we don't loop forever if the worker can't
+      // handle this particular source (e.g. exotic codec, corrupt file).
+      // The flag is in-memory only — a server restart will retry the
+      // remote path one more time, which is what we want.
+      item._workerFailed = true;
+      console.warn(`[Library] Remote transcode failed for "${item.name}" (${err.message}) — falling back to local libx264`);
+      // Force the next probe of worker health so a transient blip doesn't
+      // keep us locked out of the remote path for the full 30s interval.
+      this._refreshWorkerHealth().catch(() => {});
+      this._startLocalConversion(id);
     });
   }
 
@@ -3943,7 +4245,10 @@ class LibraryManager {
    */
   _processConversionQueue() {
     if (this._convertProcesses.size >= this._maxConcurrentConversions) return;
-    if (this._hasActiveDownloads()) return;
+    // _canStartConversionNow() returns true when downloads are idle OR
+    // when the remote GPU worker is online (since remote conversions
+    // don't compete with downloads on the Orin).
+    if (!this._canStartConversionNow()) return;
 
     const pending = [...this._items.values()].find(i => i._pendingConversion);
     if (!pending) return;
@@ -3999,12 +4304,19 @@ class LibraryManager {
    */
   _pauseRunningConversionsForDownloads() {
     if (this._convertProcesses.size === 0) return;
-    for (const [id, proc] of this._convertProcesses) {
+    for (const [id, handle] of this._convertProcesses) {
+      // Remote conversions run on the GPU worker, not on the Orin's CPU.
+      // The only Orin-side cost is reading the source file off disk and
+      // streaming it over Tailscale, neither of which competes with BT
+      // piece writes in any meaningful way. Letting them keep running
+      // during downloads is the whole point of having a remote worker.
+      if (handle.isRemote) continue;
+
       const item = this._items.get(id);
       const name = item ? item.name : id;
-      console.log(`[Library] Pausing conversion "${name}" to free CPU for downloads`);
-      proc._pausedForDownloads = true;
-      try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+      console.log(`[Library] Pausing local conversion "${name}" to free CPU for downloads`);
+      handle._pausedForDownloads = true;
+      handle.kill();
     }
   }
 

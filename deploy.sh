@@ -48,6 +48,9 @@ sudo docker build $BUILD_FLAGS -t alabtross-mobile ./mobile-ui
 BIND_IP=$(ip route get 8.8.8.8 | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')
 
 echo "==> Starting container (bind IP: $BIND_IP)..."
+# WORKER_URL / WORKER_SECRET pull through from .env when set — if blank,
+# the library manager runs every conversion locally on libx264. See
+# worker/README.md to set up the GPU conversion worker on a Windows PC.
 sudo docker run -d \
   --name alabtross-mobile \
   --restart unless-stopped \
@@ -57,6 +60,8 @@ sudo docker run -d \
   -e TORRENT_CACHE="/app/torrent-cache" \
   -e LIBRARY_PATH="/app/torrent-cache/library" \
   -e TMDB_API_KEY="${TMDB_API_KEY:?Set TMDB_API_KEY env var before deploying}" \
+  -e WORKER_URL="${WORKER_URL:-}" \
+  -e WORKER_SECRET="${WORKER_SECRET:-}" \
   -v "/mnt/movies/torrent-cache:/app/torrent-cache" \
   alabtross-mobile
 

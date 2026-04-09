@@ -830,21 +830,25 @@ class LibraryManager {
         console.log(`[Library] pack ${infoHash.slice(0, 8)}: using cached torrent metadata (skipping BEP-9)`);
       }
 
-      const timeout = setTimeout(() => {
-        const { diag, reason } = this._metadataTimeoutDiag(engine);
-        console.error(`[Library] pack ${infoHash.slice(0, 8)}: metadata timeout — ${diag} — ${reason}`);
-        this._destroyEngine(engine);
-        reject(new Error(`Torrent metadata timeout (90s) — ${diag} — ${reason}`));
-      }, 90000);
+      const tm = this._startMetadataTimeout(
+        engine,
+        `pack ${infoHash.slice(0, 8)}`,
+        ({ diag, reason, totalMs }) => {
+          const totalS = (totalMs / 1000) | 0;
+          console.error(`[Library] pack ${infoHash.slice(0, 8)}: metadata timeout — ${diag} — ${reason}`);
+          this._destroyEngine(engine);
+          reject(new Error(`Torrent metadata timeout (${totalS}s) — ${diag} — ${reason}`));
+        }
+      );
 
       engine.on('error', (err) => {
-        clearTimeout(timeout);
+        tm.clear();
         this._destroyEngine(engine);
         reject(err);
       });
 
       engine.on('ready', () => {
-        clearTimeout(timeout);
+        tm.clear();
 
         // Find all video files, excluding samples/trailers/promos and tiny junk files
         const PACK_MIN_FILE_SIZE = 10 * 1024 * 1024; // 10 MB — skip promo/ad files
@@ -990,21 +994,25 @@ class LibraryManager {
         console.log(`[Library] scan ${infoHash.slice(0, 8)}: using cached torrent metadata (skipping BEP-9)`);
       }
 
-      const timeout = setTimeout(() => {
-        const { diag, reason } = this._metadataTimeoutDiag(engine);
-        console.error(`[Library] scan ${infoHash.slice(0, 8)}: metadata timeout — ${diag} — ${reason}`);
-        this._destroyEngine(engine);
-        reject(new Error(`Torrent metadata timeout (90s) — ${diag} — ${reason}`));
-      }, 90000);
+      const tm = this._startMetadataTimeout(
+        engine,
+        `scan ${infoHash.slice(0, 8)}`,
+        ({ diag, reason, totalMs }) => {
+          const totalS = (totalMs / 1000) | 0;
+          console.error(`[Library] scan ${infoHash.slice(0, 8)}: metadata timeout — ${diag} — ${reason}`);
+          this._destroyEngine(engine);
+          reject(new Error(`Torrent metadata timeout (${totalS}s) — ${diag} — ${reason}`));
+        }
+      );
 
       engine.on('error', (err) => {
-        clearTimeout(timeout);
+        tm.clear();
         this._destroyEngine(engine);
         reject(err);
       });
 
       engine.on('ready', () => {
-        clearTimeout(timeout);
+        tm.clear();
 
         // Find all usable video files, excluding samples/trailers/promos and tiny junk files
         const PACK_MIN_FILE_SIZE = 10 * 1024 * 1024; // 10 MB — skip promo/ad files
@@ -1450,24 +1458,28 @@ class LibraryManager {
     // (engine is usable before 'ready' — it just won't have files yet)
     this._engines.set(packId, engine);
 
-    const timeout = setTimeout(() => {
-      const { diag, reason } = this._metadataTimeoutDiag(engine);
-      console.error(`[Library] resume ${first.infoHash.slice(0, 8)}: metadata timeout — ${diag} — ${reason}`);
-      // Fail ALL downloading items for this pack, not just the ones passed in
-      for (const [, item] of this._items) {
-        if (item.packId === packId && item.status === 'downloading') {
-          item.status = 'failed';
-          item.error = `Torrent metadata timeout on resume — ${diag} — ${reason}`;
+    const tm = this._startMetadataTimeout(
+      engine,
+      `resume ${first.infoHash.slice(0, 8)}`,
+      ({ diag, reason, totalMs }) => {
+        const totalS = (totalMs / 1000) | 0;
+        console.error(`[Library] resume ${first.infoHash.slice(0, 8)}: metadata timeout — ${diag} — ${reason}`);
+        // Fail ALL downloading items for this pack, not just the ones passed in
+        for (const [, item] of this._items) {
+          if (item.packId === packId && item.status === 'downloading') {
+            item.status = 'failed';
+            item.error = `Torrent metadata timeout on resume (${totalS}s) — ${diag} — ${reason}`;
+          }
         }
+        this._destroyEngine(engine);
+        this._engines.delete(packId);
+        this._saveMetadata();
+        this._processQueue();
       }
-      this._destroyEngine(engine);
-      this._engines.delete(packId);
-      this._saveMetadata();
-      this._processQueue();
-    }, 90000);
+    );
 
     engine.on('error', (err) => {
-      clearTimeout(timeout);
+      tm.clear();
       for (const [, item] of this._items) {
         if (item.packId === packId && item.status === 'downloading') {
           item.status = 'failed';
@@ -1481,7 +1493,7 @@ class LibraryManager {
     });
 
     engine.on('ready', () => {
-      clearTimeout(timeout);
+      tm.clear();
 
       // Deselect all files first
       for (const f of engine.files) f.deselect();
@@ -2634,20 +2646,24 @@ class LibraryManager {
     this._engines.set(id, engine);
     this._startPeriodicSave();
 
-    const timeout = setTimeout(() => {
-      if (item.status === 'downloading' && !item.filePath) {
-        const { diag, reason } = this._metadataTimeoutDiag(engine);
-        console.error(`[Library] Metadata timeout for "${item.name}" — ${diag} — ${reason}`);
-        item.status = 'failed';
-        item.error = `Torrent metadata timeout (90s) — ${diag} — ${reason}`;
-        this._stopDownload(id);
-        this._saveMetadata();
-        this._processQueue();
+    const tm = this._startMetadataTimeout(
+      engine,
+      `dl ${item.infoHash.slice(0, 8)}`,
+      ({ diag, reason, totalMs }) => {
+        if (item.status === 'downloading' && !item.filePath) {
+          const totalS = (totalMs / 1000) | 0;
+          console.error(`[Library] Metadata timeout for "${item.name}" — ${diag} — ${reason}`);
+          item.status = 'failed';
+          item.error = `Torrent metadata timeout (${totalS}s) — ${diag} — ${reason}`;
+          this._stopDownload(id);
+          this._saveMetadata();
+          this._processQueue();
+        }
       }
-    }, 90000);
+    );
 
     engine.on('ready', () => {
-      clearTimeout(timeout);
+      tm.clear();
 
       // Find the best video file
       const file = this._selectVideoFile(engine.files);
@@ -2718,7 +2734,7 @@ class LibraryManager {
     });
 
     engine.on('error', (err) => {
-      clearTimeout(timeout);
+      tm.clear();
       console.error(`[Library] Download error for "${item.name}": ${err.message}`);
       item.status = 'failed';
       item.error = err.message;
@@ -2824,6 +2840,73 @@ class LibraryManager {
       reason = `${wires} wires handshook but metadata (ut_metadata / BEP-9) never arrived`;
     }
     return { diag, reason };
+  }
+
+  /**
+   * Adaptive metadata-fetch deadline.
+   *
+   * Replaces the old hard `setTimeout(..., 90000)` pattern that killed any
+   * download whose BEP-9 info-dict took longer than 90s to trickle in. On
+   * season packs the info dict is large (hundreds of files × piece hashes)
+   * and is served 16 KiB at a time from only those peers that actually
+   * respond to ut_metadata — handshakes complete fine, but the full dict
+   * can take 2-3 minutes even on a healthy swarm. That pattern was the
+   * dominant cause of "failed" packs: the diag showed wires>0 the entire
+   * time, i.e. peers were talking to us, we just weren't patient enough.
+   *
+   * Strategy: after `initialMs` with no 'ready' event, check swarm state.
+   *   - If there are zero wires, fail immediately (nothing is going to
+   *     change — the swarm is dead or unreachable).
+   *   - If wires > 0, grant another `extensionMs` and re-check, up to a
+   *     hard cap of `maxMs` from the original start.
+   *
+   * Returns a handle with `clear()` so the caller cancels the deadline on
+   * 'ready' / 'error'. `onTimeout` is fired with `{ diag, reason, totalMs }`
+   * when the deadline finally expires.
+   */
+  _startMetadataTimeout(engine, label, onTimeout, opts = {}) {
+    const initialMs = opts.initialMs != null ? opts.initialMs : 90000;
+    const extensionMs = opts.extensionMs != null ? opts.extensionMs : 60000;
+    const maxMs = opts.maxMs != null ? opts.maxMs : 300000;
+    const startedAt = Date.now();
+    let timer = null;
+    let cleared = false;
+
+    const tick = () => {
+      if (cleared) return;
+      const elapsed = Date.now() - startedAt;
+      const sw = engine && engine.swarm;
+      const wires = sw && sw.wires ? sw.wires.length : 0;
+      const { diag, reason } = this._metadataTimeoutDiag(engine);
+
+      // Wires > 0 means peers have completed the BT handshake and we're
+      // inside the "metadata is plausibly in flight" regime — extend the
+      // deadline up to the hard cap rather than killing a download that's
+      // probably making real progress. Wires == 0 is a dead swarm; no
+      // amount of waiting will produce metadata, so bail immediately.
+      if (wires > 0 && elapsed + extensionMs <= maxMs) {
+        console.log(
+          `[Library] ${label}: metadata still pending after ${(elapsed / 1000) | 0}s — ${diag} — extending +${(extensionMs / 1000) | 0}s (handshakes active)`
+        );
+        timer = setTimeout(tick, extensionMs);
+        return;
+      }
+
+      cleared = true;
+      timer = null;
+      onTimeout({ diag, reason, totalMs: elapsed });
+    };
+
+    timer = setTimeout(tick, initialMs);
+    return {
+      clear() {
+        cleared = true;
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+      },
+    };
   }
 
   /**

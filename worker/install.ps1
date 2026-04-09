@@ -149,13 +149,25 @@ Write-Ok "Inbound TCP $Port allowed"
 # ─── 7. Scheduled Task ─────────────────────────────────────────────────
 Write-Step 'Registering Scheduled Task to run worker at boot'
 $taskName = 'AlabtrossGPUWorker'
-$nodePath = (Get-Command node).Source
+
+# Resolve absolute paths to node, ffmpeg and ffprobe and bake them into
+# the launcher's env. The scheduled task runs as SYSTEM, which has its
+# OWN PATH (the machine PATH only) and does NOT see user-scoped winget
+# installs of ffmpeg/Node. Without absolute paths the worker spawns
+# `ffmpeg` and gets ENOENT, exits during startup, and the health probe
+# fails. Resolving here (where we run as the installing user) sidesteps
+# the whole machine-vs-user PATH issue.
+$nodePath    = (Get-Command node).Source
+$ffmpegPath  = (Get-Command ffmpeg).Source
+$ffprobePath = (Get-Command ffprobe).Source
 
 $envBlock = @(
     "WORKER_PORT=$Port",
     "NVENC_PRESET=$NvencPreset",
     "NVENC_CQ=$NvencCq",
-    "MAX_WIDTH=$MaxWidth"
+    "MAX_WIDTH=$MaxWidth",
+    "FFMPEG_PATH=$ffmpegPath",
+    "FFPROBE_PATH=$ffprobePath"
 )
 if ($Secret) { $envBlock += "WORKER_SECRET=$Secret" }
 

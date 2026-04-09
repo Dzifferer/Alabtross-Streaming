@@ -1081,23 +1081,36 @@ app.get('/api/diagnostics/system', async (req, res) => {
     const sys = await getSystemDiag(sampleMs);
 
     // Aggregate torrent throughput across both streaming engine and library.
+    //
+    // One row per actual torrent-stream engine, NOT per library item. Pack
+    // engines are shared across every episode in the pack, so the naïve
+    // per-item loop inflated counts (55 episodes × 7 peers = 385 "peers"
+    // for one real 7-peer swarm). See LibraryManager.getActiveEngineStats.
     let torrentDownloadBps = 0;
+    let torrentUploadBps = 0;
     let torrentPeers = 0;
     let activeTorrents = 0;
-    const perTorrent = [];
+    const perEngine = [];
 
     try {
       const eng = engine; // don't lazy-init just for diagnostics
       if (eng) {
         for (const s of eng.getAllStatus()) {
           torrentDownloadBps += s.downloadSpeed || 0;
+          torrentUploadBps += s.uploadSpeed || 0;
           torrentPeers += s.numPeers || 0;
           activeTorrents++;
-          perTorrent.push({
+          perEngine.push({
             source: 'stream',
             name: s.name,
+            isPack: false,
+            activeFileName: null,
             downloadBps: s.downloadSpeed || 0,
+            uploadBps: s.uploadSpeed || 0,
             peers: s.numPeers || 0,
+            itemCount: 1,
+            downloadingCount: 1,
+            completeCount: 0,
           });
         }
       }
@@ -1106,16 +1119,22 @@ app.get('/api/diagnostics/system', async (req, res) => {
     }
 
     try {
-      for (const item of library.getAll()) {
-        if (item.status !== 'downloading') continue;
-        torrentDownloadBps += item.downloadSpeed || 0;
-        torrentPeers += item.numPeers || 0;
+      for (const stat of library.getActiveEngineStats()) {
+        torrentDownloadBps += stat.downloadBps || 0;
+        torrentUploadBps += stat.uploadBps || 0;
+        torrentPeers += stat.peers || 0;
         activeTorrents++;
-        perTorrent.push({
+        perEngine.push({
           source: 'library',
-          name: item.name,
-          downloadBps: item.downloadSpeed || 0,
-          peers: item.numPeers || 0,
+          name: stat.name,
+          isPack: stat.isPack,
+          activeFileName: stat.activeFileName,
+          downloadBps: stat.downloadBps,
+          uploadBps: stat.uploadBps,
+          peers: stat.peers,
+          itemCount: stat.itemCount,
+          downloadingCount: stat.downloadingCount,
+          completeCount: stat.completeCount,
         });
       }
     } catch (e) {
@@ -1164,8 +1183,10 @@ app.get('/api/diagnostics/system', async (req, res) => {
         active: activeTorrents,
         totalDownloadBps: torrentDownloadBps,
         totalDownloadMBps: +(torrentMBps).toFixed(3),
+        totalUploadBps: torrentUploadBps,
+        totalUploadMBps: +(torrentUploadBps / 1e6).toFixed(3),
         totalPeers: torrentPeers,
-        perTorrent,
+        perEngine,
       },
       host: {
         cpu: sys.cpu,

@@ -4,11 +4,16 @@
  *
  * Hits the server's /api/diagnostics/system endpoint and pretty-prints:
  *   • the bottleneck hint
- *   • host CPU / memory / NIC rx / disk I/O
+ *   • host CPU / memory / NIC rx+tx / disk I/O
  *   • the gap between host NIC rx and torrent-accounted throughput
  *     (a big gap usually means a stream-playback engine is pulling
  *      bytes that don't show up in the Downloads panel)
- *   • a per-torrent table sorted by speed
+ *   • a per-engine table sorted by speed, with download + upload columns
+ *
+ * One row per *real* torrent-stream engine, not per library item: a pack
+ * engine shared by 55 episodes shows up as a single row tagged with the
+ * currently-active file and the number of queued episodes, so the peer
+ * count reflects the actual swarm.
  *
  * Usage:
  *   node scripts/diag-downloads.js                  # http://localhost:8080
@@ -116,15 +121,17 @@ function render(d) {
   // Accounted-vs-host gap. This is the key number for "UI says X, device says Y".
   const t = d.torrents || {};
   const acc = t.totalDownloadBps || 0;
+  const up = t.totalUploadBps || 0;
   const rx = h.totalNetRxBps || 0;
   const gap = Math.max(0, rx - acc);
   const accountedPct = rx > 0 ? (acc / rx) * 100 : null;
 
-  lines.push(`${BOLD}Torrents${RESET}  (${t.active || 0} active, ${t.totalPeers || 0} peers total)`);
-  lines.push(`  accounted:   ${fmtBps(acc)}`);
-  lines.push(`  host nic rx: ${fmtBps(rx)}`);
+  lines.push(`${BOLD}Torrents${RESET}  (${t.active || 0} engines, ${t.totalPeers || 0} peers total)`);
+  lines.push(`  down accounted: ${fmtBps(acc)}`);
+  lines.push(`  up accounted:   ${fmtBps(up)}`);
+  lines.push(`  host nic rx:    ${fmtBps(rx)}`);
   lines.push(
-    `  unaccounted: ${fmtBps(gap)}` +
+    `  unaccounted:    ${fmtBps(gap)}` +
       (accountedPct != null ? `   ${DIM}(${accountedPct.toFixed(0)}% of rx attributed to torrents)${RESET}` : '')
   );
   if (gap > 500 * 1024 && gap > acc * 0.5) {
@@ -137,18 +144,37 @@ function render(d) {
   }
   lines.push('');
 
-  // Per-torrent table
-  const rows = (t.perTorrent || []).slice().sort((a, b) => (b.downloadBps || 0) - (a.downloadBps || 0));
+  // Per-engine table — one row per real torrent-stream engine.
+  // Sort primarily by download speed, then by upload speed so seeding-only
+  // engines still bubble up above fully idle ones.
+  const rows = (t.perEngine || []).slice().sort((a, b) => {
+    const d1 = (b.downloadBps || 0) - (a.downloadBps || 0);
+    if (d1 !== 0) return d1;
+    return (b.uploadBps || 0) - (a.uploadBps || 0);
+  });
   if (rows.length === 0) {
-    lines.push(`${DIM}(no active torrents)${RESET}`);
+    lines.push(`${DIM}(no active engines)${RESET}`);
   } else {
-    lines.push(`${BOLD}Per-torrent${RESET}`);
-    lines.push(`  ${'source'.padEnd(8)} ${'name'.padEnd(42)} ${'speed'.padStart(10)}  ${'peers'.padStart(5)}`);
-    lines.push(`  ${DIM}${'-'.repeat(8)} ${'-'.repeat(42)} ${'-'.repeat(10)}  ${'-'.repeat(5)}${RESET}`);
+    lines.push(`${BOLD}Per-engine${RESET}`);
+    lines.push(
+      `  ${'source'.padEnd(8)} ${'name'.padEnd(42)} ${'down'.padStart(10)}  ${'up'.padStart(10)}  ${'peers'.padStart(5)}  items`
+    );
+    lines.push(
+      `  ${DIM}${'-'.repeat(8)} ${'-'.repeat(42)} ${'-'.repeat(10)}  ${'-'.repeat(10)}  ${'-'.repeat(5)}  -----${RESET}`
+    );
     for (const row of rows) {
+      const label = row.isPack && row.itemCount > 1
+        ? `${row.name} [${row.downloadingCount}/${row.itemCount}]`
+        : row.name;
+      const itemsCol = row.isPack
+        ? `${row.downloadingCount || 0}dl/${row.completeCount || 0}ok/${row.itemCount || 0}`
+        : '-';
       lines.push(
-        `  ${truncate(row.source, 8)} ${truncate(row.name, 42)} ${fmtBps(row.downloadBps).padStart(10)}  ${String(row.peers || 0).padStart(5)}`
+        `  ${truncate(row.source, 8)} ${truncate(label, 42)} ${fmtBps(row.downloadBps).padStart(10)}  ${fmtBps(row.uploadBps).padStart(10)}  ${String(row.peers || 0).padStart(5)}  ${itemsCol}`
       );
+      if (row.isPack && row.activeFileName) {
+        lines.push(`  ${DIM}${' '.repeat(9)}→ ${truncate(row.activeFileName, 72)}${RESET}`);
+      }
     }
   }
 

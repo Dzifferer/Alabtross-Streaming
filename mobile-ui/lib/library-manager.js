@@ -768,7 +768,7 @@ class LibraryManager {
    * and all items are created.
    */
   addSeasonPack(opts) {
-    const { imdbId, name, poster, year, magnetUri, infoHash, quality, size, season } = opts;
+    const { imdbId, name, poster, year, magnetUri, infoHash, quality, size, season, packDirOverride } = opts;
 
     if (!infoHash || !magnetUri) {
       throw new Error('infoHash and magnetUri are required');
@@ -781,9 +781,14 @@ class LibraryManager {
       return Promise.resolve({ status: 'already_downloading', items: [] });
     }
 
+    // packDirOverride lets restartPack keep the pack on disk at the directory
+    // the torrent engine originally downloaded to, so verify:true can pick up
+    // partial/complete pieces instead of re-downloading from scratch.
     const isCompletePack = parseInt(season, 10) === 0;
     const packLabel = isCompletePack ? name : `${name} S${String(season).padStart(2, '0')}`;
-    const packDir = path.join(this._libraryPath, this._safeDirectoryName({ name: packLabel, infoHash }));
+    const packDir = packDirOverride
+      ? path.join(this._libraryPath, packDirOverride)
+      : path.join(this._libraryPath, this._safeDirectoryName({ name: packLabel, infoHash }));
 
     return new Promise((resolve, reject) => {
       // See torrent-engine.js for rationale on connections/uploads values.
@@ -1688,6 +1693,19 @@ class LibraryManager {
     const first = packItems[0];
     const { imdbId, showName, poster, year, magnetUri, infoHash, quality, size } = first;
 
+    // Recover the directory the pack originally downloaded into. addSeasonPack
+    // computes packDir from `name`, but on restart `name` is lost — all we
+    // have per-item is `showName` (file-derived) and the episode name, both
+    // of which almost always differ from the torrent-level name. Without this
+    // override, restart would point the torrent engine at a brand-new empty
+    // directory, causing every episode — including ones already complete on
+    // disk — to re-download from scratch. The first path segment of any
+    // item's filePath is the original pack directory name, so we reuse it.
+    const itemWithFilePath = packItems.find(i => i.filePath);
+    const packDirOverride = itemWithFilePath
+      ? itemWithFilePath.filePath.split(path.sep)[0]
+      : null;
+
     // Always use season=0 (complete pack mode) so addSeasonPack detects
     // seasons from filenames/directories rather than assuming a single season
     const season = 0;
@@ -1716,6 +1734,7 @@ class LibraryManager {
       quality,
       size,
       season,
+      packDirOverride,
     });
   }
 

@@ -80,6 +80,16 @@ const RECONCILE_INTERVAL_MS = 10000;
 // margin for drain scheduling under a saturated connection pool.
 const GIVEUP_GRACE_MS = 45000;
 
+// Absolute maximum time a peer is allowed to linger in the watch list without
+// ever producing a wire. If peer-wire-swarm is keeping a peer in its _peers
+// table indefinitely (observed in the wild on some low-seed torrents: the
+// retry setTimeout just keeps repushing to the queue forever without ever
+// succeeding or giving up), the watch list never drains via the normal
+// swarm._peers diff path. 5 minutes is far past any legitimate connection
+// backoff so anything still sitting here is effectively dead from our POV —
+// evict it and count it as a strike.
+const STALE_WATCH_MS = 5 * 60 * 1000;
+
 // How often to log a summary line. 0 = never.
 const SUMMARY_LOG_INTERVAL_MS = 60000;
 
@@ -238,13 +248,24 @@ class PeerManager {
         gone = !Object.prototype.hasOwnProperty.call(peersTable, addr);
       }
 
-      const aged = now - firstSeen >= GIVEUP_GRACE_MS;
+      const age = now - firstSeen;
+      const aged = age >= GIVEUP_GRACE_MS;
+      const stale = age >= STALE_WATCH_MS;
 
       if (gone && aged) {
         // Confirmed dead by both signals: the swarm gave up AND enough time
         // elapsed that we're not in a transient drain-queue backlog.
         this._watch.delete(addr);
         this._recordFailure(addr, 'never-connected');
+      } else if (stale) {
+        // Has been in our watch list for >5 minutes without ever connecting
+        // AND without leaving swarm._peers. Observed on low-seed torrents
+        // where peer-wire-swarm keeps retrying the same dead addresses
+        // forever via its internal setTimeout loop — the normal "gone from
+        // _peers" signal never fires. Evict and count as dead anyway; by
+        // this point the peer is unambiguously useless to us.
+        this._watch.delete(addr);
+        this._recordFailure(addr, 'stale');
       } else if (!hasPeersTable && aged) {
         // Degraded mode: no private-field signal, so fall back to a pure
         // time-based heuristic. This is less precise (may ban peers that
@@ -262,7 +283,9 @@ class PeerManager {
     this._state.set(addr, entry);
 
     // Hard signals ban on first strike; soft signals need two.
-    const isHard = (reason === 'never-connected' || reason === 'timeout-degraded');
+    // 'stale' is also a hard signal — 5+ minutes of non-progress is
+    // overwhelming proof that this address will never be useful to us.
+    const isHard = (reason === 'never-connected' || reason === 'timeout-degraded' || reason === 'stale');
     const threshold = isHard ? HARD_FAIL_BAN_AT : SOFT_FAIL_BAN_AT;
 
     if (entry.fails >= threshold) {

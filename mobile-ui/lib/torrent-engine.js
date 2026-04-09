@@ -155,10 +155,29 @@ class TorrentEngine {
       const timeout = setTimeout(() => {
         clearInterval(peerLog);
         if (!this._active.has(hash) || !this._active.get(hash).files) {
+          // Snapshot swarm state at the moment of timeout so the log tells
+          // us WHY metadata failed: "dead torrent — no peers discovered" vs.
+          // "peers discovered but none handshook" vs. "handshook but no
+          // metadata". Without this we can't distinguish unreachable swarm
+          // from broken handshake negotiation.
+          const sw = engine.swarm;
+          const wires = sw && sw.wires ? sw.wires.length : 0;
+          const watching = peerMgr.stats().watching;
+          const banned = peerMgr.stats().bannedIps;
+          const diag = `wires=${wires} watching=${watching} banned=${banned}`;
+          let reason;
+          if (watching === 0 && wires === 0) {
+            reason = 'no peers discovered (trackers/DHT returned nothing)';
+          } else if (wires === 0) {
+            reason = `${watching} peers discovered but none completed BT handshake — possible MSE/PE encryption mismatch, firewall on outbound BT, or all-IPv6 swarm (torrent-stream is v4-only)`;
+          } else {
+            reason = `${wires} wires handshook but metadata (ut_metadata / BEP-9) never arrived`;
+          }
+          console.error(`[TorrentEngine] ${hash.slice(0,8)}... metadata timeout — ${diag} — ${reason}`);
           try { peerMgr.destroy(); } catch { /* ignore */ }
           engine.destroy();
           this._active.delete(hash);
-          reject(new Error('Torrent metadata timeout (90s) — try a torrent with more seeds'));
+          reject(new Error(`Torrent metadata timeout (90s) — ${diag} — ${reason}`));
         }
       }, 90000);
 

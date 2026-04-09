@@ -810,8 +810,10 @@ class LibraryManager {
       this._startIncomingListener(engine, `pack ${infoHash.slice(0, 8)}`);
 
       const timeout = setTimeout(() => {
+        const { diag, reason } = this._metadataTimeoutDiag(engine);
+        console.error(`[Library] pack ${infoHash.slice(0, 8)}: metadata timeout — ${diag} — ${reason}`);
         this._destroyEngine(engine);
-        reject(new Error('Torrent metadata timeout (90s) — try a torrent with more seeds'));
+        reject(new Error(`Torrent metadata timeout (90s) — ${diag} — ${reason}`));
       }, 90000);
 
       engine.on('error', (err) => {
@@ -971,8 +973,10 @@ class LibraryManager {
       this._startIncomingListener(engine, `scan ${infoHash.slice(0, 8)}`);
 
       const timeout = setTimeout(() => {
+        const { diag, reason } = this._metadataTimeoutDiag(engine);
+        console.error(`[Library] scan ${infoHash.slice(0, 8)}: metadata timeout — ${diag} — ${reason}`);
         this._destroyEngine(engine);
-        reject(new Error('Torrent metadata timeout (90s) — try a torrent with more seeds'));
+        reject(new Error(`Torrent metadata timeout (90s) — ${diag} — ${reason}`));
       }, 90000);
 
       engine.on('error', (err) => {
@@ -1430,11 +1434,13 @@ class LibraryManager {
     this._engines.set(packId, engine);
 
     const timeout = setTimeout(() => {
+      const { diag, reason } = this._metadataTimeoutDiag(engine);
+      console.error(`[Library] resume ${first.infoHash.slice(0, 8)}: metadata timeout — ${diag} — ${reason}`);
       // Fail ALL downloading items for this pack, not just the ones passed in
       for (const [, item] of this._items) {
         if (item.packId === packId && item.status === 'downloading') {
           item.status = 'failed';
-          item.error = 'Torrent metadata timeout (90s) on resume';
+          item.error = `Torrent metadata timeout on resume — ${diag} — ${reason}`;
         }
       }
       this._destroyEngine(engine);
@@ -2616,9 +2622,10 @@ class LibraryManager {
 
     const timeout = setTimeout(() => {
       if (item.status === 'downloading' && !item.filePath) {
-        console.error(`[Library] Metadata timeout for "${item.name}"`);
+        const { diag, reason } = this._metadataTimeoutDiag(engine);
+        console.error(`[Library] Metadata timeout for "${item.name}" — ${diag} — ${reason}`);
         item.status = 'failed';
-        item.error = 'Torrent metadata timeout (90s) — try a torrent with more seeds';
+        item.error = `Torrent metadata timeout (90s) — ${diag} — ${reason}`;
         this._stopDownload(id);
         this._saveMetadata();
         this._processQueue();
@@ -2767,6 +2774,35 @@ class LibraryManager {
     } catch (err) {
       console.warn(`[Library] ${label}: engine.listen threw: ${err.message}`);
     }
+  }
+
+  /**
+   * Build a diagnostic string describing why metadata fetch timed out.
+   * Called from every 90s timeout site so the error surfaced to the user /
+   * logs tells them whether the torrent is dead, the swarm is unreachable,
+   * or the handshake is failing — three very different problems that look
+   * identical under the old "metadata timeout" message.
+   *
+   * Returns { diag, reason } where diag is compact counters and reason is
+   * a human-readable hypothesis.
+   */
+  _metadataTimeoutDiag(engine) {
+    const sw = engine && engine.swarm;
+    const wires = sw && sw.wires ? sw.wires.length : 0;
+    const mgr = this._peerMgrByEngine.get(engine);
+    const stats = mgr ? mgr.stats() : { watching: 0, bannedIps: 0 };
+    const watching = stats.watching;
+    const banned = stats.bannedIps;
+    const diag = `wires=${wires} watching=${watching} banned=${banned}`;
+    let reason;
+    if (watching === 0 && wires === 0) {
+      reason = 'no peers discovered (trackers/DHT returned nothing)';
+    } else if (wires === 0) {
+      reason = `${watching} peers discovered but none completed BT handshake — possible MSE/PE encryption mismatch, firewall on outbound BT, or all-IPv6 swarm (torrent-stream is v4-only)`;
+    } else {
+      reason = `${wires} wires handshook but metadata (ut_metadata / BEP-9) never arrived`;
+    }
+    return { diag, reason };
   }
 
   /**

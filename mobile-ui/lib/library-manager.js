@@ -1394,6 +1394,17 @@ class LibraryManager {
     }
     base = base.replace(/\s+/g, ' ').trim();
 
+    // Leading-year pattern: "YYYY - Title" or "YYYY Title" (Disney collection
+    // packs use this form, e.g. "1959 - Sleeping Beauty.avi"). Must come
+    // before the bareYear regex since the year is AT the start.
+    const leadYear = base.match(/^(19\d{2}|20\d{2})\s*[-–]\s*(.+)$/);
+    if (leadYear) {
+      const title = leadYear[2].replace(/[-–.\s]+$/, '').trim();
+      if (title && !/^(19|20)\d{2}$/.test(title)) {
+        return { title, year: year || leadYear[1] };
+      }
+    }
+
     // If a bare year (1900-2099) is present, everything before it is the title
     const bareYear = base.match(/^(.+?)\s+(19\d{2}|20\d{2})\b/);
     if (bareYear) {

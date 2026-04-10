@@ -1877,6 +1877,203 @@ app.post('/api/library/repair-metadata', rateLimit, async (req, res) => {
   }
 });
 
+// POST /api/library/reclassify-pack — flip a pack's items between movie and
+// series classifications. Prerequisite step for repairing packs that were
+// imported with the wrong type (e.g. a Disney movie collection imported as
+// series, or a TV pack that swept up theatrical movies alongside episodes).
+//
+// Query params:
+//   packId=<id>            required — the packId to target
+//   mode=<mode>            required — one of:
+//                            all-movies   flip every item to type:movie
+//                            all-series   flip every item to type:series
+//                            auto         per-item: episode pattern -> series,
+//                                         else movie (uses fileNameLooksLikeEpisode)
+//   dryRun=1               preview only, no writes, no backup
+//   clearMetadata=1        also wipe imdbId/showName/poster/year on reclassified
+//                          items so the next repair-metadata run starts fresh
+//                          (name is kept so the UI still has a label until
+//                          repair re-derives)
+//
+// Response: { packId, mode, dryRun, clearMetadata, reclassified[], stats, backupPath }
+app.post('/api/library/reclassify-pack', rateLimit, async (req, res) => {
+  const packId = (req.query.packId || '').toString();
+  const mode = (req.query.mode || '').toString();
+  const dryRun = req.query.dryRun === '1' || req.query.dryRun === 'true';
+  const clearMetadata = req.query.clearMetadata === '1' || req.query.clearMetadata === 'true';
+
+  if (!packId) return res.status(400).json({ error: 'packId query param is required' });
+  if (!['all-movies', 'all-series', 'auto'].includes(mode)) {
+    return res.status(400).json({ error: 'mode must be one of: all-movies, all-series, auto' });
+  }
+
+  const allItems = library.getAll();
+  const packItems = allItems.filter(i => i.packId === packId);
+  if (packItems.length === 0) {
+    return res.status(404).json({ error: `no items found for packId ${packId}` });
+  }
+
+  // Back up _metadata.json before any write. Mirrors the repair endpoint's
+  // safety net: if the backup can't be written, refuse to proceed.
+  let backupPath = null;
+  if (!dryRun) {
+    try {
+      const metadataFile = library._metadataFile;
+      if (metadataFile && fs.existsSync(metadataFile)) {
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        backupPath = `${metadataFile}.pre-reclassify-${stamp}.bak`;
+        fs.copyFileSync(metadataFile, backupPath);
+        console.log(`[Reclassify] Backed up metadata to ${backupPath}`);
+      } else {
+        return res.status(500).json({ error: 'metadata file not found; refusing to run without a backup' });
+      }
+    } catch (err) {
+      return res.status(500).json({ error: `failed to create metadata backup: ${err.message}` });
+    }
+  }
+
+  const reclassified = [];
+  const stats = {
+    total: packItems.length,
+    toMovie: 0,
+    toSeries: 0,
+    typeUnchanged: 0,
+    metadataCleared: 0,
+  };
+
+  for (const item of packItems) {
+    let newType;
+    if (mode === 'all-movies') newType = 'movie';
+    else if (mode === 'all-series') newType = 'series';
+    else newType = fileNameLooksLikeEpisode(item.fileName) ? 'series' : 'movie';
+
+    const typeChanged = newType !== item.type;
+    if (!typeChanged && !clearMetadata) {
+      stats.typeUnchanged++;
+      continue;
+    }
+
+    const record = {
+      itemId: item.id,
+      fileName: item.fileName,
+      previousType: item.type,
+      newType,
+      previousName: item.name,
+      previousImdbId: item.imdbId || null,
+      previousShowName: item.showName || null,
+      typeChanged,
+      metadataCleared: !!clearMetadata,
+    };
+
+    if (!dryRun) {
+      // Direct access to the internal items map. relinkItem() can't clear
+      // fields (its `if (x) item.x = x` guards block null/empty), and this
+      // endpoint lives in the same process as library-manager so it's safe
+      // to mutate items directly before a single _saveMetadata() at the end.
+      const stored = library._items.get(item.id);
+      if (stored) {
+        if (typeChanged) stored.type = newType;
+        if (clearMetadata) {
+          stored.imdbId = null;
+          stored.showName = null;
+          stored.poster = '';
+          stored.year = '';
+          // Leave `name` untouched — the UI needs something to display
+          // until the next repair-metadata run re-derives a clean name.
+        }
+      }
+    }
+
+    if (typeChanged) {
+      if (newType === 'movie') stats.toMovie++;
+      else stats.toSeries++;
+    }
+    if (clearMetadata) stats.metadataCleared++;
+    reclassified.push(record);
+  }
+
+  if (!dryRun && reclassified.length > 0) {
+    library._saveMetadata();
+    console.log(`[Reclassify] Pack ${packId} (${mode}): ${stats.toMovie} to movie, ${stats.toSeries} to series, ${stats.metadataCleared} metadata cleared`);
+  }
+
+  res.json({
+    packId,
+    mode,
+    dryRun,
+    clearMetadata,
+    reclassified: dryRun ? reclassified : reclassified.map(r => ({
+      itemId: r.itemId,
+      previousType: r.previousType,
+      newType: r.newType,
+      previousName: r.previousName,
+    })),
+    stats,
+    backupPath: backupPath ? path.basename(backupPath) : null,
+  });
+});
+
+// GET /api/library/packs — list all packs with a quick classification summary
+// so you can tell which ones need reclassify-pack before running repair.
+app.get('/api/library/packs', rateLimit, (req, res) => {
+  const allItems = library.getAll();
+  const packs = new Map();
+  for (const i of allItems) {
+    if (!i.packId) continue;
+    if (!packs.has(i.packId)) packs.set(i.packId, []);
+    packs.get(i.packId).push(i);
+  }
+
+  const out = [];
+  for (const [packId, items] of packs) {
+    const types = [...new Set(items.map(i => i.type))];
+    const showNames = [...new Set(items.map(i => i.showName || null).filter(Boolean))];
+    const statuses = {};
+    for (const i of items) statuses[i.status] = (statuses[i.status] || 0) + 1;
+
+    // Classification hint: what would auto mode do?
+    let autoMovieCount = 0, autoSeriesCount = 0;
+    for (const i of items) {
+      if (fileNameLooksLikeEpisode(i.fileName)) autoSeriesCount++;
+      else autoMovieCount++;
+    }
+
+    const mixed = types.length > 1;
+    const autoDisagreesWithCurrent = items.some(i =>
+      (fileNameLooksLikeEpisode(i.fileName) ? 'series' : 'movie') !== i.type
+    );
+
+    out.push({
+      packId,
+      itemCount: items.length,
+      currentTypes: types,
+      mixed,
+      showNames: showNames.slice(0, 3),
+      statuses,
+      autoMovieCount,
+      autoSeriesCount,
+      autoDisagreesWithCurrent,
+      suggestion: mixed || autoDisagreesWithCurrent
+        ? (autoMovieCount > 0 && autoSeriesCount === 0
+            ? 'all-movies'
+            : autoMovieCount === 0 && autoSeriesCount > 0
+              ? 'all-series'
+              : 'auto')
+        : null,
+      sampleFileNames: items.slice(0, 3).map(i => i.fileName),
+    });
+  }
+
+  // Put packs that need attention first
+  out.sort((a, b) => {
+    if (a.suggestion && !b.suggestion) return -1;
+    if (!a.suggestion && b.suggestion) return 1;
+    return b.itemCount - a.itemCount;
+  });
+
+  res.json({ packCount: out.length, packs: out });
+});
+
 // POST /api/library/add-manual — add a torrent by magnet URI or info hash.
 // Handles both single-file and multi-file (collection) torrents automatically.
 app.post('/api/library/add-manual', rateLimit, async (req, res) => {

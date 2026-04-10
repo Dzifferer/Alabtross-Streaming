@@ -2096,6 +2096,89 @@ app.post('/api/library/reclassify-pack', rateLimit, async (req, res) => {
 
 // GET /api/library/packs — list all packs with a quick classification summary
 // so you can tell which ones need reclassify-pack before running repair.
+// POST /api/library/purge-failed — remove library entries stuck in the
+// 'failed' status whose error indicates the download is dead and can't
+// recover on its own ("metadata timeout" = couldn't fetch .torrent info
+// on resume, which means the tracker/swarm is gone). Does NOT delete any
+// files on disk — only removes the library rows so the UI stops listing
+// them. Backs up _metadata.json before writing.
+//
+// Query params:
+//   ?dryRun=1              preview only
+//   ?includeFileMissing=1  also remove items whose error is
+//                          "File not found on disk" (default: off)
+//   ?includeAnyFailed=1    remove every 'failed' item regardless of
+//                          error string. ONLY use this if you've
+//                          verified the dry-run list looks right.
+app.post('/api/library/purge-failed', rateLimit, (req, res) => {
+  const dryRun = req.query.dryRun === '1' || req.query.dryRun === 'true';
+  const includeFileMissing = req.query.includeFileMissing === '1' || req.query.includeFileMissing === 'true';
+  const includeAnyFailed = req.query.includeAnyFailed === '1' || req.query.includeAnyFailed === 'true';
+
+  const allItems = library.getAll();
+  const failed = allItems.filter(i => i.status === 'failed');
+
+  const toDelete = failed.filter(item => {
+    if (includeAnyFailed) return true;
+    const err = (item.error || '').toLowerCase();
+    if (err.includes('metadata timeout')) return true;
+    if (includeFileMissing && err.includes('file not found')) return true;
+    return false;
+  });
+
+  // Backup before any write. Mirrors the repair endpoint's safety contract.
+  let backupPath = null;
+  if (!dryRun && toDelete.length > 0) {
+    try {
+      const metadataFile = library._metadataFile;
+      if (metadataFile && fs.existsSync(metadataFile)) {
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        backupPath = `${metadataFile}.pre-purge-${stamp}.bak`;
+        fs.copyFileSync(metadataFile, backupPath);
+        console.log(`[Purge] Backed up metadata to ${backupPath}`);
+      } else {
+        return res.status(500).json({ error: 'metadata file not found; refusing to run without a backup' });
+      }
+    } catch (err) {
+      return res.status(500).json({ error: `failed to create metadata backup: ${err.message}` });
+    }
+
+    // Direct removal from the in-memory map. We deliberately DO NOT call
+    // library.removeItem() because that also stops downloads, reshuffles
+    // pack selection, and deletes files — none of which make sense here
+    // (the items are already dead, have no file, and aren't downloading).
+    // One _saveMetadata() at the end batches all deletions into a single
+    // atomic metadata write.
+    for (const item of toDelete) {
+      library._items.delete(item.id);
+    }
+    library._saveMetadata();
+    console.log(`[Purge] Removed ${toDelete.length} dead 'failed' items`);
+  }
+
+  // Group by error string for the summary
+  const errorGroups = {};
+  for (const item of toDelete) {
+    const key = (item.error || '(no error)').slice(0, 80);
+    errorGroups[key] = (errorGroups[key] || 0) + 1;
+  }
+
+  res.json({
+    dryRun,
+    failedTotal: failed.length,
+    wouldRemove: toDelete.length,
+    removed: dryRun ? 0 : toDelete.length,
+    errorGroups,
+    sample: toDelete.slice(0, 10).map(i => ({
+      id: i.id,
+      name: i.name,
+      fileName: i.fileName,
+      error: (i.error || '').slice(0, 80),
+    })),
+    backupPath: backupPath ? path.basename(backupPath) : null,
+  });
+});
+
 // POST /api/library/add-manual — add a torrent by magnet URI or info hash.
 // Handles both single-file and multi-file (collection) torrents automatically.
 app.post('/api/library/add-manual', rateLimit, async (req, res) => {

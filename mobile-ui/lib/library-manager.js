@@ -1394,6 +1394,14 @@ class LibraryManager {
     }
     base = base.replace(/\s+/g, ' ').trim();
 
+    // Strip known franchise prefixes that confuse the TMDB lookup when they
+    // appear before the actual movie title. "James Bond 007 Octopussy 1983"
+    // derives to { title: "James Bond 007 Octopussy" } under the default
+    // rules, and the movie-lookup word-overlap guard then rejects TMDB's
+    // correct "Octopussy" match (1/4 word overlap). Stripping the prefix
+    // here yields the clean title before lookup runs.
+    base = base.replace(/^(?:007\s+james\s+bond|james\s+bond\s+007|james\s+bond|007)\s+/i, '').trim();
+
     // Leading-year pattern: "YYYY - Title" or "YYYY Title" (Disney collection
     // packs use this form, e.g. "1959 - Sleeping Beauty.avi"). Must come
     // before the bareYear regex since the year is AT the start.

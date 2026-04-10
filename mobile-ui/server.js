@@ -1481,6 +1481,69 @@ app.post('/api/library/audit/remediate', rateLimit, async (req, res) => {
 });
 
 // GET /api/library/:id — get single library item
+// GET /api/library/packs — list all packs with a quick classification summary
+// so you can tell which ones need reclassify-pack before running repair.
+// MUST be registered BEFORE the /api/library/:id wildcard below, otherwise
+// Express routes the request to the :id handler and returns "Item not found".
+app.get('/api/library/packs', rateLimit, (req, res) => {
+  const allItems = library.getAll();
+  const packs = new Map();
+  for (const i of allItems) {
+    if (!i.packId) continue;
+    if (!packs.has(i.packId)) packs.set(i.packId, []);
+    packs.get(i.packId).push(i);
+  }
+
+  const out = [];
+  for (const [packId, items] of packs) {
+    const types = [...new Set(items.map(i => i.type))];
+    const showNames = [...new Set(items.map(i => i.showName || null).filter(Boolean))];
+    const statuses = {};
+    for (const i of items) statuses[i.status] = (statuses[i.status] || 0) + 1;
+
+    // Classification hint: what would auto mode do?
+    let autoMovieCount = 0, autoSeriesCount = 0;
+    for (const i of items) {
+      if (fileNameLooksLikeEpisode(i.fileName)) autoSeriesCount++;
+      else autoMovieCount++;
+    }
+
+    const mixed = types.length > 1;
+    const autoDisagreesWithCurrent = items.some(i =>
+      (fileNameLooksLikeEpisode(i.fileName) ? 'series' : 'movie') !== i.type
+    );
+
+    out.push({
+      packId,
+      itemCount: items.length,
+      currentTypes: types,
+      mixed,
+      showNames: showNames.slice(0, 3),
+      statuses,
+      autoMovieCount,
+      autoSeriesCount,
+      autoDisagreesWithCurrent,
+      suggestion: mixed || autoDisagreesWithCurrent
+        ? (autoMovieCount > 0 && autoSeriesCount === 0
+            ? 'all-movies'
+            : autoMovieCount === 0 && autoSeriesCount > 0
+              ? 'all-series'
+              : 'auto')
+        : null,
+      sampleFileNames: items.slice(0, 3).map(i => i.fileName),
+    });
+  }
+
+  // Put packs that need attention first
+  out.sort((a, b) => {
+    if (a.suggestion && !b.suggestion) return -1;
+    if (!a.suggestion && b.suggestion) return 1;
+    return b.itemCount - a.itemCount;
+  });
+
+  res.json({ packCount: out.length, packs: out });
+});
+
 app.get('/api/library/:id', (req, res) => {
   const item = library.getItem(req.params.id);
   if (!item) return res.status(404).json({ error: 'Item not found' });
@@ -2015,65 +2078,6 @@ app.post('/api/library/reclassify-pack', rateLimit, async (req, res) => {
 
 // GET /api/library/packs — list all packs with a quick classification summary
 // so you can tell which ones need reclassify-pack before running repair.
-app.get('/api/library/packs', rateLimit, (req, res) => {
-  const allItems = library.getAll();
-  const packs = new Map();
-  for (const i of allItems) {
-    if (!i.packId) continue;
-    if (!packs.has(i.packId)) packs.set(i.packId, []);
-    packs.get(i.packId).push(i);
-  }
-
-  const out = [];
-  for (const [packId, items] of packs) {
-    const types = [...new Set(items.map(i => i.type))];
-    const showNames = [...new Set(items.map(i => i.showName || null).filter(Boolean))];
-    const statuses = {};
-    for (const i of items) statuses[i.status] = (statuses[i.status] || 0) + 1;
-
-    // Classification hint: what would auto mode do?
-    let autoMovieCount = 0, autoSeriesCount = 0;
-    for (const i of items) {
-      if (fileNameLooksLikeEpisode(i.fileName)) autoSeriesCount++;
-      else autoMovieCount++;
-    }
-
-    const mixed = types.length > 1;
-    const autoDisagreesWithCurrent = items.some(i =>
-      (fileNameLooksLikeEpisode(i.fileName) ? 'series' : 'movie') !== i.type
-    );
-
-    out.push({
-      packId,
-      itemCount: items.length,
-      currentTypes: types,
-      mixed,
-      showNames: showNames.slice(0, 3),
-      statuses,
-      autoMovieCount,
-      autoSeriesCount,
-      autoDisagreesWithCurrent,
-      suggestion: mixed || autoDisagreesWithCurrent
-        ? (autoMovieCount > 0 && autoSeriesCount === 0
-            ? 'all-movies'
-            : autoMovieCount === 0 && autoSeriesCount > 0
-              ? 'all-series'
-              : 'auto')
-        : null,
-      sampleFileNames: items.slice(0, 3).map(i => i.fileName),
-    });
-  }
-
-  // Put packs that need attention first
-  out.sort((a, b) => {
-    if (a.suggestion && !b.suggestion) return -1;
-    if (!a.suggestion && b.suggestion) return 1;
-    return b.itemCount - a.itemCount;
-  });
-
-  res.json({ packCount: out.length, packs: out });
-});
-
 // POST /api/library/add-manual — add a torrent by magnet URI or info hash.
 // Handles both single-file and multi-file (collection) torrents automatically.
 app.post('/api/library/add-manual', rateLimit, async (req, res) => {

@@ -29,7 +29,10 @@ function resolveWithFallback(hostname) {
   });
 }
 // http-proxy-middleware removed — Stremio server proxy no longer needed
-const { getMovieStreams, getSeriesStreams, getSeasonPackStreams, getCompleteStreams, diagnoseProviders } = require('./lib/stream-providers');
+const {
+  getMovieStreams, getSeriesStreams, getSeasonPackStreams, getCompleteStreams, diagnoseProviders,
+  httpsAgent: providersHttpsAgent,
+} = require('./lib/stream-providers');
 const TorrentEngine = require('./lib/torrent-engine');
 const LibraryManager = require('./lib/library-manager');
 const { getSystemDiag } = require('./lib/system-diag');
@@ -41,6 +44,12 @@ const PORT = process.env.PORT || 8080;
 const TORRENT_CACHE_PATH = process.env.TORRENT_CACHE || path.join(__dirname, '.torrent-cache');
 const LIBRARY_PATH = process.env.LIBRARY_PATH || path.join(TORRENT_CACHE_PATH, 'library');
 const SETTINGS_PATH = path.join(TORRENT_CACHE_PATH, 'settings.json');
+
+// Optional ffmpeg hwaccel for the live transcode endpoint. Mirrors the
+// FFMPEG_HWACCEL handling in lib/library-manager.js — set =cuda / =nvdec /
+// =v4l2m2m to offload decode to NVDEC on Jetson and free CPU for libx264.
+const FFMPEG_HWACCEL = (process.env.FFMPEG_HWACCEL || '').trim();
+const FFMPEG_HWACCEL_ARGS = FFMPEG_HWACCEL ? ['-hwaccel', FFMPEG_HWACCEL] : [];
 // Default is intentionally low. 6 concurrent torrents on a Jetson-class box
 // starve each other for CPU (piece verify), disk I/O (random writes on eMMC/SD),
 // and BT reciprocity slots, so aggregate throughput is usually *better* with
@@ -146,7 +155,10 @@ function tmdbFetch(endpoint, params = {}) {
       if (req) req.destroy();
       reject(new Error('Timeout'));
     }, 10000);
-    const req = https.get(url, { timeout: 10000, family: 4 }, (res) => {
+    // Reuse the keep-alive agent from stream-providers so per-page-load TMDB
+    // calls (search, details, season metadata) skip the TLS handshake on
+    // the Orin's CPU after the first one.
+    const req = https.get(url, { timeout: 10000, family: 4, agent: providersHttpsAgent }, (res) => {
       if (res.statusCode !== 200) { clearTimeout(deadline); res.resume(); return reject(new Error(`TMDB HTTP ${res.statusCode}`)); }
       let body = '';
       res.on('data', chunk => body += chunk);
@@ -1926,8 +1938,11 @@ app.get('/api/library/:id/stream/remux', async (req, res) => {
 // libx264 -preset ultrafast is used because the Jetson Orin Nano has NO
 // hardware video encoder — this path is CPU-bound. 720p keeps us within
 // realtime budget on the Orin's Cortex-A78AE cores for typical 24/30 fps
-// source material. If you upgrade to a Jetson with NVENC later, swap the
-// encoder args for h264_nvenc or h264_nvmpi.
+// source material. Set FFMPEG_HWACCEL=cuda (or =nvdec / =auto / =v4l2m2m
+// depending on the local ffmpeg build) to offload the DECODE side of the
+// pipeline to NVDEC, which alone buys ~30-50% more CPU headroom for
+// libx264 on HEVC sources. If you upgrade to a Jetson with NVENC later,
+// swap the encoder args for h264_nvenc or h264_nvmpi.
 app.get('/api/library/:id/stream/transcode', async (req, res) => {
   const item = library.getItem(req.params.id);
   if (!item) return res.status(404).json({ error: 'Item not found' });
@@ -1986,6 +2001,7 @@ app.get('/api/library/:id/stream/transcode', async (req, res) => {
   const ffmpeg = spawn('ffmpeg', [
     '-hide_banner',
     '-fflags', '+genpts',
+    ...FFMPEG_HWACCEL_ARGS,
     // Keep initial input parse cheap — 1MB / 1s probe is plenty for
     // every container we ingest, and waiting any longer just delays
     // the first MP4 fragment on the wire.

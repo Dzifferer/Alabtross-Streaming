@@ -1383,13 +1383,13 @@ class LibraryManager {
     let year = null;
     const parenYear = base.match(/\((19\d{2}|20\d{2})\)/);
     if (parenYear) { year = parenYear[1]; base = base.replace(parenYear[0], ' '); }
-    // If dots/underscores look like word separators (2+ of them in the base),
-    // convert them to spaces. This catches dot-separated scene names even when
-    // the filename also contains literal spaces and non-word chars like '-'
-    // e.g. "Avatar.Fire.and.Ash.2025. 2160p BluRay x265-GROUP".
+    // If the base has NO spaces at all, dots/underscores are scene-name
+    // separators — always replace them. Otherwise only replace when there
+    // are 2+ of them, so a title like "Mr. Smith" stays intact.
+    const hasSpace = /\s/.test(base);
     const dotCount = (base.match(/\./g) || []).length;
     const underCount = (base.match(/_/g) || []).length;
-    if (dotCount >= 2 || underCount >= 2) {
+    if (!hasSpace || dotCount >= 2 || underCount >= 2) {
       base = base.replace(/[._]/g, ' ');
     }
     base = base.replace(/\s+/g, ' ').trim();
@@ -1398,17 +1398,21 @@ class LibraryManager {
     const bareYear = base.match(/^(.+?)\s+(19\d{2}|20\d{2})\b/);
     if (bareYear) {
       if (!year) year = bareYear[2];
-      const title = bareYear[1].replace(/[-–\s]+$/, '').trim();
-      if (title) return { title, year };
+      const title = bareYear[1].replace(/[-–.\s]+$/, '').trim();
+      if (title && !/^(19|20)\d{2}$/.test(title)) return { title, year };
     }
 
-    // No year found — strip common quality/codec/source/release-group tags
+    // No year found — strip common quality/codec/source/release-group tags.
+    // Trailing `.` is included in the trim so that filenames like
+    // "1959.xvid" (cleaned to "1959.") normalize to "1959" and get caught
+    // by the just-a-year guard below.
     const cleaned = base
       .replace(/\b(2160p|1080p|720p|480p|4k|uhd|hdr|dv|dolby\s*vision)\b.*/i, '')
       .replace(/\b(bluray|blu-ray|brrip|bdrip|webrip|web-dl|webdl|web|hdrip|dvdrip|dvd|hdtv|pdtv)\b.*/i, '')
       .replace(/\b(x264|x265|h264|h265|hevc|xvid|divx|av1|aac|ac3|dts|ddp5|flac|mp3|10bit)\b.*/i, '')
       .replace(/\b(yify|yts|rarbg|ettv|eztv|fgt|ntg|tgx|psa|galaxyrg)\b.*/i, '')
-      .replace(/[-–\s]+$/, '')
+      .replace(/[-–.\s]+$/, '')
+      .replace(/^[-–.\s]+/, '')
       .trim();
 
     // Guard: a "title" that's literally just a 4-digit year is a parser

@@ -1534,11 +1534,46 @@ app.post('/api/library/add-pack', rateLimit, async (req, res) => {
 // living in an "Extras/" subfolder is caught even if its own filename is
 // generic). Items that match are left completely untouched by repair —
 // they stay in the library with whatever metadata they already had.
-const MOVIE_EXTRAS_PATTERN = /\b(making[\s._-]*of|behind[\s._-]*the[\s._-]*scenes|bts|featurettes?|deleted[\s._-]*scenes?|interviews?|greatest[\s._-]*moments|beyond[\s._-]*the[\s._-]*movie|bonus(?:[\s._-]*(?:features?|material|disc))?|extras?|gag[\s._-]*reel|bloopers?|commentary|trailers?|teasers?|sneak[\s._-]*peek|live[\s._-]*tour|concerts?|anniversa(?:ire|ry))\b/i;
+//
+// Only strong multi-word phrases are used. Single-word triggers like
+// "interview", "extras", "trailer", "commentary", "bonus" were removed
+// because they collide with real movie titles (e.g. "The Interview" (2014),
+// "Trailer Park Boys: The Movie", etc.). If you need to mark a single-word
+// item as extras, add it to its filePath under a subfolder that matches.
+const MOVIE_EXTRAS_PATTERN = new RegExp(
+  '\\b(' +
+  [
+    'making[\\s._-]*of',
+    'behind[\\s._-]*the[\\s._-]*scenes',
+    'beyond[\\s._-]*the[\\s._-]*movie',
+    'deleted[\\s._-]*scenes?',
+    'greatest[\\s._-]*moments',
+    'gag[\\s._-]*reels?',
+    'sneak[\\s._-]*peeks?',
+    'live[\\s._-]*tour',
+    'bonus[\\s._-]*(?:features?|material|disc|episodes?|dvd)',
+    'bts',
+    'featurettes?',
+    'bloopers',
+    'anniversaire',
+  ].join('|') +
+  ')\\b',
+  'i'
+);
+
+// Folder-segment check for the catch-all "Extras" / "Bonus Features" / etc.
+// This is path-only so a filename that happens to contain "Extras" as a word
+// won't be flagged — only items that actually live inside one of these
+// folders. Matches any path segment, case-insensitive.
+const EXTRAS_FOLDER_PATTERN = /(?:^|\/)(extras?|bonus(?:\s*features?|\s*material|\s*disc)?|featurettes?|behind[\s._-]*the[\s._-]*scenes|deleted[\s._-]*scenes?|interviews?)(?:\/|$)/i;
 
 function isMovieExtras(item) {
-  const hay = `${item.fileName || ''} ${item.filePath || ''}`;
-  return MOVIE_EXTRAS_PATTERN.test(hay);
+  const fileName = item.fileName || '';
+  const filePath = item.filePath || '';
+  if (MOVIE_EXTRAS_PATTERN.test(fileName) || MOVIE_EXTRAS_PATTERN.test(filePath)) return true;
+  // Normalize backslashes to forward slashes for the folder check
+  if (EXTRAS_FOLDER_PATTERN.test(filePath.replace(/\\/g, '/'))) return true;
+  return false;
 }
 
 // POST /api/library/repair-metadata — one-time repair: re-derive titles from
@@ -1547,10 +1582,16 @@ function isMovieExtras(item) {
 // paused items are left alone so we don't stomp on metadata that is still
 // being filled in by the pack download flow. Backs up _metadata.json before
 // making any changes.
+//
+// Query params:
+//   ?dryRun=1   — compute and return the plan without calling relinkItem
+//                 or writing a backup. Use this to preview changes.
 app.post('/api/library/repair-metadata', rateLimit, async (req, res) => {
   if (!TMDB_API_KEY) {
     return res.status(400).json({ error: 'TMDB API key not configured' });
   }
+
+  const dryRun = req.query.dryRun === '1' || req.query.dryRun === 'true';
 
   // Normalize titles for comparison: lowercase, strip year, punctuation, whitespace
   const normTitle = (s) => (s || '')
@@ -1562,19 +1603,26 @@ app.post('/api/library/repair-metadata', rateLimit, async (req, res) => {
     .trim();
 
   // Back up _metadata.json before touching anything, so a bad repair run
-  // can be reverted by copying the .bak over the live file.
+  // can be reverted by copying the .bak over the live file. If backup
+  // fails and this is NOT a dry run, abort — writing without a safety net
+  // is exactly what broke things last time.
   let backupPath = null;
-  try {
-    const metadataFile = library._metadataFile;
-    if (metadataFile && fs.existsSync(metadataFile)) {
-      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-      backupPath = `${metadataFile}.pre-repair-${stamp}.bak`;
-      fs.copyFileSync(metadataFile, backupPath);
-      console.log(`[Repair] Backed up metadata to ${backupPath}`);
+  if (!dryRun) {
+    try {
+      const metadataFile = library._metadataFile;
+      if (metadataFile && fs.existsSync(metadataFile)) {
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        backupPath = `${metadataFile}.pre-repair-${stamp}.bak`;
+        fs.copyFileSync(metadataFile, backupPath);
+        console.log(`[Repair] Backed up metadata to ${backupPath}`);
+      } else {
+        console.error(`[Repair] Metadata file not found at ${metadataFile} — aborting to avoid writing without a backup`);
+        return res.status(500).json({ error: 'metadata file not found; refusing to run without a backup' });
+      }
+    } catch (err) {
+      console.error(`[Repair] Could not create metadata backup: ${err.message}`);
+      return res.status(500).json({ error: `failed to create metadata backup: ${err.message}; refusing to run without a backup` });
     }
-  } catch (err) {
-    console.warn(`[Repair] Could not create metadata backup: ${err.message}`);
-    backupPath = null;
   }
 
   try {
@@ -1590,9 +1638,10 @@ app.post('/api/library/repair-metadata', rateLimit, async (req, res) => {
 
     const repaired = [];
     const stats = {
-      inProgressSkipped: allItems.length - completeItems.length,
+      inProgressSkipped: allItems.filter(i => i.fileName && i.status !== 'complete').length,
       moviesExtrasSkipped: 0,
       moviesNoMatchSkipped: 0,
+      moviesUnparseableSkipped: 0,
       moviesAlreadyCorrect: 0,
     };
 
@@ -1611,24 +1660,33 @@ app.post('/api/library/repair-metadata', rateLimit, async (req, res) => {
 
     for (const [derivedName, itemIds] of showMap) {
       const meta = await lookupShowByName(derivedName);
+      // Symmetry with movies: only write when TMDB matched with a real imdbId.
+      // The previous behavior of falling back to the raw derived name on miss
+      // could corrupt working showNames on in-progress series.
+      if (!meta || !meta.imdbId) {
+        console.log(`[Repair] Series "${derivedName}" — no TMDB match, leaving ${itemIds.length} episode(s) untouched`);
+        continue;
+      }
       const updates = {
-        showName: (meta && meta.name) || derivedName,
-        imdbId: meta && meta.imdbId ? meta.imdbId : undefined,
-        poster: meta ? meta.poster : undefined,
-        year: meta ? meta.year : undefined,
+        showName: meta.name || derivedName,
+        imdbId: meta.imdbId,
+        poster: meta.poster,
+        year: meta.year,
       };
 
-      for (const id of itemIds) {
-        library.relinkItem(id, updates);
+      if (!dryRun) {
+        for (const id of itemIds) {
+          library.relinkItem(id, updates);
+        }
       }
 
       repaired.push({
         type: 'series',
         showName: updates.showName,
-        imdbId: updates.imdbId || 'not found',
+        imdbId: updates.imdbId,
         episodesUpdated: itemIds.length,
       });
-      console.log(`[Repair] "${derivedName}" -> ${updates.showName} (${updates.imdbId || 'no IMDB'}), ${itemIds.length} episodes`);
+      console.log(`[Repair]${dryRun ? ' [dry-run]' : ''} "${derivedName}" -> ${updates.showName} (${updates.imdbId}), ${itemIds.length} episodes`);
     }
 
     // ── Movies: derive title (+ year hint) and look up on TMDB ──────────
@@ -1643,7 +1701,7 @@ app.post('/api/library/repair-metadata', rateLimit, async (req, res) => {
 
       const { title: derivedTitle, year: derivedYear } = library._deriveMovieNameFromFile(item.fileName);
       if (!derivedTitle) {
-        stats.moviesNoMatchSkipped++;
+        stats.moviesUnparseableSkipped++;
         continue;
       }
 
@@ -1673,16 +1731,21 @@ app.post('/api/library/repair-metadata', rateLimit, async (req, res) => {
         poster: meta.poster,
         year: meta.year || derivedYear || undefined,
       };
-      library.relinkItem(item.id, updates);
+      if (!dryRun) {
+        library.relinkItem(item.id, updates);
+      }
       moviesUpdated++;
 
       repaired.push({
         type: 'movie',
+        itemId: item.id,
+        previousName: item.name,
+        previousImdbId: item.imdbId || null,
         name: updates.name,
         imdbId: updates.imdbId,
         moviesUpdated: 1,
       });
-      console.log(`[Repair] "${derivedTitle}" -> ${updates.name} (${updates.imdbId})`);
+      console.log(`[Repair]${dryRun ? ' [dry-run]' : ''} "${derivedTitle}" -> ${updates.name} (${updates.imdbId})`);
     }
 
     const episodesUpdated = repaired
@@ -1690,10 +1753,12 @@ app.post('/api/library/repair-metadata', rateLimit, async (req, res) => {
       .reduce((s, r) => s + r.episodesUpdated, 0);
 
     res.json({
+      dryRun,
       repaired,
-      totalUpdated: episodesUpdated + moviesUpdated,
-      episodesUpdated,
-      moviesUpdated,
+      totalUpdated: dryRun ? 0 : episodesUpdated + moviesUpdated,
+      plannedUpdates: dryRun ? episodesUpdated + moviesUpdated : undefined,
+      episodesUpdated: dryRun ? 0 : episodesUpdated,
+      moviesUpdated: dryRun ? 0 : moviesUpdated,
       skipped: stats,
       backupPath: backupPath ? path.basename(backupPath) : null,
     });

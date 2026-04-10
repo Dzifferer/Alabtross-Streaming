@@ -1383,11 +1383,16 @@ class LibraryManager {
     let year = null;
     const parenYear = base.match(/\((19\d{2}|20\d{2})\)/);
     if (parenYear) { year = parenYear[1]; base = base.replace(parenYear[0], ' '); }
-    // Replace underscores/dots with spaces (if used as separators)
-    if (!base.includes(' ') || /^[\w.]+$/.test(base.replace(/\s/g, ''))) {
+    // If dots/underscores look like word separators (2+ of them in the base),
+    // convert them to spaces. This catches dot-separated scene names even when
+    // the filename also contains literal spaces and non-word chars like '-'
+    // e.g. "Avatar.Fire.and.Ash.2025. 2160p BluRay x265-GROUP".
+    const dotCount = (base.match(/\./g) || []).length;
+    const underCount = (base.match(/_/g) || []).length;
+    if (dotCount >= 2 || underCount >= 2) {
       base = base.replace(/[._]/g, ' ');
     }
-    base = base.trim();
+    base = base.replace(/\s+/g, ' ').trim();
 
     // If a bare year (1900-2099) is present, everything before it is the title
     const bareYear = base.match(/^(.+?)\s+(19\d{2}|20\d{2})\b/);
@@ -1405,6 +1410,13 @@ class LibraryManager {
       .replace(/\b(yify|yts|rarbg|ettv|eztv|fgt|ntg|tgx|psa|galaxyrg)\b.*/i, '')
       .replace(/[-–\s]+$/, '')
       .trim();
+
+    // Guard: a "title" that's literally just a 4-digit year is a parser
+    // failure (filename like "2002.1080p.BluRay.mkv") — returning "2002"
+    // will collide with real movies on TMDB. Treat as unparseable.
+    if (/^(19|20)\d{2}$/.test(cleaned)) {
+      return { title: null, year: year || cleaned };
+    }
     if (cleaned) return { title: cleaned, year };
 
     return { title: null, year };

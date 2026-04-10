@@ -1684,17 +1684,35 @@ function isMovieExtras(item) {
   return false;
 }
 
-// Detect filenames that look like a TV episode (SxxExx or 1x05 style) so
-// the repair loop can skip movie items whose underlying file is actually
-// a series episode in disguise. Running those through the movie parser
-// derives garbage titles that word-overlap their way into unrelated movies
-// (e.g. "Game of Thrones S03E10 Mhysa" matching "Untitled Game of Thrones
-// Film" on 3-of-5 word overlap).
+// Detect filenames that look like a TV episode so:
+//   (a) the repair loop can skip movie items whose underlying file is
+//       actually a series episode in disguise, and
+//   (b) the /api/library/packs auto classifier can correctly distinguish
+//       series packs from movie packs.
+//
+// Covered formats (all tested against a 24-case fixture):
+//   SxxExx             Breaking.Bad.S01E05 / Mad Men S07E01
+//   NxNN               Naruto.Shippuden.1x05
+//   Episode NNN        Naruto Shippuden Episode 489 The State of Affairs
+//   Ep NN              Ep 03 - Cancer Man (Italian breaking bad)
+//   Show - NNN         [AnimeRG] Naruto Shippuden - 495 [720p] ...
+//                      (anime scene convention — requires letters BEFORE
+//                       the dash so leading-year movie filenames like
+//                       "1959 - Sleeping Beauty.avi" do NOT match, and
+//                       rejects 4-digit numbers in the 1900-2099 range as
+//                       probable years rather than episode numbers)
 function fileNameLooksLikeEpisode(fileName) {
   if (!fileName) return false;
   const base = String(fileName).replace(/\.[^.]+$/, '');
   if (/\bS\d{1,2}[\s._-]?E\d{1,3}\b/i.test(base)) return true;
   if (/\b\d{1,2}x\d{1,3}\b/i.test(base)) return true;
+  if (/\bEpisode[\s._-]+\d{1,4}\b/i.test(base)) return true;
+  if (/\bEp[\s._-]+\d{1,4}\b/i.test(base)) return true;
+  const anime = base.match(/[a-z][a-z\s._-]*[-–][\s._-]*(\d{2,4})(?:$|[^\d])/i);
+  if (anime) {
+    const n = parseInt(anime[1], 10);
+    if (!(n >= 1900 && n <= 2099)) return true;
+  }
   return false;
 }
 

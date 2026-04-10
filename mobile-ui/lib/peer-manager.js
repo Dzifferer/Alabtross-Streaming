@@ -96,7 +96,18 @@ const GIVEUP_GRACE_MS = 45000;
 // succeeding or giving up), the watch list never drains via the normal
 // swarm._peers diff path. 5 minutes is far past any legitimate connection
 // backoff so anything still sitting here is effectively dead from our POV —
-// evict it and count it as a strike.
+// evict it from the watch list.
+//
+// IMPORTANT: reaching STALE_WATCH_MS does NOT automatically mean the peer is
+// dead. peer-wire-swarm's connection pool is capped at `connections: 50`, but
+// a fresh tracker/DHT burst can enqueue 200+ candidates at once. Peers beyond
+// the 50-slot line sit untried in swarm._peers for the whole 5-minute window
+// purely because they never reached the front of the queue. Banning those on
+// sight would wipe out the entire candidate pool in one reconcile round and
+// starve future slot releases — the exact symptom we saw in the wild. So the
+// stale branch is a **soft** signal: it only records a strike if we have
+// positive evidence that the peer was actually dialed (swarm retries > 0),
+// and even then it requires SOFT_FAIL_BAN_AT strikes before banning.
 const STALE_WATCH_MS = 5 * 60 * 1000;
 
 // How often to log a summary line. 0 = never.
@@ -298,13 +309,36 @@ class PeerManager {
         this._recordFailure(addr, 'never-connected');
       } else if (stale) {
         // Has been in our watch list for >5 minutes without ever connecting
-        // AND without leaving swarm._peers. Observed on low-seed torrents
-        // where peer-wire-swarm keeps retrying the same dead addresses
-        // forever via its internal setTimeout loop — the normal "gone from
-        // _peers" signal never fires. Evict and count as dead anyway; by
-        // this point the peer is unambiguously useless to us.
+        // AND without leaving swarm._peers.
+        //
+        // Two very different scenarios can produce this:
+        //
+        //  (a) peer-wire-swarm's internal retry loop is stuck on a dead
+        //      address — retries > 0 and climbing. This is the case we
+        //      care about: the swarm has actually dialed and failed
+        //      repeatedly, so the peer is genuinely dead.
+        //
+        //  (b) The peer is sitting untouched in the queue behind the 50-
+        //      slot connection cap. A fresh tracker/DHT burst on resume
+        //      can enqueue 200+ candidates; the ones past slot 50 never
+        //      even get a dial attempt inside the 5-minute window. These
+        //      peers are NOT dead — they're starving — and banning them
+        //      would wipe the candidate pool in a single reconcile round.
+        //
+        // Distinguish the two by reading the peer-wire-swarm peer entry's
+        // retries counter. If it's > 0 we have positive evidence the swarm
+        // actually tried to dial and failed; record a soft strike. If it's
+        // 0 (or the field shape is unrecognized) just evict from the watch
+        // list silently — no strike, no ban, and the peer stays eligible
+        // for future tracker re-announces. We still drop it from _watch so
+        // the map doesn't grow without bound.
         this._watch.delete(addr);
-        this._recordFailure(addr, 'stale');
+        const peerEntry = hasPeersTable ? peersTable[addr] : null;
+        const retries = peerEntry && typeof peerEntry.retries === 'number' ? peerEntry.retries : 0;
+        if (retries > 0) {
+          this._recordFailure(addr, 'stale');
+        }
+        // else: untried, probably slot-starved — leave reputation untouched.
       } else if (!hasPeersTable && aged) {
         // Degraded mode: no private-field signal, so fall back to a pure
         // time-based heuristic. This is less precise (may ban peers that
@@ -421,9 +455,16 @@ class PeerManager {
     this._state.set(addr, entry);
 
     // Hard signals ban on first strike; soft signals need two.
-    // 'stale' is also a hard signal — 5+ minutes of non-progress is
-    // overwhelming proof that this address will never be useful to us.
-    const isHard = (reason === 'never-connected' || reason === 'timeout-degraded' || reason === 'stale');
+    // 'stale' used to be classified as hard here, but that was wrong: the
+    // stale branch fires at 5 minutes regardless of whether peer-wire-swarm
+    // ever actually dialed the address, so in a low-seeder swarm with a
+    // 50-slot connection cap and a 200+ peer tracker burst, ~150 untried
+    // candidates would all hit the 5-minute deadline in the same reconcile
+    // round and get mass-banned, emptying the watch list and stalling the
+    // download a few minutes after restart. Demoted to soft (2 strikes) so
+    // a peer has to be stuck across two independent 5-minute windows before
+    // being banned, which gives legit-but-queued peers time to get a slot.
+    const isHard = (reason === 'never-connected' || reason === 'timeout-degraded');
     const threshold = isHard ? HARD_FAIL_BAN_AT : SOFT_FAIL_BAN_AT;
 
     if (entry.fails >= threshold) {

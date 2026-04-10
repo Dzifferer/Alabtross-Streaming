@@ -1623,20 +1623,37 @@ function isMovieExtras(item) {
 
 // POST /api/library/repair-metadata — one-time repair: re-derive titles from
 // filenames and look up correct IMDB IDs, posters, and years from TMDB.
-// Only touches items whose download is complete — in-progress / queued /
-// paused items are left alone so we don't stomp on metadata that is still
-// being filled in by the pack download flow. Backs up _metadata.json before
-// making any changes.
+// 'downloading' and 'queued' items are always skipped (the pack flow may
+// still be writing their metadata). Everything else is repairable.
+// Backs up _metadata.json before making any changes.
 //
 // Query params:
-//   ?dryRun=1   — compute and return the plan without calling relinkItem
-//                 or writing a backup. Use this to preview changes.
+//   ?dryRun=1           — return the plan without writing anything.
+//   ?statuses=a,b,c     — only process items whose status is in the given
+//                         comma-separated list. Defaults to all repairable
+//                         statuses (complete, failed, paused, converting).
+//                         Useful for staging: run with ?statuses=complete
+//                         first, then ?statuses=paused, then
+//                         ?statuses=failed as the riskiest batch last.
+//
+// Items are processed in this order within each run: complete → converting
+// → paused → failed, so if something goes wrong partway through, the safest
+// groups land first.
 app.post('/api/library/repair-metadata', rateLimit, async (req, res) => {
   if (!TMDB_API_KEY) {
     return res.status(400).json({ error: 'TMDB API key not configured' });
   }
 
   const dryRun = req.query.dryRun === '1' || req.query.dryRun === 'true';
+
+  const DEFAULT_STATUSES = ['complete', 'converting', 'paused', 'failed'];
+  const STATUS_ORDER = { complete: 0, converting: 1, paused: 2, failed: 3 };
+  const allowedStatuses = req.query.statuses
+    ? new Set(String(req.query.statuses).split(',').map(s => s.trim()).filter(Boolean))
+    : new Set(DEFAULT_STATUSES);
+  // Never allow in-flight statuses even if the caller asks for them
+  allowedStatuses.delete('downloading');
+  allowedStatuses.delete('queued');
 
   // Normalize titles for comparison: lowercase, strip year, punctuation, whitespace
   const normTitle = (s) => (s || '')
@@ -1675,17 +1692,23 @@ app.post('/api/library/repair-metadata', rateLimit, async (req, res) => {
     // Only skip items the pack/add flow might still be actively writing to:
     // 'downloading' is mid-transfer and 'queued' is about to be picked. Both
     // have metadata that's still being populated and can race with a repair.
-    // Everything else — complete, failed, paused, converting — has a stable
-    // fileName on disk (the file may or may not be complete, but the filename
-    // string itself is frozen) and is safe to re-derive/re-tag.
     const IN_FLIGHT = new Set(['downloading', 'queued']);
-    const repairableItems = allItems.filter(i => i.fileName && !IN_FLIGHT.has(i.status));
+
+    const repairableItems = allItems
+      .filter(i => i.fileName && !IN_FLIGHT.has(i.status) && allowedStatuses.has(i.status))
+      // Process safest status class first so a crash partway through
+      // damages the least-trusted items last.
+      .sort((a, b) => (STATUS_ORDER[a.status] ?? 99) - (STATUS_ORDER[b.status] ?? 99));
     const seriesItems = repairableItems.filter(i => i.type === 'series');
     const movieItems = repairableItems.filter(i => i.type === 'movie');
 
     const repaired = [];
     const stats = {
       inFlightSkipped: allItems.filter(i => i.fileName && IN_FLIGHT.has(i.status)).length,
+      statusFilterSkipped: allItems.filter(i => i.fileName && !IN_FLIGHT.has(i.status) && !allowedStatuses.has(i.status)).length,
+      eligibleByStatus: Object.fromEntries(
+        [...allowedStatuses].map(s => [s, repairableItems.filter(i => i.status === s).length])
+      ),
       moviesExtrasSkipped: 0,
       moviesNoMatchSkipped: 0,
       moviesUnparseableSkipped: 0,

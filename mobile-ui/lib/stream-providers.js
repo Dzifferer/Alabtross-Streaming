@@ -72,6 +72,21 @@ function sanitizeImdbId(id) {
 // issues on ARM/Jetson with Cloudflare IPs, while https module works fine.
 const MAX_REDIRECTS = 5;
 
+// Persistent agents so repeat requests to the same provider host reuse
+// the existing TCP/TLS connection instead of paying ~150-400ms of fresh
+// handshake on the Orin's CPU per fetch. `family: 4` matches the
+// IPv4-only policy used everywhere else in this file.
+const KEEP_ALIVE_AGENT_OPTS = {
+  keepAlive: true,
+  keepAliveMsecs: 30 * 1000,
+  maxSockets: 8,
+  maxFreeSockets: 4,
+  scheduling: 'lifo',
+  family: 4,
+};
+const httpAgent  = new http.Agent(KEEP_ALIVE_AGENT_OPTS);
+const httpsAgent = new https.Agent(KEEP_ALIVE_AGENT_OPTS);
+
 function httpGetDirect(url, timeoutMs = 10000, _redirectCount = 0, resolvedIp = null) {
   return new Promise((resolve, reject) => {
     if (_redirectCount > MAX_REDIRECTS) {
@@ -95,8 +110,12 @@ function httpGetDirect(url, timeoutMs = 10000, _redirectCount = 0, resolvedIp = 
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,application/json,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
+        // Some peers/middleboxes FIN-close after the first response
+        // unless the client explicitly asks to keep the socket open.
+        'Connection': 'keep-alive',
         ...(resolvedIp ? { Host: parsedUrl.hostname } : {}),
       },
+      agent: mod === https ? httpsAgent : httpAgent,
       timeout: timeoutMs,
       family: 4, // Force IPv4
       servername: parsedUrl.hostname, // SNI for TLS when using resolved IP
@@ -1458,4 +1477,8 @@ module.exports = {
   getSeasonPackStreams,
   getCompleteStreams,
   diagnoseProviders,
+  // Exposed so other server modules (e.g. tmdbFetch in server.js) can
+  // share the same keep-alive pool instead of opening fresh sockets.
+  httpAgent,
+  httpsAgent,
 };

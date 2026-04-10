@@ -23,6 +23,44 @@ const DEFAULT_MAX_CONCURRENT_DOWNLOADS = 5;
 const METADATA_SAVE_INTERVAL = 30 * 1000; // Save metadata every 30s during active downloads
 const PROGRESS_POLL_INTERVAL = 3000; // 3s — matches frontend poll cadence
 
+// Optional ffmpeg hwaccel (e.g. 'cuda', 'nvdec', 'v4l2m2m'). On Jetson Orin
+// Nano this offloads the DECODE side of a transcode to NVDEC; the encode
+// stays on libx264 because the SoC has no NVENC. Opt-in because stock
+// ffmpeg builds without cuvid would otherwise fail every conversion.
+const FFMPEG_HWACCEL = (process.env.FFMPEG_HWACCEL || '').trim();
+function getHwaccelArgs() {
+  return FFMPEG_HWACCEL ? ['-hwaccel', FFMPEG_HWACCEL] : [];
+}
+
+// LRU cache of ffprobe results, keyed on (path, mtimeMs, size). ffprobe is
+// a child-process spawn that takes ~100-250ms on the Orin, and the deep
+// audit / startup sweep / per-completion classifier all probe the same
+// files repeatedly. Only successful probes are cached so transient empty
+// results from in-flight downloads don't get pinned.
+const PROBE_CACHE_MAX = 1024;
+const _probeCache = new Map();
+function _probeCacheGet(key) {
+  const hit = _probeCache.get(key);
+  if (!hit) return null;
+  // Touch on read so the eviction below removes the genuinely
+  // least-recently-used entry, not just the oldest insertion.
+  _probeCache.delete(key);
+  _probeCache.set(key, hit);
+  return hit;
+}
+function _probeCacheSet(key, value) {
+  if (_probeCache.size >= PROBE_CACHE_MAX) {
+    const oldest = _probeCache.keys().next().value;
+    if (oldest !== undefined) _probeCache.delete(oldest);
+  }
+  _probeCache.set(key, value);
+}
+
+// Per-file completion cache for computeFileProgress. WeakMap so the entry
+// is collected automatically when the torrent-stream engine drops the file
+// object — and so we never mutate a third-party object with our own field.
+const _completedFileProgress = new WeakMap();
+
 /**
  * Compute file download progress from torrent-stream's bitfield.
  *
@@ -41,6 +79,14 @@ function computeFileProgress(engine, file) {
   if (!engine || !engine.bitfield || !engine.torrent || !file || file.length <= 0) {
     return { downloadedBytes: 0, progressPct: 0, isComplete: false };
   }
+
+  // Bitfield bits are monotonic, so once a file is fully verified its
+  // progress can never regress. Skip the per-piece scan on subsequent
+  // polls — significant savings on multi-file packs where most items are
+  // already done but the timer keeps iterating until the LAST one finishes.
+  const cached = _completedFileProgress.get(file);
+  if (cached) return cached;
+
   const pieceLength = engine.torrent.pieceLength;
   const torrentLength = engine.torrent.length;
   const fileStart = file.offset;
@@ -62,11 +108,17 @@ function computeFileProgress(engine, file) {
     }
   }
 
-  return {
+  const result = {
     downloadedBytes,
     progressPct: Math.min(100, Math.round((downloadedBytes / file.length) * 100)),
     isComplete: allPiecesPresent,
   };
+
+  if (allPiecesPresent) {
+    _completedFileProgress.set(file, result);
+  }
+
+  return result;
 }
 
 class LibraryManager {
@@ -3427,6 +3479,18 @@ class LibraryManager {
   _probeFile(filePath) {
     return new Promise((resolve) => {
       const ext = path.extname(filePath).toLowerCase();
+
+      // Cache key includes mtime+size so any rewrite (conversion, remux,
+      // re-download) automatically invalidates the entry. If stat fails
+      // we let ffprobe produce its own canonical error path below.
+      let cacheKey = null;
+      try {
+        const st = fs.statSync(filePath);
+        cacheKey = `${filePath}\u0000${st.mtimeMs}\u0000${st.size}`;
+        const cached = _probeCacheGet(cacheKey);
+        if (cached) return resolve(cached);
+      } catch { /* stat failed — let ffprobe report it */ }
+
       const ffprobe = spawn('ffprobe', [
         '-v', 'quiet',
         '-print_format', 'json',
@@ -3491,7 +3555,7 @@ class LibraryManager {
             });
           }
 
-          resolve({
+          const result = {
             probeOk: true,
             ext,
             container,
@@ -3504,7 +3568,11 @@ class LibraryManager {
             audioSampleRate,
             duration,
             hasAudio: !!audioStream,
-          });
+          };
+          // Failure paths above are intentionally NOT cached — they're
+          // either transient (still downloading) or environmental.
+          if (cacheKey) _probeCacheSet(cacheKey, result);
+          resolve(result);
         } catch {
           resolve({ probeOk: false, ext, reason: 'probe parse error' });
         }
@@ -3867,6 +3935,9 @@ class LibraryManager {
     const common = [
       '-hide_banner',
       '-fflags', '+genpts',
+      // Hwaccel is a no-op for kind='remux' (-c:v copy bypasses decode)
+      // but ffmpeg accepts it harmlessly, so both kinds share one prefix.
+      ...getHwaccelArgs(),
       '-i', inputPath,
       // Keep the first video stream and (optionally) the first audio
       // stream. Strip subtitles and data streams explicitly — muxing
@@ -3904,6 +3975,8 @@ class LibraryManager {
     // a 2-hour movie lands in 2-4 hours wall-clock. When WORKER_URL is set
     // and the worker is online, _startConversion routes around this path
     // entirely and the encode runs on a desktop NVIDIA card in minutes.
+    // (See FFMPEG_HWACCEL at the top of this file for the NVDEC decode
+    // offload that frees additional libx264 headroom on HEVC sources.)
     //
     // 1920px cap (not 1280) preserves resolution when the source is
     // already 1080p — we're storing permanently, not transcoding for

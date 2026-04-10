@@ -840,6 +840,55 @@ async function lookupShowByName(showName) {
   return null;
 }
 
+/**
+ * Search TMDB for a movie by name (and optional year hint) and return the
+ * best match's metadata. Like lookupShowByName, it progressively drops trailing
+ * words if the full query doesn't produce a confident match. If the year-scoped
+ * search comes up empty the query is retried without the year filter.
+ * Returns { imdbId, poster, year, name } or null if not found.
+ */
+async function lookupMovieByName(movieName, yearHint) {
+  if (!TMDB_API_KEY || !movieName) return null;
+
+  // Strip trailing year in parentheses e.g. "Inception (2010)" -> "Inception"
+  const cleaned = movieName.trim().replace(/\s*\(\d{4}\)\s*$/, '').replace(/\s+\d{4}\s*$/, '');
+  const words = cleaned.split(/\s+/);
+  for (let len = words.length; len >= Math.min(2, words.length); len--) {
+    const query = words.slice(0, len).join(' ');
+    try {
+      const params = { query, include_adult: 'false' };
+      if (yearHint) params.year = yearHint;
+      let data = await tmdbFetch('/search/movie', params);
+      let results = data.results || [];
+      // If a year filter yielded nothing, retry without the year
+      if (results.length === 0 && yearHint) {
+        data = await tmdbFetch('/search/movie', { query, include_adult: 'false' });
+        results = data.results || [];
+      }
+      if (results.length === 0) continue;
+
+      results.sort((a, b) => relevanceScore(b.title || '', query) - relevanceScore(a.title || '', query));
+      const best = results[0];
+
+      const score = relevanceScore(best.title || '', query);
+      if (score < 0.3 && len < words.length) continue;
+
+      const ext = await tmdbFetch(`/movie/${best.id}/external_ids`);
+      const imdbId = ext.imdb_id || null;
+      const poster = best.poster_path
+        ? `https://image.tmdb.org/t/p/w342${best.poster_path}`
+        : null;
+      const year = (best.release_date || '').slice(0, 4);
+
+      console.log(`[TMDB] lookupMovieByName("${movieName}") matched "${best.title}" using query "${query}"`);
+      return { imdbId, poster, year, name: best.title || movieName };
+    } catch (err) {
+      console.warn(`[TMDB] lookupMovieByName query="${query}" failed:`, err.message);
+    }
+  }
+  return null;
+}
+
 // GET /api/streams/movie/:imdbId
 app.get('/api/streams/movie/:imdbId', rateLimit, async (req, res) => {
   let { imdbId } = req.params;
@@ -1480,18 +1529,31 @@ app.post('/api/library/add-pack', rateLimit, async (req, res) => {
   }
 });
 
-// POST /api/library/repair-metadata — one-time repair: re-derive show names from filenames
-// and look up correct IMDB IDs, posters, and year from TMDB.
+// POST /api/library/repair-metadata — one-time repair: re-derive titles from
+// filenames and look up correct IMDB IDs, posters, and years from TMDB.
+// Handles both series (grouping episodes by show) and movies.
 app.post('/api/library/repair-metadata', rateLimit, async (req, res) => {
   if (!TMDB_API_KEY) {
     return res.status(400).json({ error: 'TMDB API key not configured' });
   }
 
+  // Normalize titles for comparison: lowercase, strip year, punctuation, whitespace
+  const normTitle = (s) => (s || '')
+    .toLowerCase()
+    .replace(/\s*\(\d{4}\)\s*$/, '')
+    .replace(/\s+\d{4}\s*$/, '')
+    .replace(/[^\w\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
   try {
     const allItems = library.getAll();
     const seriesItems = allItems.filter(i => i.type === 'series' && i.fileName);
+    const movieItems = allItems.filter(i => i.type === 'movie' && i.fileName);
 
-    // Derive show names from filenames and group episodes
+    const repaired = [];
+
+    // ── Series: derive show names and group episodes ────────────────────
     const showMap = new Map(); // showName -> [item ids]
     for (const item of seriesItems) {
       const derivedName = library._deriveShowNameFromFile(item.fileName);
@@ -1504,9 +1566,6 @@ app.post('/api/library/repair-metadata', rateLimit, async (req, res) => {
       }
     }
 
-    const repaired = [];
-
-    // Look up each unique show name on TMDB
     for (const [derivedName, itemIds] of showMap) {
       const meta = await lookupShowByName(derivedName);
       const updates = {
@@ -1521,6 +1580,7 @@ app.post('/api/library/repair-metadata', rateLimit, async (req, res) => {
       }
 
       repaired.push({
+        type: 'series',
         showName: updates.showName,
         imdbId: updates.imdbId || 'not found',
         episodesUpdated: itemIds.length,
@@ -1528,7 +1588,50 @@ app.post('/api/library/repair-metadata', rateLimit, async (req, res) => {
       console.log(`[Repair] "${derivedName}" -> ${updates.showName} (${updates.imdbId || 'no IMDB'}), ${itemIds.length} episodes`);
     }
 
-    res.json({ repaired, totalUpdated: repaired.reduce((s, r) => s + r.episodesUpdated, 0) });
+    // ── Movies: derive title (+ year hint) and look up on TMDB ──────────
+    let moviesUpdated = 0;
+    for (const item of movieItems) {
+      const { title: derivedTitle, year: derivedYear } = library._deriveMovieNameFromFile(item.fileName);
+      if (!derivedTitle) continue;
+
+      // Skip items that already have an IMDB id AND a name matching the
+      // derived title — nothing to fix. Items missing imdbId are always
+      // re-processed so disk-discovered movies get tagged.
+      const currentNorm = normTitle(item.name);
+      const derivedNorm = normTitle(derivedTitle);
+      if (item.imdbId && /^tt\d+$/.test(item.imdbId) && currentNorm === derivedNorm) {
+        continue;
+      }
+
+      const meta = await lookupMovieByName(derivedTitle, derivedYear);
+      const updates = {
+        name: (meta && meta.name) || derivedTitle,
+        imdbId: meta && meta.imdbId ? meta.imdbId : undefined,
+        poster: meta ? meta.poster : undefined,
+        year: (meta && meta.year) || derivedYear || undefined,
+      };
+      library.relinkItem(item.id, updates);
+      moviesUpdated++;
+
+      repaired.push({
+        type: 'movie',
+        name: updates.name,
+        imdbId: updates.imdbId || 'not found',
+        moviesUpdated: 1,
+      });
+      console.log(`[Repair] "${derivedTitle}" -> ${updates.name} (${updates.imdbId || 'no IMDB'})`);
+    }
+
+    const episodesUpdated = repaired
+      .filter(r => r.type === 'series')
+      .reduce((s, r) => s + r.episodesUpdated, 0);
+
+    res.json({
+      repaired,
+      totalUpdated: episodesUpdated + moviesUpdated,
+      episodesUpdated,
+      moviesUpdated,
+    });
   } catch (err) {
     console.error('[API] Repair metadata error:', err.message);
     res.status(500).json({ error: err.message });

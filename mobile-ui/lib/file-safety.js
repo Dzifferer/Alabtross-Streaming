@@ -31,7 +31,9 @@ const TRACKERS = [
   // Additional active trackers for better peer discovery
   'udp://opentracker.i2p.rocks:6969/announce',
   'udp://tracker.internetwarriors.net:1337/announce',
-  'udp://tracker.leechers-paradise.org:6969/announce',
+  // tracker.leechers-paradise.org removed: defunct since Nov 2019; DNS no
+  // longer resolves so every announce cycle pays the resolver-timeout cost
+  // for nothing. Was a contributor to slow startup on cold caches.
   'udp://tracker.cyberia.is:6969/announce',
   'udp://tracker.moeking.me:6969/announce',
   'udp://tracker.tiny-vps.com:6969/announce',

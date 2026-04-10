@@ -70,6 +70,15 @@ const HARD_FAIL_BAN_AT = 1;
 // require two independent observations before banning.
 const SOFT_FAIL_BAN_AT = 2;
 
+// Long-lived but unproductive: a wire that has been connected for at least
+// this long while we are interested in it AND has delivered zero bytes is
+// dead weight in our slot pool. Default chosen so a well-behaved peer has
+// had ~9 BT rechoke rounds (~10s each) to unchoke us before we give up on
+// it. Shorter than this falsely punishes seeds that are still optimistically
+// rotating their upload slots; longer wastes one of our 50 connection slots
+// on a peer that is statistically never going to serve us this session.
+const UNPRODUCTIVE_WIRE_MS = 90000;
+
 // How often we reconcile our watch list against swarm._peers to detect
 // silent give-ups. 10s is frequent enough to catch the 21s retry cycle
 // (1+5+15) without burning CPU on the poll.
@@ -117,6 +126,19 @@ class PeerManager {
     // addr → true, for peers that have handshook at least once in this
     // engine. Used to avoid giving-up on a peer that's actively exchanging.
     this._connected = new Set();
+
+    // addr → { wire, connectedAt, initialDown }
+    // Active handshook wires that we are sweeping for productivity. Entries
+    // are added in _onWire and removed on close OR when the periodic sweep
+    // evicts them. Holding the wire reference (vs. re-reading swarm.wires
+    // every cycle) means a quick-flap reconnect under the same addr can't
+    // confuse us about which physical socket we're judging.
+    this._liveWires = new Map();
+
+    // Count of wires we've evicted from the swarm because they sat in our
+    // slot pool without delivering data. Surfaced via stats() so the UI /
+    // logs can show how aggressively the slot pool is churning.
+    this._evictedWires = 0;
 
     // IPs we've already told the engine to block. Tracked for stats + to
     // avoid redundant block() calls.
@@ -184,8 +206,16 @@ class PeerManager {
     // Track useful work so we can distinguish "connected but never sent a
     // byte" from "connected and downloading". wire.downloaded is the public
     // cumulative counter exposed by peer-wire-protocol.
-    const connectedAt = Date.now();
-    const initialDown = typeof wire.downloaded === 'number' ? wire.downloaded : 0;
+    const info = {
+      wire,
+      connectedAt: Date.now(),
+      initialDown: typeof wire.downloaded === 'number' ? wire.downloaded : 0,
+    };
+    // Note: a quick-flap reconnect (same addr, new socket) will overwrite
+    // the previous entry here. The close handler below uses identity
+    // comparison so the OLD wire's close path doesn't clobber the NEW
+    // wire's _liveWires entry.
+    this._liveWires.set(addr, info);
 
     // Guard so wire.once('close') and wire.once('end') don't both score the
     // same wire twice — some peer-wire-protocol paths fire both in quick
@@ -195,8 +225,16 @@ class PeerManager {
       if (scored || this._destroyed) return;
       scored = true;
 
-      const lived = Date.now() - connectedAt;
-      const delta = (typeof wire.downloaded === 'number' ? wire.downloaded : 0) - initialDown;
+      // Only release our _liveWires slot if it's still pointing at THIS
+      // wire instance. A faster reconnect under the same addr could have
+      // already replaced it, in which case the new entry must survive.
+      const current = this._liveWires.get(addr);
+      if (current && current.wire === wire) {
+        this._liveWires.delete(addr);
+      }
+
+      const lived = Date.now() - info.connectedAt;
+      const delta = (typeof wire.downloaded === 'number' ? wire.downloaded : 0) - info.initialDown;
 
       if (delta > 0) {
         // Successful exchange — reset any accumulated strikes.
@@ -205,7 +243,8 @@ class PeerManager {
       }
 
       // Short-lived AND zero bytes → dud. Long-lived with zero bytes is
-      // just a choked seed; leave it alone.
+      // handled by the periodic sweep instead, so we don't double-count it
+      // here.
       if (lived < SHORT_LIVED_WIRE_MS) {
         this._recordFailure(addr, 'short-lived');
       }
@@ -275,6 +314,105 @@ class PeerManager {
         this._recordFailure(addr, 'timeout-degraded');
       }
     }
+
+    // Pass 2: scan handshook wires for unproductive ones holding our slots.
+    this._sweepLiveWires();
+  }
+
+  /**
+   * Evict wires that have been sitting in our slot pool for ≥
+   * UNPRODUCTIVE_WIRE_MS without delivering any data while we were
+   * interested in them. The original peer-manager only caught
+   * SHORT-lived wires (<15s) on close — but the dominant slot-burning
+   * pattern in low-seeder swarms is the long-lived dud: a peer that
+   * handshakes cleanly, sits choked for the entire metadata or download
+   * window, and only releases the slot when WE eventually destroy the
+   * engine. With a 50-slot ceiling and a handful of these per swarm,
+   * effective parallelism collapses to single digits.
+   *
+   * Strategy
+   *   1. For each live wire we're tracking, compute its time alive and
+   *      bytes downloaded since handshake.
+   *   2. If it has delivered ANY bytes, eagerly clear historical strikes
+   *      (a previously-flagged peer that's now contributing has earned
+   *      the benefit of the doubt for the rest of the session).
+   *   3. If it's been alive long enough AND we have actively wanted data
+   *      from it (amInterested) AND it has delivered nothing, evict it
+   *      via engine.disconnect — which removes the addr from
+   *      swarm._peers entirely so peer-wire-swarm's internal reconnect
+   *      timer can't bounce it right back into our slot pool a second
+   *      later. Slot frees → swarm._drain pulls a new candidate from
+   *      the queue → effectively "search for fresh peers".
+   *   4. Record a soft strike. Two such observations of the same addr
+   *      across the session → permanent ban via _recordFailure.
+   *
+   * NOTE: we do NOT evict wires we were never interested in. If
+   * `wire.amInterested === false` the engine itself decided this peer
+   * has nothing useful for our current piece selection — that's the
+   * rechoke algorithm doing its job, not the peer being broken. Punishing
+   * those would just thrash slots and waste tracker re-announces.
+   */
+  _sweepLiveWires() {
+    if (this._destroyed || !this._engine) return;
+    if (this._liveWires.size === 0) return;
+
+    const now = Date.now();
+
+    for (const [addr, info] of this._liveWires) {
+      const wire = info.wire;
+      const cur = (wire && typeof wire.downloaded === 'number') ? wire.downloaded : 0;
+      const delta = cur - info.initialDown;
+
+      if (delta > 0) {
+        // Productive — credit the peer immediately rather than waiting for
+        // the close handler. This lets a peer with prior strikes (e.g.
+        // short-lived in a previous engine session) recover its reputation
+        // the moment it starts serving us, instead of being one short flap
+        // away from a ban.
+        if (this._state.has(addr)) this._state.delete(addr);
+        continue;
+      }
+
+      const lived = now - info.connectedAt;
+      if (lived < UNPRODUCTIVE_WIRE_MS) continue;
+
+      // Engine isn't asking this peer for data → not the peer's fault.
+      // Leave the rechoker alone; it'll cycle slots on its own schedule.
+      if (wire && wire.amInterested !== true) continue;
+
+      // 90s+ alive, we want data, peer has sent nothing. Free the slot.
+      this._evictedWires += 1;
+      this._liveWires.delete(addr);
+      this._recordFailure(addr, 'unproductive');
+
+      // _recordFailure may have already called engine.block(addr), which
+      // internally invokes engine.disconnect → swarm._remove → wire.destroy.
+      // If this is only strike 1 (no ban yet) we still need to physically
+      // free the slot, otherwise the wire just sits there until the next
+      // sweep notices the same dud all over again.
+      const ip = ipOf(addr);
+      if (!ip || !this._bannedIps.has(ip)) {
+        try {
+          if (typeof this._engine.disconnect === 'function') {
+            this._engine.disconnect(addr);
+          } else if (wire && typeof wire.destroy === 'function') {
+            // Last-resort fallback if torrent-stream ever drops the public
+            // disconnect helper. Less ideal because peer-wire-swarm's
+            // internal reconnect timer may bounce the addr back into our
+            // slot pool within ~1s, but better than leaking the slot.
+            wire.destroy();
+          }
+        } catch (err) {
+          console.warn(`[PeerManager] ${this._label}: disconnect(${addr}) threw: ${err.message}`);
+        }
+      }
+
+      if (this._verbose) {
+        console.log(
+          `[PeerManager] ${this._label}: evicted ${addr} (unproductive, lived=${(lived / 1000) | 0}s, dl=0)`
+        );
+      }
+    }
   }
 
   _recordFailure(addr, reason) {
@@ -322,7 +460,8 @@ class PeerManager {
     const port = (this._engine && this._engine.port) || '-';
     console.log(
       `[PeerManager] ${this._label}: port=${port} wires=${wires} queued=${queued} ` +
-      `watching=${this._watch.size} tracked=${this._state.size} bannedIps=${this._bannedIps.size}`
+      `live=${this._liveWires.size} watching=${this._watch.size} tracked=${this._state.size} ` +
+      `bannedIps=${this._bannedIps.size} evicted=${this._evictedWires}`
     );
   }
 
@@ -334,6 +473,8 @@ class PeerManager {
       watching: this._watch.size,
       tracked: this._state.size,
       bannedIps: this._bannedIps.size,
+      liveWires: this._liveWires.size,
+      evicted: this._evictedWires,
     };
   }
 
@@ -363,7 +504,9 @@ class PeerManager {
     this._state.clear();
     this._watch.clear();
     this._connected.clear();
-    // Keep _bannedIps around in case stats() is called after destroy.
+    this._liveWires.clear();
+    // Keep _bannedIps and _evictedWires around in case stats() is called
+    // after destroy.
   }
 }
 

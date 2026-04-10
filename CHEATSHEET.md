@@ -20,9 +20,19 @@ sudo docker logs --tail 30 alabtross-mobile
 sudo docker logs --tail 30 stremio-server
 
 # Rebuild mobile UI (after code changes)
+#
+# IMPORTANT: `docker start` restarts the EXISTING container, which is
+# bound to the image it was created from. After rebuilding, you must
+# `docker rm` the old container and `docker run` a new one — otherwise
+# the new image sits unused and the old code keeps running. The easy
+# way is to just run ./deploy.sh, which handles all of that:
+sudo ./deploy.sh
+
+# Or, if you want to do it manually:
 sudo docker stop alabtross-mobile
+sudo docker rm   alabtross-mobile                              # <-- REQUIRED
 sudo docker build --no-cache -t alabtross-mobile mobile-ui/
-sudo docker start alabtross-mobile
+sudo ./deploy.sh   # for the full run-command with all env/volume flags
 ```
 
 ## Git / Updating Code

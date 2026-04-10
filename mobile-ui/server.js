@@ -1621,6 +1621,20 @@ function isMovieExtras(item) {
   return false;
 }
 
+// Detect filenames that look like a TV episode (SxxExx or 1x05 style) so
+// the repair loop can skip movie items whose underlying file is actually
+// a series episode in disguise. Running those through the movie parser
+// derives garbage titles that word-overlap their way into unrelated movies
+// (e.g. "Game of Thrones S03E10 Mhysa" matching "Untitled Game of Thrones
+// Film" on 3-of-5 word overlap).
+function fileNameLooksLikeEpisode(fileName) {
+  if (!fileName) return false;
+  const base = String(fileName).replace(/\.[^.]+$/, '');
+  if (/\bS\d{1,2}[\s._-]?E\d{1,3}\b/i.test(base)) return true;
+  if (/\b\d{1,2}x\d{1,3}\b/i.test(base)) return true;
+  return false;
+}
+
 // POST /api/library/repair-metadata — one-time repair: re-derive titles from
 // filenames and look up correct IMDB IDs, posters, and years from TMDB.
 // 'downloading' and 'queued' items are always skipped (the pack flow may
@@ -1760,12 +1774,23 @@ app.post('/api/library/repair-metadata', rateLimit, async (req, res) => {
     }
 
     // ── Movies: derive title (+ year hint) and look up on TMDB ──────────
+    stats.moviesEpisodeFormatSkipped = 0;
+    stats.moviesNoOpSkipped = 0;
     let moviesUpdated = 0;
     for (const item of movieItems) {
       // Skip bonus / featurette / concert / making-of content entirely.
       // These stay in the library with whatever metadata they already had.
       if (isMovieExtras(item)) {
         stats.moviesExtrasSkipped++;
+        continue;
+      }
+
+      // Skip type:movie items whose filename is actually a TV episode —
+      // misclassified series content. Feeding "Game.of.Thrones.S03E10.mkv"
+      // to the movie parser derives a garbage query that word-overlaps into
+      // unrelated films.
+      if (fileNameLooksLikeEpisode(item.fileName)) {
+        stats.moviesEpisodeFormatSkipped++;
         continue;
       }
 
@@ -1795,8 +1820,22 @@ app.post('/api/library/repair-metadata', rateLimit, async (req, res) => {
         continue;
       }
 
+      const newName = meta.name || derivedTitle;
+      // Skip writes that wouldn't change anything — same name AND same
+      // imdbId as already stored. These no-op updates cluttered the
+      // response with dozens of "Licence to Kill -> Licence to Kill" lines
+      // because the "already correct" shortcut only checks derivedTitle,
+      // not what TMDB actually returns.
+      if (
+        item.imdbId === meta.imdbId &&
+        normTitle(item.name) === normTitle(newName)
+      ) {
+        stats.moviesNoOpSkipped++;
+        continue;
+      }
+
       const updates = {
-        name: meta.name || derivedTitle,
+        name: newName,
         imdbId: meta.imdbId,
         poster: meta.poster,
         year: meta.year || derivedYear || undefined,

@@ -841,10 +841,41 @@ async function lookupShowByName(showName) {
 }
 
 /**
+ * Compute word-level overlap between two titles, normalized to lowercase and
+ * stripped of punctuation. Returns the fraction of common words over the
+ * larger of the two word counts — i.e. both "missing words" (query has more
+ * than title) and "extra words" (title has more than query) drag the score
+ * down. Used to sanity-check TMDB matches: a low overlap means the match is
+ * a different movie that just happened to share a word.
+ */
+function titleWordOverlap(a, b) {
+  const norm = s => (s || '')
+    .toLowerCase()
+    .replace(/[^\w\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(' ')
+    .filter(Boolean);
+  const wa = norm(a), wb = norm(b);
+  if (wa.length === 0 || wb.length === 0) return 0;
+  const common = wa.filter(w => wb.includes(w)).length;
+  return common / Math.max(wa.length, wb.length);
+}
+
+/**
  * Search TMDB for a movie by name (and optional year hint) and return the
  * best match's metadata. Like lookupShowByName, it progressively drops trailing
  * words if the full query doesn't produce a confident match. If the year-scoped
  * search comes up empty the query is retried without the year filter.
+ *
+ * Guards against wrong matches:
+ *   1. Word-overlap floor (0.5): the match's title must share at least half
+ *      its words with the cleaned query. Rejects e.g. "Avatar Fire and Ash"
+ *      matching "Avatar: The Way of Water" (only "avatar" in common).
+ *   2. Year delta (±2): if both a filename year hint and the TMDB release
+ *      year are present and differ by more than 2 years, reject. Catches the
+ *      case where TMDB returns a related movie from a different era.
+ *
  * Returns { imdbId, poster, year, name } or null if not found.
  */
 async function lookupMovieByName(movieName, yearHint) {
@@ -867,11 +898,25 @@ async function lookupMovieByName(movieName, yearHint) {
       }
       if (results.length === 0) continue;
 
-      results.sort((a, b) => relevanceScore(b.title || '', query) - relevanceScore(a.title || '', query));
+      // Rank against the FULL cleaned title, not the progressively-trimmed
+      // query — otherwise shortening "Avatar Fire and Ash" down to "Avatar"
+      // would pick "Avatar" (2009) as a 1.0 match.
+      results.sort((a, b) => relevanceScore(b.title || '', cleaned) - relevanceScore(a.title || '', cleaned));
       const best = results[0];
 
-      const score = relevanceScore(best.title || '', query);
-      if (score < 0.3 && len < words.length) continue;
+      // Word-overlap sanity check (see titleWordOverlap comment).
+      const overlap = titleWordOverlap(cleaned, best.title || '');
+      if (overlap < 0.5) {
+        console.log(`[TMDB] lookupMovieByName: rejected "${best.title}" for "${movieName}" — word overlap ${overlap.toFixed(2)} < 0.5`);
+        continue;
+      }
+
+      // Year-delta sanity check.
+      const bestYear = (best.release_date || '').slice(0, 4);
+      if (yearHint && bestYear && Math.abs(parseInt(yearHint, 10) - parseInt(bestYear, 10)) > 2) {
+        console.log(`[TMDB] lookupMovieByName: rejected "${best.title}" (${bestYear}) for "${movieName}" — year delta ${Math.abs(parseInt(yearHint, 10) - parseInt(bestYear, 10))} > 2`);
+        continue;
+      }
 
       const ext = await tmdbFetch(`/movie/${best.id}/external_ids`);
       const imdbId = ext.imdb_id || null;
@@ -880,7 +925,7 @@ async function lookupMovieByName(movieName, yearHint) {
         : null;
       const year = (best.release_date || '').slice(0, 4);
 
-      console.log(`[TMDB] lookupMovieByName("${movieName}") matched "${best.title}" using query "${query}"`);
+      console.log(`[TMDB] lookupMovieByName("${movieName}") matched "${best.title}" (${year}) using query "${query}" overlap=${overlap.toFixed(2)}`);
       return { imdbId, poster, year, name: best.title || movieName };
     } catch (err) {
       console.warn(`[TMDB] lookupMovieByName query="${query}" failed:`, err.message);
@@ -1627,18 +1672,20 @@ app.post('/api/library/repair-metadata', rateLimit, async (req, res) => {
 
   try {
     const allItems = library.getAll();
-    // Only repair items that are fully downloaded. Anything in-flight
-    // (downloading / queued / paused / converting / failed) has metadata
-    // that may still be getting populated by the pack flow — touching it
-    // mid-download overwrites the correct showName/name that the importer
-    // is about to write, which is how bulk downloads got mangled last run.
-    const completeItems = allItems.filter(i => i.status === 'complete' && i.fileName);
-    const seriesItems = completeItems.filter(i => i.type === 'series');
-    const movieItems = completeItems.filter(i => i.type === 'movie');
+    // Only skip items the pack/add flow might still be actively writing to:
+    // 'downloading' is mid-transfer and 'queued' is about to be picked. Both
+    // have metadata that's still being populated and can race with a repair.
+    // Everything else — complete, failed, paused, converting — has a stable
+    // fileName on disk (the file may or may not be complete, but the filename
+    // string itself is frozen) and is safe to re-derive/re-tag.
+    const IN_FLIGHT = new Set(['downloading', 'queued']);
+    const repairableItems = allItems.filter(i => i.fileName && !IN_FLIGHT.has(i.status));
+    const seriesItems = repairableItems.filter(i => i.type === 'series');
+    const movieItems = repairableItems.filter(i => i.type === 'movie');
 
     const repaired = [];
     const stats = {
-      inProgressSkipped: allItems.filter(i => i.fileName && i.status !== 'complete').length,
+      inFlightSkipped: allItems.filter(i => i.fileName && IN_FLIGHT.has(i.status)).length,
       moviesExtrasSkipped: 0,
       moviesNoMatchSkipped: 0,
       moviesUnparseableSkipped: 0,

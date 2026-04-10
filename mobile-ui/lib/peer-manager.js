@@ -70,14 +70,37 @@ const HARD_FAIL_BAN_AT = 1;
 // require two independent observations before banning.
 const SOFT_FAIL_BAN_AT = 2;
 
-// Long-lived but unproductive: a wire that has been connected for at least
-// this long while we are interested in it AND has delivered zero bytes is
-// dead weight in our slot pool. Default chosen so a well-behaved peer has
-// had ~9 BT rechoke rounds (~10s each) to unchoke us before we give up on
-// it. Shorter than this falsely punishes seeds that are still optimistically
-// rotating their upload slots; longer wastes one of our 50 connection slots
-// on a peer that is statistically never going to serve us this session.
+// Long-lived but unproductive: a wire that we have been actively ASKING
+// for pieces from (amInterested=true) for at least this long AND has
+// delivered zero bytes is dead weight in our slot pool. Default chosen
+// so a well-behaved peer has had ~9 BT rechoke rounds (~10s each) to
+// unchoke us before we give up on it. Shorter than this falsely punishes
+// seeds that are still optimistically rotating their upload slots; longer
+// wastes one of our 50 connection slots on a peer that is statistically
+// never going to serve us this session.
+//
+// IMPORTANT: this clock starts when the sweep first observes
+// wire.amInterested=true, NOT at handshake. Under the original
+// measure-from-handshake design, a wire that sat through a 3-minute
+// BEP-9 metadata fetch would be evicted within one sweep cycle (~10s)
+// of metadata arriving, because lived > 90s was already true but we
+// had only actually wanted bytes from it for 10s. That killed
+// season-pack downloads — every handshook peer got guillotined the
+// instant the rechoker finally asked them for data.
 const UNPRODUCTIVE_WIRE_MS = 90000;
+
+// Starvation detection: when fewer than LOW_WATER_WIRES peers have
+// handshook and stayed connected across several consecutive reconcile
+// cycles, we switch the watch-list stale threshold from STALE_WATCH_MS
+// (5 min) to STARVED_STALE_WATCH_MS (1 min). The normal 5-minute window
+// is too lenient under slot pressure: peer-wire-swarm can park dead
+// addresses in its internal retry-forever loop indefinitely, so the
+// only way fresh tracker candidates get a chance is if we actively
+// clear the backlog. Under starvation we want that backlog drained
+// ~5x faster so new discoveries reach the slot pool sooner.
+const LOW_WATER_WIRES = 5;
+const STARVATION_STREAK_BEFORE_DECAY = 2;
+const STARVED_STALE_WATCH_MS = 60 * 1000;
 
 // How often we reconcile our watch list against swarm._peers to detect
 // silent give-ups. 10s is frequent enough to catch the 21s retry cycle
@@ -139,6 +162,15 @@ class PeerManager {
     // slot pool without delivering data. Surfaced via stats() so the UI /
     // logs can show how aggressively the slot pool is churning.
     this._evictedWires = 0;
+
+    // Starvation tracking: consecutive reconcile cycles where
+    // swarm.wires.length < LOW_WATER_WIRES. When this crosses
+    // STARVATION_STREAK_BEFORE_DECAY we switch to a shorter stale window
+    // so the watch list can drain faster. Reset when wires recover.
+    // _starvationActive is a one-shot flag so we only log the transition
+    // once per starvation episode instead of every 10s.
+    this._starvationStreak = 0;
+    this._starvationActive = false;
 
     // IPs we've already told the engine to block. Tracked for stats + to
     // avoid redundant block() calls.
@@ -206,10 +238,19 @@ class PeerManager {
     // Track useful work so we can distinguish "connected but never sent a
     // byte" from "connected and downloading". wire.downloaded is the public
     // cumulative counter exposed by peer-wire-protocol.
+    //
+    // interestedSince is armed the first time the sweep observes
+    // wire.amInterested=true. Null until then so pre-metadata wires (where
+    // the engine has no piece selection yet, so amInterested stays false
+    // for every wire) never start the unproductive-budget clock. Once
+    // armed, the UNPRODUCTIVE_WIRE_MS gate is measured from this moment,
+    // which gives the BT rechoker a fair 9 rounds to unchoke us no matter
+    // how long BEP-9 metadata exchange kept the wire alive beforehand.
     const info = {
       wire,
       connectedAt: Date.now(),
       initialDown: typeof wire.downloaded === 'number' ? wire.downloaded : 0,
+      interestedSince: null,
     };
     // Note: a quick-flap reconnect (same addr, new socket) will overwrite
     // the previous entry here. The close handler below uses identity
@@ -268,10 +309,38 @@ class PeerManager {
     const swarm = this._engine && this._engine.swarm;
     const peersTable = swarm && swarm._peers;
     const hasPeersTable = peersTable && typeof peersTable === 'object';
+    const activeWires = (swarm && swarm.wires) ? swarm.wires.length : 0;
 
     if (!hasPeersTable && !this._privateFieldWarned) {
       console.warn(`[PeerManager] ${this._label}: swarm._peers not available — dead-peer detection degraded to wire-close only`);
       this._privateFieldWarned = true;
+    }
+
+    // Slot-starvation state machine. If fewer than LOW_WATER_WIRES wires
+    // are handshook for several cycles in a row, peer-wire-swarm's drain
+    // queue is almost certainly clogged with addresses stuck in its
+    // retry-forever loop. Shrink the stale window so the watch-list pass
+    // below evicts and ip-bans those clogs ~5x sooner and fresh tracker
+    // candidates get a shot at our slot pool.
+    if (activeWires < LOW_WATER_WIRES) {
+      this._starvationStreak += 1;
+    } else {
+      if (this._starvationActive) {
+        console.log(
+          `[PeerManager] ${this._label}: swarm recovered (wires=${activeWires}) — restoring normal stale window`
+        );
+        this._starvationActive = false;
+      }
+      this._starvationStreak = 0;
+    }
+    const starved = this._starvationStreak >= STARVATION_STREAK_BEFORE_DECAY;
+    const effectiveStaleMs = starved ? STARVED_STALE_WATCH_MS : STALE_WATCH_MS;
+    if (starved && !this._starvationActive) {
+      console.log(
+        `[PeerManager] ${this._label}: swarm starved (wires=${activeWires} < ${LOW_WATER_WIRES}) — ` +
+        `accelerating watch-list decay from ${STALE_WATCH_MS / 1000}s to ${STARVED_STALE_WATCH_MS / 1000}s`
+      );
+      this._starvationActive = true;
     }
 
     const now = Date.now();
@@ -289,7 +358,7 @@ class PeerManager {
 
       const age = now - firstSeen;
       const aged = age >= GIVEUP_GRACE_MS;
-      const stale = age >= STALE_WATCH_MS;
+      const stale = age >= effectiveStaleMs;
 
       if (gone && aged) {
         // Confirmed dead by both signals: the swarm gave up AND enough time
@@ -320,9 +389,8 @@ class PeerManager {
   }
 
   /**
-   * Evict wires that have been sitting in our slot pool for ≥
-   * UNPRODUCTIVE_WIRE_MS without delivering any data while we were
-   * interested in them. The original peer-manager only caught
+   * Evict wires we have been asking for bytes from for ≥ UNPRODUCTIVE_WIRE_MS
+   * without receiving a single byte. The original peer-manager only caught
    * SHORT-lived wires (<15s) on close — but the dominant slot-burning
    * pattern in low-seeder swarms is the long-lived dud: a peer that
    * handshakes cleanly, sits choked for the entire metadata or download
@@ -330,27 +398,45 @@ class PeerManager {
    * engine. With a 50-slot ceiling and a handful of these per swarm,
    * effective parallelism collapses to single digits.
    *
-   * Strategy
-   *   1. For each live wire we're tracking, compute its time alive and
-   *      bytes downloaded since handshake.
-   *   2. If it has delivered ANY bytes, eagerly clear historical strikes
-   *      (a previously-flagged peer that's now contributing has earned
-   *      the benefit of the doubt for the rest of the session).
-   *   3. If it's been alive long enough AND we have actively wanted data
-   *      from it (amInterested) AND it has delivered nothing, evict it
-   *      via engine.disconnect — which removes the addr from
-   *      swarm._peers entirely so peer-wire-swarm's internal reconnect
-   *      timer can't bounce it right back into our slot pool a second
-   *      later. Slot frees → swarm._drain pulls a new candidate from
-   *      the queue → effectively "search for fresh peers".
-   *   4. Record a soft strike. Two such observations of the same addr
-   *      across the session → permanent ban via _recordFailure.
+   * Clock semantics
+   * ───────────────
+   * The 90-second budget is measured from the first sweep that observes
+   * `wire.amInterested === true`, NOT from handshake. This distinction
+   * matters enormously for season packs:
    *
-   * NOTE: we do NOT evict wires we were never interested in. If
-   * `wire.amInterested === false` the engine itself decided this peer
-   * has nothing useful for our current piece selection — that's the
-   * rechoke algorithm doing its job, not the peer being broken. Punishing
-   * those would just thrash slots and waste tracker re-announces.
+   *   t=0    wire handshakes (BEP-9 metadata exchange begins)
+   *   t=150  metadata finally arrives, piece selection flips
+   *          engine.amInterested=true → every wire is marked interested
+   *   t=160  our sweep fires. The wire has lived=160s but we have only
+   *          actually been asking for pieces for 10s. Ten seconds is
+   *          less than one full BT rechoke round; the peer hasn't had
+   *          a chance to unchoke us yet. Evicting here (as the original
+   *          lived-based design did) guillotines every wire in the pool
+   *          at the exact moment they become useful, which is the
+   *          slowdown we're fixing.
+   *
+   * Under the interested-timer design, t=160 sweep sees amInterested=true
+   * for the first time and arms the clock; the wire isn't a candidate
+   * for eviction until t=250 at the earliest, which is a full 9 rechoke
+   * rounds of being asked for data. Peers that were going to serve us
+   * will have done so by then.
+   *
+   * Productive wires (delta > 0) clear both their strikes and their
+   * interested-clock, so a peer that delivers then briefly stalls isn't
+   * punished for the stall.
+   *
+   * Wires that the engine is not interested in at all (pre-metadata, or
+   * during rechoker uninterest) have their clock held at null and are
+   * exempt from eviction — that's the rechoker's choice, not the peer's
+   * fault.
+   *
+   * Eviction path: engine.disconnect(addr) → swarm._remove(addr) which
+   * removes the addr from swarm._peers entirely so peer-wire-swarm's
+   * internal reconnect timer can't bounce it right back into our slot
+   * pool. Freed slot → swarm._drain pulls a new candidate from the
+   * queue → effectively "search for fresh peers". Two evictions of the
+   * same addr cross the existing 2-strike soft-fail threshold and
+   * permanent-ban via _recordFailure → engine.block.
    */
   _sweepLiveWires() {
     if (this._destroyed || !this._engine) return;
@@ -368,19 +454,37 @@ class PeerManager {
         // the close handler. This lets a peer with prior strikes (e.g.
         // short-lived in a previous engine session) recover its reputation
         // the moment it starts serving us, instead of being one short flap
-        // away from a ban.
+        // away from a ban. Also clear the interested-clock so a transient
+        // post-productive stall doesn't pick up where the clock left off.
         if (this._state.has(addr)) this._state.delete(addr);
+        info.interestedSince = null;
         continue;
       }
 
-      const lived = now - info.connectedAt;
-      if (lived < UNPRODUCTIVE_WIRE_MS) continue;
+      // Rechoker isn't asking this peer for data (pre-metadata has no
+      // piece selection so this covers every wire; post-metadata it
+      // covers peers the rechoker has temporarily backed off of). Pause
+      // the clock — when the engine decides it wants something from them
+      // again, the next sweep will re-arm it from THAT moment.
+      if (!wire || wire.amInterested !== true) {
+        info.interestedSince = null;
+        continue;
+      }
 
-      // Engine isn't asking this peer for data → not the peer's fault.
-      // Leave the rechoker alone; it'll cycle slots on its own schedule.
-      if (wire && wire.amInterested !== true) continue;
+      // First sweep where we observe interest → arm the clock, skip this
+      // round. Eviction can't happen until we've at least had one full
+      // sweep interval (RECONCILE_INTERVAL_MS) of confirmed interest to
+      // measure against.
+      if (info.interestedSince === null) {
+        info.interestedSince = now;
+        continue;
+      }
 
-      // 90s+ alive, we want data, peer has sent nothing. Free the slot.
+      const interestedFor = now - info.interestedSince;
+      if (interestedFor < UNPRODUCTIVE_WIRE_MS) continue;
+
+      // Interested for UNPRODUCTIVE_WIRE_MS+ (≥9 rechoke rounds) with
+      // zero bytes delivered. Slot is genuinely wasted — evict.
       this._evictedWires += 1;
       this._liveWires.delete(addr);
       this._recordFailure(addr, 'unproductive');
@@ -408,8 +512,10 @@ class PeerManager {
       }
 
       if (this._verbose) {
+        const ageSec = ((now - info.connectedAt) / 1000) | 0;
         console.log(
-          `[PeerManager] ${this._label}: evicted ${addr} (unproductive, lived=${(lived / 1000) | 0}s, dl=0)`
+          `[PeerManager] ${this._label}: evicted ${addr} ` +
+          `(unproductive, interested=${(interestedFor / 1000) | 0}s, age=${ageSec}s, dl=0)`
         );
       }
     }

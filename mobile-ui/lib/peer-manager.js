@@ -94,21 +94,36 @@ const GIVEUP_GRACE_MS = 45000;
 // table indefinitely (observed in the wild on some low-seed torrents: the
 // retry setTimeout just keeps repushing to the queue forever without ever
 // succeeding or giving up), the watch list never drains via the normal
-// swarm._peers diff path. 5 minutes is far past any legitimate connection
-// backoff so anything still sitting here is effectively dead from our POV —
-// evict it from the watch list.
+// swarm._peers diff path. Anything still sitting here past this window is
+// effectively dead from our POV — evict it from the watch list.
+//
+// Tuning: previously 5 minutes. Raised to 15 so a candidate has time to
+// cycle through ~3-4 rounds of slot rotation (50 slots × ~90s unproductive
+// sweep) before being considered stale. On a fresh resume with a 200+ peer
+// tracker burst, slot 150 in the queue needs ~5-8 min just to reach the
+// front of the line under natural churn; 5 min gave almost no margin and
+// timed out untried candidates wholesale.
 //
 // IMPORTANT: reaching STALE_WATCH_MS does NOT automatically mean the peer is
 // dead. peer-wire-swarm's connection pool is capped at `connections: 50`, but
 // a fresh tracker/DHT burst can enqueue 200+ candidates at once. Peers beyond
-// the 50-slot line sit untried in swarm._peers for the whole 5-minute window
-// purely because they never reached the front of the queue. Banning those on
-// sight would wipe out the entire candidate pool in one reconcile round and
-// starve future slot releases — the exact symptom we saw in the wild. So the
-// stale branch is a **soft** signal: it only records a strike if we have
-// positive evidence that the peer was actually dialed (swarm retries > 0),
-// and even then it requires SOFT_FAIL_BAN_AT strikes before banning.
-const STALE_WATCH_MS = 5 * 60 * 1000;
+// the 50-slot line sit untried in swarm._peers for the whole window purely
+// because they never reached the front of the queue. Banning those on sight
+// would wipe out the entire candidate pool in one reconcile round and starve
+// future slot releases — the exact symptom we saw in the wild. So the stale
+// branch is a **soft** signal: it only records a strike if we have positive
+// evidence that the peer was actually dialed (swarm retries > 0), and even
+// then it requires SOFT_FAIL_BAN_AT strikes before banning.
+const STALE_WATCH_MS = 15 * 60 * 1000;
+
+// Hard ceiling on how many candidate addresses we'll keep in the watch list
+// at once. Sized as ~2× the torrent-stream `connections: 50` cap so we
+// always have a couple rounds of fallback candidates ready when a slot
+// frees, without letting a runaway tracker/DHT burst push the map to
+// hundreds of entries we'll never get to inside STALE_WATCH_MS anyway.
+// Extra discoveries past this cap are dropped at the intake (see _onPeer)
+// rather than buffered and then mass-stale-banned.
+const MAX_WATCH_SIZE = 100;
 
 // How often to log a summary line. 0 = never.
 const SUMMARY_LOG_INTERVAL_MS = 60000;
@@ -201,9 +216,18 @@ class PeerManager {
     // Already connected in this session — nothing to watch.
     if (this._connected.has(addr)) return;
 
-    if (!this._watch.has(addr)) {
-      this._watch.set(addr, Date.now());
-    }
+    if (this._watch.has(addr)) return;
+
+    // Cap the watch list. A fresh tracker/DHT burst on a popular torrent
+    // can announce 200+ peers at once, but we only have 50 connection
+    // slots — every entry past ~2× that is guaranteed to still be sitting
+    // untried when the stale timer fires. Rather than buffer it just to
+    // evict it later, drop it at the door. The engine keeps its own
+    // discovery-side dedup so a dropped addr will be re-announced on the
+    // next tracker cycle if it's still a valid candidate.
+    if (this._watch.size >= MAX_WATCH_SIZE) return;
+
+    this._watch.set(addr, Date.now());
   }
 
   _onWire(wire) {

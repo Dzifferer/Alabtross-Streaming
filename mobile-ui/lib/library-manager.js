@@ -1364,6 +1364,53 @@ class LibraryManager {
   }
 
   /**
+   * Extract a movie title (and optional year) from a filename by stripping
+   * quality/codec/source/group tags. When a 4-digit year (1900-2099) appears,
+   * everything before it is the title and the year is captured as a hint.
+   * e.g. "The.Matrix.1999.1080p.BluRay.x264-YIFY.mkv"
+   *        -> { title: "The Matrix", year: "1999" }
+   *      "Inception (2010) [1080p].mp4"
+   *        -> { title: "Inception", year: "2010" }
+   *      "Arrival.2160p.HDR.mkv"
+   *        -> { title: "Arrival", year: null }
+   * Returns { title: null, year: null } when nothing usable remains.
+   */
+  _deriveMovieNameFromFile(fileName) {
+    let base = path.basename(fileName, path.extname(fileName));
+    // Strip [group] tags
+    base = base.replace(/\[[^\]]*\]/g, '');
+    // Capture a year in parentheses, then drop the parens so later regex can match
+    let year = null;
+    const parenYear = base.match(/\((19\d{2}|20\d{2})\)/);
+    if (parenYear) { year = parenYear[1]; base = base.replace(parenYear[0], ' '); }
+    // Replace underscores/dots with spaces (if used as separators)
+    if (!base.includes(' ') || /^[\w.]+$/.test(base.replace(/\s/g, ''))) {
+      base = base.replace(/[._]/g, ' ');
+    }
+    base = base.trim();
+
+    // If a bare year (1900-2099) is present, everything before it is the title
+    const bareYear = base.match(/^(.+?)\s+(19\d{2}|20\d{2})\b/);
+    if (bareYear) {
+      if (!year) year = bareYear[2];
+      const title = bareYear[1].replace(/[-–\s]+$/, '').trim();
+      if (title) return { title, year };
+    }
+
+    // No year found — strip common quality/codec/source/release-group tags
+    const cleaned = base
+      .replace(/\b(2160p|1080p|720p|480p|4k|uhd|hdr|dv|dolby\s*vision)\b.*/i, '')
+      .replace(/\b(bluray|blu-ray|brrip|bdrip|webrip|web-dl|webdl|web|hdrip|dvdrip|dvd|hdtv|pdtv)\b.*/i, '')
+      .replace(/\b(x264|x265|h264|h265|hevc|xvid|divx|av1|aac|ac3|dts|ddp5|flac|mp3|10bit)\b.*/i, '')
+      .replace(/\b(yify|yts|rarbg|ettv|eztv|fgt|ntg|tgx|psa|galaxyrg)\b.*/i, '')
+      .replace(/[-–\s]+$/, '')
+      .trim();
+    if (cleaned) return { title: cleaned, year };
+
+    return { title: null, year };
+  }
+
+  /**
    * Pick the next episode in a pack to download. Sequential mode: only one
    * file is selected in the torrent engine at a time so its bandwidth isn't
    * spread across dozens of episodes (which made each one crawl at a few

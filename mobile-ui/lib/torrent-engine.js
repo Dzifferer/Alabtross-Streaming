@@ -93,12 +93,10 @@ class TorrentEngine {
       // retry storms on low-power hardware when multiple torrents run at once.
       // libtorrent/qBittorrent default to ~50 per torrent for this reason.
       //
-      // uploads: 4 — matches the BitTorrent "optimistic unchoke" algorithm's
-      // expected number of upload slots, which enables tit-for-tat and keeps
-      // peers from choking us on well-seeded swarms.
+      // uploads: 0 — disables seeding during downloads.
       const engine = torrentStream(uri, {
         connections: 50,
-        uploads: 4,
+        uploads: 0,
         dht: true,
         path: this._downloadPath,
         trackers: TRACKERS,

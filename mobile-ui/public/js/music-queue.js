@@ -105,6 +105,7 @@
       window.MusicAPI.markPlayed(item.albumId);
       pushRecent(item);
     }
+    updateMediaSessionMetadata();
     emit();
   }
 
@@ -247,10 +248,20 @@
   audio.addEventListener('timeupdate', () => {
     state.position = audio.currentTime || 0;
     state.duration = audio.duration || 0;
+    updateMediaPositionState();
     emit();
   });
-  audio.addEventListener('play', () => { state.paused = false; emit(); });
-  audio.addEventListener('pause', () => { state.paused = true; emit(); });
+  audio.addEventListener('play', () => {
+    state.paused = false;
+    setMediaPlaybackState('playing');
+    emit();
+  });
+  audio.addEventListener('pause', () => {
+    state.paused = true;
+    setMediaPlaybackState('paused');
+    emit();
+  });
+  audio.addEventListener('loadedmetadata', () => { updateMediaSessionMetadata(); });
   audio.addEventListener('ended', () => { next(); });
   audio.addEventListener('error', (e) => {
     console.warn('[MusicQueue] audio error', e);
@@ -258,10 +269,88 @@
     setTimeout(() => next(), 500);
   });
 
+  // ─── MediaSession integration ────────────
+  // Exposes the currently-playing track to the phone lock screen,
+  // notification shade, AirPods/Bluetooth buttons and car head-units.
+  // Silently no-ops in browsers that don't support the API.
+
+  const ms = ('mediaSession' in navigator) ? navigator.mediaSession : null;
+
+  function updateMediaSessionMetadata() {
+    if (!ms || typeof window.MediaMetadata !== 'function') return;
+    const item = currentItem();
+    if (!item) { ms.metadata = null; return; }
+    const artwork = item.coverUrl
+      ? [96, 192, 256, 384, 512].map(size => ({
+          src: item.coverUrl,
+          sizes: `${size}x${size}`,
+          type: /\.png(\?|$)/i.test(item.coverUrl) ? 'image/png' : 'image/jpeg',
+        }))
+      : [];
+    try {
+      ms.metadata = new window.MediaMetadata({
+        title: item.title || 'Unknown track',
+        artist: item.artist || '',
+        album: item.album || '',
+        artwork,
+      });
+    } catch (_) { /* some platforms reject oversized artwork */ }
+  }
+
+  function setMediaPlaybackState(playbackState) {
+    if (ms) ms.playbackState = playbackState;
+  }
+
+  function updateMediaPositionState() {
+    if (!ms || typeof ms.setPositionState !== 'function') return;
+    const duration = isFinite(audio.duration) ? audio.duration : 0;
+    if (!duration) return;
+    try {
+      ms.setPositionState({
+        duration,
+        position: Math.min(duration, Math.max(0, audio.currentTime || 0)),
+        playbackRate: audio.playbackRate || 1,
+      });
+    } catch (_) {}
+  }
+
+  if (ms) {
+    const safeSet = (action, handler) => {
+      try { ms.setActionHandler(action, handler); } catch (_) {}
+    };
+    safeSet('play', () => { state.paused = false; audio.play().catch(() => {}); });
+    safeSet('pause', () => { state.paused = true; audio.pause(); });
+    safeSet('previoustrack', () => prev());
+    safeSet('nexttrack', () => next());
+    safeSet('seekbackward', (details) => {
+      const step = (details && details.seekOffset) || 10;
+      seek(Math.max(0, (audio.currentTime || 0) - step));
+    });
+    safeSet('seekforward', (details) => {
+      const step = (details && details.seekOffset) || 10;
+      seek((audio.currentTime || 0) + step);
+    });
+    safeSet('seekto', (details) => {
+      if (details && typeof details.seekTime === 'number') seek(details.seekTime);
+    });
+    safeSet('stop', () => { audio.pause(); state.paused = true; emit(); });
+  }
+
   // Periodic save so we don't lose position on tab close.
   setInterval(() => {
     if (audio && !audio.paused) save();
   }, 5000);
+
+  // ─── Body class for CSS layout ────────────
+  // Toggling body.music-playing lets CSS reserve space for the mini-player
+  // across every view. Toggling body.music-player-open hides the mini-player
+  // while the full player view is on screen.
+
+  function syncBodyState() {
+    const hasCurrent = !!currentItem();
+    document.body.classList.toggle('music-playing', hasCurrent);
+  }
+  listeners.add(syncBodyState);
 
   // ─── Public API ─────────────────────
 

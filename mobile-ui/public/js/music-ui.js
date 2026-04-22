@@ -611,7 +611,12 @@
   }
 
   function enterMusicTab() {
-    switchMusicTab(currentTab || 'home');
+    // Ensure the active tab button visually matches the in-memory state —
+    // users returning from album/artist detail expect the correct tab pill
+    // to stay highlighted.
+    const tab = currentTab || 'home';
+    $$('.music-tab').forEach(b => b.classList.toggle('active', b.dataset.musicTab === tab));
+    switchMusicTab(tab);
   }
 
   // ─── Mini / Full player wiring ─────────
@@ -644,11 +649,16 @@
     $('#mpf-title').textContent = item.title || '—';
     $('#mpf-artist').textContent = item.artist || '';
     $('#mpf-album').textContent = item.album || '';
-    $('#mpf-current').textContent = fmtTime(state.position);
     $('#mpf-duration').textContent = fmtTime(state.duration);
     const seek = $('#mpf-seek');
     if (seek && !seek.dataset.dragging) {
+      // Keep the slider and current-time label in sync with playback.
       seek.value = state.duration ? Math.round((state.position / state.duration) * 1000) : 0;
+      $('#mpf-current').textContent = fmtTime(state.position);
+    } else if (seek && state.duration) {
+      // While dragging, show the scrubbed time instead of the still-playing
+      // position so the user can preview where they're seeking to.
+      $('#mpf-current').textContent = fmtTime((seek.value / 1000) * state.duration);
     }
     $('#mpf-playicon').classList.toggle('hidden', !state.paused);
     $('#mpf-pauseicon').classList.toggle('hidden', state.paused);
@@ -657,15 +667,21 @@
     rep.classList.toggle('active', state.repeat !== 'off');
     rep.setAttribute('data-state', state.repeat);
 
-    // Queue list (upcoming)
+    // Queue list: show the current track first (marked) then the upcoming
+    // tracks. Users often want to confirm what's playing and jump back to
+    // earlier queue items, so rendering only "upcoming" hides useful context.
     const ol = $('#mpf-queue');
     ol.innerHTML = '';
     const order = state.shuffleOrder || state.queue.map((_, i) => i);
     const currentPos = order.indexOf(state.currentIndex);
-    for (let i = currentPos + 1; i < order.length; i++) {
+    for (let i = 0; i < order.length; i++) {
       const qi = order[i];
       const q = state.queue[qi];
-      const li = el('li', { class: 'queue-item', draggable: true });
+      const isCurrent = i === currentPos;
+      const li = el('li', {
+        class: 'queue-item' + (isCurrent ? ' now-playing' : ''),
+        draggable: !isCurrent,
+      });
       li.dataset.queueIdx = qi;
       li.appendChild(el('span', { class: 'queue-item__title' }, q.title || '—'));
       li.appendChild(el('span', { class: 'queue-item__artist' }, q.artist || ''));
@@ -691,7 +707,16 @@
     });
 
     const seek = $('#mpf-seek');
-    seek.addEventListener('input', () => { seek.dataset.dragging = '1'; });
+    seek.addEventListener('input', () => {
+      seek.dataset.dragging = '1';
+      // Live-update the current-time label so the user can tell where
+      // they're dragging to even while audio is paused.
+      const dur = window.MusicQueue.state.duration || 0;
+      if (dur) {
+        const cur = document.getElementById('mpf-current');
+        if (cur) cur.textContent = fmtTime((seek.value / 1000) * dur);
+      }
+    });
     seek.addEventListener('change', () => {
       const dur = window.MusicQueue.state.duration || 0;
       if (dur) window.MusicQueue.seek((seek.value / 1000) * dur);
@@ -865,9 +890,27 @@
     wireMusicSearch();
     wirePlayerControls();
     wireLibrarySelector();
+
+    // Toggle body.music-player-open so CSS can hide the redundant mini-player
+    // while the full-screen player is on screen. Uses a MutationObserver to
+    // track .active class changes so we stay in sync regardless of which
+    // part of the app triggered the navigation.
+    const fullView = document.getElementById('view-music-player');
+    if (fullView) {
+      const syncOpen = () => {
+        const isOpen = fullView.classList.contains('active');
+        document.body.classList.toggle('music-player-open', isOpen);
+        // Paint the full player immediately when the view becomes active;
+        // otherwise it'd show stale DOM until the next timeupdate tick.
+        if (isOpen) renderFullPlayer(window.MusicQueue.state);
+      };
+      new MutationObserver(syncOpen).observe(fullView, { attributes: true, attributeFilter: ['class'] });
+      syncOpen();
+    }
+
     window.MusicQueue.on((state) => {
       renderMiniPlayer(state);
-      if (document.getElementById('view-music-player').classList.contains('active')) {
+      if (fullView && fullView.classList.contains('active')) {
         renderFullPlayer(state);
       }
     });

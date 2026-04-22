@@ -6120,6 +6120,51 @@
       manualImportBtn.addEventListener('click', showManualImportModal);
     }
 
+    // Library toolbar: Auto-match (only unmatched/needsReview) + Re-match
+    // (force: everything, including already-linked). Both call the same
+    // endpoint with a different body.
+    const autoMatchBtn = document.getElementById('library-automatch-btn');
+    const reMatchBtn  = document.getElementById('library-rematch-btn');
+    async function runAutoMatch(force) {
+      const btn = force ? reMatchBtn : autoMatchBtn;
+      if (!btn || btn.disabled) return;
+      const label = btn.querySelector('.library-automatch-label');
+      const origLabel = label ? label.textContent : null;
+      btn.disabled = true;
+      if (label) label.textContent = 'Matching…';
+      try {
+        const resp = await fetch('/api/library/auto-match-all', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ force: !!force }),
+        });
+        if (resp.status === 503) {
+          showToast('TMDB key not configured on server');
+          return;
+        }
+        if (!resp.ok) throw new Error('Auto-match failed');
+        const data = await resp.json();
+        showToast(`Matched ${data.matched || 0} · ${data.needsReview || 0} need review`);
+        refreshLibraryBadge();
+        // Only reload library view if user is currently on it
+        const libView = document.getElementById('view-library');
+        if (libView && !libView.classList.contains('hidden')) {
+          loadLibrary();
+        }
+      } catch (err) {
+        showToast('Auto-match failed');
+      } finally {
+        btn.disabled = false;
+        if (label && origLabel) label.textContent = origLabel;
+      }
+    }
+    if (autoMatchBtn) autoMatchBtn.addEventListener('click', () => runAutoMatch(false));
+    if (reMatchBtn)   reMatchBtn.addEventListener('click', () => {
+      if (confirm('Re-match every item against TMDB?\nThis overwrites auto-matched links (manual matches are preserved).')) {
+        runAutoMatch(true);
+      }
+    });
+
     // Player back button — navigate back (goBack handles video cleanup after hiding view)
     dom.playerBackBtn.addEventListener('click', () => {
       goBack();

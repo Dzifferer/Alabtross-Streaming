@@ -1118,7 +1118,42 @@ html, body {
 .library-toolbar {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
   padding: 8px 16px 4px;
+}
+
+.library-automatch-btn,
+.library-rematch-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(108,92,231,0.18);
+  border: 1px solid rgba(108,92,231,0.4);
+  border-radius: var(--radius-sm, 6px);
+  color: var(--text-primary, #fff);
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.library-automatch-btn:active,
+.library-rematch-btn:active {
+  background: rgba(108,92,231,0.4);
+}
+
+.library-automatch-btn:disabled,
+.library-rematch-btn:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+.library-rematch-btn {
+  background: transparent;
+  border-color: rgba(255,255,255,0.15);
+  padding: 8px 10px;
 }
 
 .manual-import-btn {

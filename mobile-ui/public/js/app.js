@@ -3923,6 +3923,68 @@
     loadLibrary();
   }
 
+  // Library-wide version of findMissingForGroup: pulls every library item
+  // from the server, collects unique packIds, and re-opens each source
+  // torrent. Useful when you can't remember which show had gaps.
+  async function findMissingAcrossLibrary(btn) {
+    const label = btn.querySelector('.library-find-missing-label');
+    const originalLabel = label ? label.textContent : null;
+    btn.disabled = true;
+    if (label) label.textContent = 'Checking…';
+
+    let packIds = [];
+    try {
+      const resp = await fetch('/api/library');
+      const data = await resp.json();
+      const items = data.items || [];
+      packIds = [...new Set(items.map(i => i.packId).filter(Boolean))];
+    } catch {
+      btn.disabled = false;
+      if (label && originalLabel) label.textContent = originalLabel;
+      showToast('Could not load library');
+      return;
+    }
+
+    if (packIds.length === 0) {
+      btn.disabled = false;
+      if (label && originalLabel) label.textContent = originalLabel;
+      showToast('No pack downloads in this library');
+      return;
+    }
+
+    let added = 0;
+    let errors = 0;
+    for (const packId of packIds) {
+      try {
+        const r = await fetch('/api/library/restart-pack', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ packId }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { errors++; continue; }
+        if (Array.isArray(d.items)) {
+          added += d.items.filter(i => i.status === 'started').length;
+        }
+      } catch {
+        errors++;
+      }
+    }
+
+    btn.disabled = false;
+    if (label && originalLabel) label.textContent = originalLabel;
+
+    if (added > 0) {
+      showToast(`Downloading ${added} missing ${added === 1 ? 'episode' : 'episodes'}`);
+    } else if (errors > 0) {
+      showToast('Could not re-check source torrents');
+    } else {
+      showToast('No missing episodes found');
+    }
+
+    loadLibrary();
+  }
+
   function showManualImportModal() {
     const existing = document.getElementById('manual-import-modal');
     if (existing) existing.remove();
@@ -6496,6 +6558,14 @@
         runAutoMatch(true);
       }
     });
+
+    // Library-wide Find-missing: walk every library item for unique packIds,
+    // re-open each source torrent via /api/library/restart-pack so any files
+    // not already tracked start downloading.
+    const findMissingBtn = document.getElementById('library-find-missing-btn');
+    if (findMissingBtn) {
+      findMissingBtn.addEventListener('click', () => findMissingAcrossLibrary(findMissingBtn));
+    }
 
     // Player back button — navigate back (goBack handles video cleanup after hiding view)
     dom.playerBackBtn.addEventListener('click', () => {

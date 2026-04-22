@@ -1153,7 +1153,8 @@ html, body {
 }
 
 .library-automatch-btn,
-.library-rematch-btn {
+.library-rematch-btn,
+.library-find-missing-btn {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1169,12 +1170,14 @@ html, body {
 }
 
 .library-automatch-btn:active,
-.library-rematch-btn:active {
+.library-rematch-btn:active,
+.library-find-missing-btn:active {
   background: rgba(108,92,231,0.4);
 }
 
 .library-automatch-btn:disabled,
-.library-rematch-btn:disabled {
+.library-rematch-btn:disabled,
+.library-find-missing-btn:disabled {
   opacity: 0.5;
   cursor: wait;
 }
@@ -1183,6 +1186,11 @@ html, body {
   background: transparent;
   border-color: rgba(255,255,255,0.15);
   padding: 8px 10px;
+}
+
+.library-find-missing-btn {
+  background: transparent;
+  border-color: rgba(255,255,255,0.15);
 }
 
 .manual-import-btn {

@@ -2988,10 +2988,15 @@
     `;
 
     try {
-      const libResp = await fetch('/api/library').then(r => { if (!r.ok) throw new Error(`Library API ${r.status}`); return r.json(); }).catch(e => { console.error('[Library] fetch failed:', e); return { items: [] }; });
+      const [libResp, reviewResp] = await Promise.all([
+        fetch('/api/library').then(r => { if (!r.ok) throw new Error(`Library API ${r.status}`); return r.json(); }).catch(e => { console.error('[Library] fetch failed:', e); return { items: [] }; }),
+        fetch('/api/library/review-queue').then(r => r.ok ? r.json() : { items: [] }).catch(() => ({ items: [] })),
+      ]);
 
       const libraryItems = libResp.items || [];
-      console.log(`[Library] ${libraryItems.length} library items`);
+      const reviewItems = reviewResp.items || [];
+      console.log(`[Library] ${libraryItems.length} library items, ${reviewItems.length} in review queue`);
+      updateLibraryBadge(reviewItems.length);
 
       // Compute queue positions for queued items (FIFO by addedAt)
       const queuedItems = libraryItems.filter(i => i.status === 'queued').sort((a, b) => a.addedAt - b.addedAt);
@@ -3007,24 +3012,62 @@
       const movies = libraryItems.filter(i => i.type !== 'series');
       const shows = libraryItems.filter(i => i.type === 'series');
 
-      // Group shows by showName (filename-derived) so that different series
-      // bundled in the same torrent (e.g. "Naruto" vs "Naruto Shippuden") are
-      // displayed separately.  Falls back to imdbId then name.
+      // Group shows so different series in the same torrent ("Naruto" vs
+      // "Naruto Shippuden") stay separate but episodes of the same show land
+      // together even when only half of them have an imdbId yet.
+      //
+      // Key priority:
+      //   1. imdbId when present — the canonical identity
+      //   2. a normalized showName (lowercase, punctuation/year stripped)
+      //   3. a normalized name as a last resort
+      // After the initial grouping we fold same-imdbId groups into one so
+      // items that get matched mid-session don't spawn a duplicate tile.
+      const normShowKey = (s) => (s || '')
+        .toLowerCase()
+        .replace(/\s*\(\d{4}\)\s*$/, '')
+        .replace(/\s+\d{4}\s*$/, '')
+        .replace(/[^\w\s]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
       const showGroups = new Map();
       for (const ep of shows) {
-        const showKey = ep.showName || ep.imdbId || ep.name || 'Unknown Show';
+        const normName = normShowKey(ep.showName || ep.name);
+        const showKey = ep.imdbId ? `imdb:${ep.imdbId}` : (normName ? `name:${normName}` : 'unknown');
         if (!showGroups.has(showKey)) {
-          showGroups.set(showKey, { name: ep.showName || ep.name, imdbId: ep.imdbId, poster: ep.poster, year: ep.year, seasons: new Map() });
+          showGroups.set(showKey, { name: ep.showName || ep.name, imdbId: ep.imdbId, poster: ep.poster, year: ep.year, seasons: new Map(), _normKey: normName });
         }
         const group = showGroups.get(showKey);
-        // Use the best poster/name/showName available
         if (!group.poster && ep.poster) group.poster = ep.poster;
+        if (!group.imdbId && ep.imdbId) group.imdbId = ep.imdbId;
+        if (!group.year && ep.year) group.year = ep.year;
         if (ep.showName && (!group.name || group.name.includes(' - '))) group.name = ep.showName;
         const seasonNum = ep.season || 1;
         if (!group.seasons.has(seasonNum)) {
           group.seasons.set(seasonNum, []);
         }
         group.seasons.get(seasonNum).push(ep);
+      }
+
+      // Second pass: merge a "name:Foo" group into an "imdb:tt123" group
+      // when they share a normalized show name — the imdb-keyed version
+      // won because some episodes were matched, but earlier episodes had
+      // no imdbId yet and live in the name-keyed group.
+      const mergeTargets = new Map(); // normName -> imdb-keyed group
+      for (const [key, group] of showGroups) {
+        if (key.startsWith('imdb:') && group._normKey) {
+          mergeTargets.set(group._normKey, group);
+        }
+      }
+      for (const [key, group] of [...showGroups]) {
+        if (!key.startsWith('name:')) continue;
+        const target = mergeTargets.get(group._normKey);
+        if (!target) continue;
+        for (const [seasonNum, episodes] of group.seasons) {
+          if (!target.seasons.has(seasonNum)) target.seasons.set(seasonNum, []);
+          target.seasons.get(seasonNum).push(...episodes);
+        }
+        if (!target.poster && group.poster) target.poster = group.poster;
+        showGroups.delete(key);
       }
 
       // Sort episodes within each season
@@ -3050,6 +3093,23 @@
       }
 
       let html = '';
+
+      // ── Needs Review: items the auto-matcher couldn't confirm ────────
+      // Rendered at the top so the user sees ambiguous imports before
+      // scrolling through matched content. Each card shows the raw
+      // filename plus up to 5 candidate posters for one-click relink.
+      if (reviewItems.length > 0) {
+        html += `
+          <div class="library-section-header library-review-header">
+            <span>Needs Review</span>
+            <span class="library-review-count">${reviewItems.length}</span>
+            <button class="library-review-run" title="Re-run auto-matcher">Auto-match</button>
+          </div>
+          <div class="library-review-grid">
+            ${reviewItems.map(item => renderReviewCard(item)).join('')}
+          </div>
+        `;
+      }
 
       // Movies section (with collection grouping + genre grouping)
       if (movies.length > 0) {
@@ -3221,6 +3281,58 @@
     }
   }
 
+  // Render a Needs Review card: raw filename + up to 5 candidate posters.
+  // Candidates come from the auto-matcher's cached TMDB results so clicking
+  // one commits the link without a round-trip through the search modal.
+  function renderReviewCard(item) {
+    const fileName = item.fileName || item.name || '?';
+    const parsed = item.parsed || {};
+    const guess = parsed.query || parsed.title || parsed.show || '';
+    const confidence = item.matchConfidence || 0;
+    const confLabel = confidence > 0 ? `${Math.round(confidence * 100)}%` : '—';
+    const candidates = Array.isArray(item.candidates) ? item.candidates : [];
+
+    const candHtml = candidates.map(c => {
+      const poster = isSafePosterUrl(c.poster) ? c.poster : '';
+      const imdb = c.imdbId || '';
+      return `
+        <button class="review-candidate" data-id="${escapeHTML(item.id)}" data-imdb-id="${escapeHTML(imdb)}" data-name="${escapeHTML(c.name || '')}" data-poster="${escapeHTML(c.poster || '')}" data-year="${escapeHTML(c.year || '')}" data-type="${escapeHTML(c.type || item.type || 'movie')}" title="${escapeHTML((c.name || '') + (c.year ? ' (' + c.year + ')' : ''))}" ${imdb ? '' : 'disabled'}>
+          <div class="review-candidate-poster">
+            ${poster ? `<img src="${poster}" alt="${escapeHTML(c.name || '')}">` : `<div class="review-candidate-no-poster">${escapeHTML((c.name || '?').slice(0, 2).toUpperCase())}</div>`}
+          </div>
+          <div class="review-candidate-meta">
+            <div class="review-candidate-title">${escapeHTML(c.name || 'Unknown')}</div>
+            <div class="review-candidate-sub">${escapeHTML(c.year || '')}${c.imdbId ? '' : ' · no IMDb'}</div>
+          </div>
+        </button>
+      `;
+    }).join('');
+
+    const hintLine = [
+      parsed.show || parsed.title || '',
+      parsed.year ? `(${parsed.year})` : '',
+      parsed.season ? `S${String(parsed.season).padStart(2, '0')}` : '',
+      parsed.episode ? `E${String(parsed.episode).padStart(2, '0')}` : '',
+    ].filter(Boolean).join(' ');
+
+    return `
+      <div class="review-card" data-id="${escapeHTML(item.id)}" data-item-name="${escapeHTML(guess || item.name || '')}">
+        <div class="review-card-head">
+          <div class="review-card-filename" title="${escapeHTML(fileName)}">${escapeHTML(fileName)}</div>
+          <div class="review-card-actions">
+            <span class="review-card-confidence" title="Auto-matcher confidence">${confLabel}</span>
+            <button class="review-card-search" title="Search IMDb manually">Search IMDb</button>
+            <button class="review-card-skip" title="Keep current metadata (stop asking)">Keep</button>
+          </div>
+        </div>
+        <div class="review-card-hint">${hintLine ? 'Parsed: ' + escapeHTML(hintLine) : 'Parser couldn\'t recognise this file.'}</div>
+        ${candidates.length > 0
+          ? `<div class="review-card-candidates">${candHtml}</div>`
+          : `<div class="review-card-empty">No auto-match candidates yet — tap "Search IMDb".</div>`}
+      </div>
+    `;
+  }
+
   function renderLibraryItem(item) {
     const poster = item.poster || '';
     const title = escapeHTML(item.name || 'Unknown');
@@ -3288,11 +3400,24 @@
       metaHtml = `<div class="library-card-meta failed">Failed &middot; tap to retry</div>`;
     }
 
+    // Match-state badge: "NEW" for unmatched, "?" for auto-match candidates
+    // still pending confirmation, "AUTO" for auto-matched (user can still
+    // override via the relink button). Confirmed manual matches get no badge.
+    let matchBadge = '';
+    if (item.matchState === 'unmatched') {
+      matchBadge = `<span class="library-card-match-badge unmatched" title="No IMDb match yet">NEW</span>`;
+    } else if (item.matchState === 'needsReview') {
+      matchBadge = `<span class="library-card-match-badge needsReview" title="Auto-match uncertain — tap to review">?</span>`;
+    } else if (item.matchSource === 'auto') {
+      matchBadge = `<span class="library-card-match-badge auto" title="Auto-matched — tap to override">AUTO</span>`;
+    }
+
     return `
       <div class="card" data-id="${escapeHTML(item.id)}" data-imdb-id="${escapeHTML(item.imdbId || '')}" data-item-name="${escapeHTML(item.name || '')}" data-status="${item.status}">
         <div class="card-poster">
           ${poster ? `<img src="${poster}" alt="${title}">` : ''}
           ${!poster ? `<div class="poster-placeholder">${title}</div>` : ''}
+          ${matchBadge}
           ${overlayHtml}
           <button class="library-card-relink" data-id="${escapeHTML(item.id)}" title="Re-link to correct IMDB">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>
@@ -3911,6 +4036,79 @@
         const itemId = card.dataset.id;
         const itemName = card.dataset.itemName || '';
         showRelinkModal(itemId, itemName);
+      });
+    });
+
+    // ── Needs Review handlers ──────────────────────────────────────
+    // Candidate poster clicks commit a relink without the search modal.
+    container.querySelectorAll('.review-candidate').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (btn.disabled) return;
+        const { id, imdbId, name, poster, year, type } = btn.dataset;
+        if (!imdbId || !imdbId.startsWith('tt')) {
+          showToast('This candidate has no IMDb id');
+          return;
+        }
+        btn.classList.add('is-busy');
+        try {
+          const resp = await fetch(`/api/library/${encodeURIComponent(id)}/relink`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ imdbId, name, poster, year, type }),
+          });
+          if (!resp.ok) throw new Error('Relink failed');
+          showToast(`Linked to ${name}`);
+          loadLibrary();
+        } catch (err) {
+          btn.classList.remove('is-busy');
+          showToast('Relink failed');
+        }
+      });
+    });
+
+    // "Search IMDb" opens the full search modal seeded with the parsed query.
+    container.querySelectorAll('.review-card-search').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const card = btn.closest('.review-card');
+        showRelinkModal(card.dataset.id, card.dataset.itemName || '');
+      });
+    });
+
+    // "Keep" marks the item manual so auto-match stops nagging.
+    container.querySelectorAll('.review-card-skip').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const card = btn.closest('.review-card');
+        const id = card.dataset.id;
+        try {
+          await fetch(`/api/library/${encodeURIComponent(id)}/mark-manual`, { method: 'POST' });
+          loadLibrary();
+        } catch { showToast('Failed to update'); }
+      });
+    });
+
+    // Section-header "Auto-match" button re-runs the pass.
+    container.querySelectorAll('.library-review-run').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        btn.disabled = true;
+        btn.textContent = 'Matching…';
+        try {
+          const resp = await fetch('/api/library/auto-match-all', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+          });
+          const data = await resp.json();
+          showToast(`Matched ${data.matched || 0}, ${data.needsReview || 0} need review`);
+          loadLibrary();
+        } catch (err) {
+          btn.disabled = false;
+          btn.textContent = 'Auto-match';
+          showToast('Auto-match failed');
+        }
       });
     });
 
@@ -5862,7 +6060,31 @@
 
   // ─── Init ────────────────────────────────────────
 
+  // Keep the Library nav badge fresh with the review-queue count.
+  function updateLibraryBadge(count) {
+    const el = document.getElementById('nav-library-badge');
+    if (!el) return;
+    if (count > 0) {
+      el.textContent = count > 99 ? '99+' : String(count);
+      el.classList.remove('hidden');
+    } else {
+      el.classList.add('hidden');
+    }
+  }
+  async function refreshLibraryBadge() {
+    try {
+      const r = await fetch('/api/library/review-queue');
+      if (!r.ok) return;
+      const data = await r.json();
+      updateLibraryBadge(data.count || 0);
+    } catch { /* silent — badge is best-effort */ }
+  }
+
   function init() {
+    // Kick off an initial badge refresh on app load so the count shows even
+    // when the user hasn't visited the library tab yet.
+    refreshLibraryBadge();
+
     // Bottom nav
     dom.navBtns.forEach(btn => {
       btn.addEventListener('click', () => {

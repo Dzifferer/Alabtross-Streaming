@@ -125,6 +125,13 @@ class LibraryManager {
   constructor(opts = {}) {
     this._libraryPath = opts.libraryPath || path.join(process.cwd(), 'library');
     this._metadataFile = path.join(this._libraryPath, '_metadata.json');
+    // Persistent record of every pack ever started via addSeasonPack —
+    // keyed by infoHash with `{ imdbId, title, year, poster, magnetUri,
+    // infoHash, rootDir }`. Outlives individual items so that disk-
+    // rediscovered files can be re-linked to their source torrent (the
+    // infoHash/magnetUri are otherwise lost when items become disk_*).
+    this._packCatalogFile = path.join(this._libraryPath, '_pack-catalog.json');
+    this._packCatalog = new Map();
     // Persistent cache for torrent-stream's BEP-9 metadata (.torrent files).
     // torrent-stream writes each successfully-received torrent metadata blob
     // to `<opts.tmp>/<opts.name>/<infoHash>.torrent` and, on subsequent
@@ -206,6 +213,7 @@ class LibraryManager {
 
     this._cleanupStaleTmpFiles();
     this._loadMetadata();
+    this._loadPackCatalog();
     console.log(`[Library] Initialized at ${this._libraryPath}, ${this._items.size} items loaded`);
 
     // Disk recovery + resume + metadata repair are deferred to an async
@@ -1115,6 +1123,15 @@ class LibraryManager {
         // Store the shared engine
         this._engines.set(packId, engine);
         this._startPeriodicSave();
+
+        // Persist the pack's torrent info in the catalog so disk discovery
+        // can re-attach these files to their source torrent later even if
+        // the library metadata is rebuilt.
+        this._registerPackInCatalog({
+          imdbId, title: name, year, poster,
+          magnetUri, infoHash,
+          rootDir: path.basename(packDir),
+        });
 
         // Sequential pack download: pick the first episode now that all items
         // are registered. The progress timer auto-advances on completion.
@@ -2841,20 +2858,26 @@ class LibraryManager {
       ? (parsed.show || parsed.episodeName || fileName)
       : (parsed.title || parsed.episodeName || fileName);
 
+    // If this file lives under a known pack folder, preserve the pack's
+    // torrent info on the promoted item so restart-pack still works after
+    // promotion.
+    const packEntry = this._findPackCatalogEntryForRelPath(relPath);
+
     const item = {
       id,
-      imdbId: null,
+      imdbId: packEntry?.imdbId || null,
       type: parsed.type,
       name: displayName,
-      showName: parsed.type === 'series' ? parsed.show : null,
-      poster: '',
-      year: parsed.year || '',
+      showName: parsed.type === 'series' ? (parsed.show || packEntry?.title || null) : null,
+      poster: packEntry?.poster || '',
+      year: parsed.year || packEntry?.year || '',
       quality: '',
       size: '',
       season: parsed.season,
       episode: parsed.episode,
-      infoHash: null,
-      magnetUri: null,
+      infoHash: packEntry?.infoHash || null,
+      magnetUri: packEntry?.magnetUri || null,
+      packId: packEntry ? `pack_${packEntry.infoHash}` : undefined,
       status: 'complete',
       progress: 100,
       downloadSpeed: 0,
@@ -2865,7 +2888,7 @@ class LibraryManager {
       addedAt: stat.mtimeMs,
       completedAt: stat.mtimeMs,
       error: null,
-      matchState: 'unmatched',
+      matchState: packEntry?.imdbId ? 'matched' : 'unmatched',
       matchConfidence: 0,
       parsed,
     };
@@ -3731,6 +3754,13 @@ class LibraryManager {
       for (const it of this._items.values()) {
         if (it.infoHash) referenced.add(String(it.infoHash).toLowerCase());
       }
+      // Also protect any infoHash recorded in the pack catalog — these files
+      // may have no live library items yet (e.g. after a metadata rebuild
+      // that leaves disk-only items), but we still want to be able to resume
+      // the source torrent without re-running BEP-9.
+      for (const entry of this._packCatalog.values()) {
+        if (entry.infoHash) referenced.add(String(entry.infoHash).toLowerCase());
+      }
       const now = Date.now();
       const MIN_AGE_MS = 24 * 60 * 60 * 1000;
       let removed = 0;
@@ -3834,6 +3864,60 @@ class LibraryManager {
       }
     }
 
+  }
+
+  _loadPackCatalog() {
+    try {
+      if (!fs.existsSync(this._packCatalogFile)) return;
+      const raw = fs.readFileSync(this._packCatalogFile, 'utf8');
+      if (!raw.trim()) return;
+      const data = JSON.parse(raw);
+      if (!Array.isArray(data)) return;
+      for (const entry of data) {
+        if (entry && entry.infoHash) this._packCatalog.set(String(entry.infoHash).toLowerCase(), entry);
+      }
+    } catch (err) {
+      console.error(`[Library] Pack catalog load failed: ${err.message}`);
+    }
+  }
+
+  _savePackCatalog() {
+    try {
+      const data = [...this._packCatalog.values()];
+      fs.writeFileSync(this._packCatalogFile, JSON.stringify(data, null, 2), 'utf8');
+    } catch (err) {
+      console.error(`[Library] Pack catalog save failed: ${err.message}`);
+    }
+  }
+
+  // Record a started pack so its torrent info survives even if every item
+  // later gets removed or replaced by disk discovery. Idempotent by infoHash.
+  _registerPackInCatalog({ imdbId, title, year, poster, magnetUri, infoHash, rootDir }) {
+    if (!infoHash || !magnetUri) return;
+    const key = String(infoHash).toLowerCase();
+    this._packCatalog.set(key, {
+      imdbId: imdbId || null,
+      title: title || null,
+      year: year || null,
+      poster: poster || null,
+      magnetUri,
+      infoHash: key,
+      rootDir: rootDir || null,
+    });
+    this._savePackCatalog();
+  }
+
+  // Find the catalog entry whose rootDir matches the top-level directory of
+  // the given relative path (used by disk discovery to re-attach lost pack
+  // metadata to files that live under a known pack folder).
+  _findPackCatalogEntryForRelPath(relPath) {
+    if (!relPath) return null;
+    const topDir = String(relPath).split(/[\\/]/)[0];
+    if (!topDir) return null;
+    for (const entry of this._packCatalog.values()) {
+      if (entry.rootDir && entry.rootDir === topDir) return entry;
+    }
+    return null;
   }
 
   _resumeInterruptedDownloads() {
@@ -4125,12 +4209,20 @@ class LibraryManager {
       const displayName = parsed.type === 'series'
         ? (parsed.show || parsed.episodeName || fileName)
         : (parsed.title || parsed.episodeName || fileName);
+
+      // If this file lives under a pack folder we know about (pack catalog),
+      // re-attach the original torrent info — imdbId, packId, infoHash,
+      // magnetUri — so "Find missing" can reopen the source torrent and any
+      // future rebuild of the metadata file doesn't lose track of the pack.
+      const packEntry = this._findPackCatalogEntryForRelPath(relPath);
+
       return {
         id: 'disk_' + relPath,
         name: displayName,
-        showName: parsed.type === 'series' ? parsed.show : null,
+        showName: parsed.type === 'series' ? (parsed.show || packEntry?.title || null) : null,
         type: parsed.type,
-        year: parsed.year || '',
+        year: parsed.year || packEntry?.year || '',
+        poster: packEntry?.poster || '',
         season: parsed.season,
         episode: parsed.episode,
         status: 'complete',
@@ -4138,10 +4230,13 @@ class LibraryManager {
         fileName,
         fileSize: stat.size,
         addedAt: stat.mtimeMs,
-        matchState: 'unmatched',
+        matchState: packEntry?.imdbId ? 'matched' : 'unmatched',
         matchConfidence: 0,
         parsed,
-        imdbId: null,
+        imdbId: packEntry?.imdbId || null,
+        packId: packEntry ? `pack_${packEntry.infoHash}` : undefined,
+        infoHash: packEntry?.infoHash || null,
+        magnetUri: packEntry?.magnetUri || null,
       };
     };
 

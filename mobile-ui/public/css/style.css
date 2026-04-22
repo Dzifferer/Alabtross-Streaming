@@ -821,6 +821,35 @@ html, body {
   font-size: 16px;
   font-weight: 600;
   color: var(--text-primary, #fff);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-overlay-find-missing {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: var(--radius-sm, 8px);
+  color: var(--text-primary, #fff);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.library-overlay-find-missing:active {
+  background: rgba(255,255,255,0.12);
+}
+
+.library-overlay-find-missing:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 .library-group-overlay-grid {

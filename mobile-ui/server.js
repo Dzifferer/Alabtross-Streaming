@@ -1487,7 +1487,22 @@ async function autoMatchOne(item, extIdCache) {
   if (!parsed.query) return { id: item.id, action: 'skipped', reason: 'unparseable' };
 
   const kind = parsed.type === 'series' ? 'series' : 'movie';
-  const { best, confidence, candidates } = await searchCandidates(kind, parsed.query, parsed.year, extIdCache);
+  let { best, confidence, candidates } = await searchCandidates(kind, parsed.query, parsed.year, extIdCache);
+
+  // For series, the filename sometimes carries only an episode title
+  // (e.g. "Ep 01 - Box Cutter.mkv"). Also search using the enclosing
+  // directory as a show-name query and keep whichever result is stronger.
+  if (kind === 'series' && item.filePath) {
+    const dirHint = library.deriveSeriesQueryFromPath(item.filePath);
+    if (dirHint && dirHint.query && dirHint.query.toLowerCase() !== String(parsed.query).toLowerCase()) {
+      const dirResult = await searchCandidates(kind, dirHint.query, dirHint.year || parsed.year, extIdCache);
+      const currentHasBest = best ? 1 : 0;
+      const dirHasBest = dirResult.best ? 1 : 0;
+      const dirWins = dirHasBest > currentHasBest
+        || (dirHasBest === currentHasBest && dirResult.confidence > confidence);
+      if (dirWins) ({ best, confidence, candidates } = dirResult);
+    }
+  }
 
   // Persist the parsed fields and candidates regardless of outcome — the UI
   // uses both. setCandidates also bumps the state to needsReview.

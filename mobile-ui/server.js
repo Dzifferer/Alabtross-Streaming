@@ -595,6 +595,121 @@ app.get('/api/mb-meta/:type/:mbid', rateLimit, async (req, res) => {
   }
 });
 
+// ─── Cover Art Proxy ────────────────────────────────────────────────
+// coverartarchive.org 307-redirects to archive.org for every request; on a
+// slow VPN this chain dominates cover-load latency and saturates parallel
+// image connections. Proxy through the server with a small in-memory LRU
+// cache so the first client request warms the cache and everyone else
+// (plus the next page load from the same device) gets it instantly from
+// both this cache and the browser's HTTP cache.
+
+const _coverCache = new Map();              // mbid@size -> { buf, type, ts }
+const _coverMisses = new Map();             // mbid@size -> ts (404s)
+const COVER_CACHE_MAX = 256;                // ~256 * 500KB ≈ 130MB worst case
+const COVER_CACHE_TTL = 7 * 24 * 3600 * 1000;   // 1 week
+const COVER_MISS_TTL = 60 * 60 * 1000;          // 1 hour
+
+function _coverCacheGet(key) {
+  const hit = _coverCache.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.ts > COVER_CACHE_TTL) { _coverCache.delete(key); return null; }
+  // LRU: touch on read.
+  _coverCache.delete(key); _coverCache.set(key, hit);
+  return hit;
+}
+
+function _coverCacheSet(key, buf, type) {
+  if (_coverCache.size >= COVER_CACHE_MAX) {
+    _coverCache.delete(_coverCache.keys().next().value);
+  }
+  _coverCache.set(key, { buf, type, ts: Date.now() });
+}
+
+function _fetchImage(url, maxRedirects = 3) {
+  return new Promise((resolve, reject) => {
+    const https = require('https');
+    const http = require('http');
+    const mod = url.startsWith('https:') ? https : http;
+    const req = mod.get(url, {
+      headers: { 'User-Agent': 'AlabtrossStreaming/1.0', 'Accept': 'image/*' },
+      timeout: 12000,
+    }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && maxRedirects > 0) {
+        res.resume();
+        return _fetchImage(res.headers.location, maxRedirects - 1).then(resolve, reject);
+      }
+      if (res.statusCode === 404) {
+        res.resume();
+        return resolve({ ok: false, status: 404 });
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        return resolve({ ok: false, status: res.statusCode });
+      }
+      const type = res.headers['content-type'] || 'image/jpeg';
+      const chunks = [];
+      let total = 0;
+      const MAX_IMAGE_BYTES = 8 * 1024 * 1024; // 8MB safety cap
+      res.on('data', c => {
+        total += c.length;
+        if (total > MAX_IMAGE_BYTES) { res.destroy(); return reject(new Error('Image too large')); }
+        chunks.push(c);
+      });
+      res.on('end', () => resolve({ ok: true, buf: Buffer.concat(chunks), type }));
+      res.on('error', reject);
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('Socket timeout')); });
+  });
+}
+
+const COVER_MBID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+app.get('/api/cover/release/:mbid', async (req, res) => {
+  const { mbid } = req.params;
+  if (!COVER_MBID_RE.test(mbid)) return res.status(400).send('Invalid MBID');
+  const sizeRaw = parseInt(req.query.size, 10);
+  const size = [250, 500, 1200].includes(sizeRaw) ? sizeRaw : 500;
+  const key = `${mbid.toLowerCase()}@${size}`;
+
+  // Short-TTL negative cache so we don't re-fetch 404s on every card render.
+  const miss = _coverMisses.get(key);
+  if (miss && Date.now() - miss < COVER_MISS_TTL) {
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    return res.status(404).end();
+  }
+
+  const hit = _coverCacheGet(key);
+  if (hit) {
+    res.setHeader('Content-Type', hit.type);
+    res.setHeader('Cache-Control', 'public, max-age=604800, immutable');
+    res.setHeader('X-Cache', 'HIT');
+    return res.end(hit.buf);
+  }
+
+  try {
+    const upstream = `https://coverartarchive.org/release/${mbid}/front-${size}`;
+    const result = await _fetchImage(upstream);
+    if (!result.ok) {
+      if (result.status === 404) {
+        _coverMisses.set(key, Date.now());
+        if (_coverMisses.size > 1000) _coverMisses.delete(_coverMisses.keys().next().value);
+      }
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+      return res.status(result.status || 502).end();
+    }
+    _coverCacheSet(key, result.buf, result.type);
+    res.setHeader('Content-Type', result.type);
+    res.setHeader('Cache-Control', 'public, max-age=604800, immutable');
+    res.setHeader('X-Cache', 'MISS');
+    res.end(result.buf);
+  } catch (err) {
+    console.warn('[CoverProxy] fetch failed:', err.message);
+    res.setHeader('Cache-Control', 'public, max-age=60');
+    res.status(502).end();
+  }
+});
+
 // ─── Music Library Helpers ──────────────────────────────────────────
 
 // GET /api/library/music/genres — group album library items by genre

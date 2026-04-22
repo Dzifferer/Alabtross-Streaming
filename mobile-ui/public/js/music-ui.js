@@ -420,16 +420,17 @@
       renderRemoteStreams($('#music-detail-content'), meta);
       return;
     }
-    // Library: build queue from on-disk tracks.
+    // Library: build queue from on-disk tracks. Music items stream via
+    // /api/music-library/:id/stream?track=N (the separate music-specific
+    // endpoint); using kind:'library' would hit the video library and 404.
     const queue = tracks.map((t, i) => ({
-      kind: 'library',
+      kind: 'music-library',
       libraryId: meta.id,
-      fileIdx: t.fileIdx !== undefined ? t.fileIdx : i,
-      albumId: meta.id,
       trackIndex: i,
+      albumId: meta.id,
       title: t.title || `Track ${i + 1}`,
       artist: meta.artist,
-      album: meta.title,
+      album: meta.title || meta.name,
       coverUrl: meta.coverUrl,
       duration: t.duration,
     }));

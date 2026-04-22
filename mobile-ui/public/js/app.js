@@ -5224,6 +5224,10 @@
       else if (hasConverting) aggStatus = 'downloading';
       else if (hasPaused) aggStatus = 'paused';
       else if (hasQueued) aggStatus = 'queued';
+      // Partial-failure pack: some episodes failed, rest completed, nothing
+      // active. Surface as 'failed' so it lands in the Failed section with a
+      // Retry button instead of disappearing into "Completed".
+      else if (failedCount > 0) aggStatus = 'failed';
       else if (completedCount > 0) aggStatus = 'complete';
 
       // Determine season label: single season or multi-season

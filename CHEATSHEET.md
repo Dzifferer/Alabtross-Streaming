@@ -112,3 +112,26 @@ sudo systemctl enable sshd
 cd ~/Alabtross-Streaming
 sudo bash jetson_setup.sh
 ```
+
+## Music
+
+The **Music** tab is a separate bottom-nav entry (next to Series). It uses:
+
+- **MusicBrainz + Cover Art Archive** for metadata (no API key).
+- **The Pirate Bay** audio category + **1337x** music category for torrents.
+- **yt-dlp** for a YouTube audio fallback.
+
+```bash
+# Check yt-dlp is installed
+yt-dlp --version
+
+# Update yt-dlp (YouTube changes their API frequently)
+sudo yt-dlp -U
+
+# Playlist store (separate from movie metadata)
+cat /mnt/movies/torrent-cache/library/_music-playlists.json
+```
+
+Music items live in `/mnt/movies/torrent-cache/library/_metadata.json` with
+`type: "album"` (single work) or `type: "artist"` (discography grouping).
+Playlists are persisted separately in `_music-playlists.json`.

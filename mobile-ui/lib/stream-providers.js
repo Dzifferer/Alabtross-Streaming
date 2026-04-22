@@ -321,15 +321,16 @@ async function searchTorrentio(type, imdbId, season, episode) {
 
 // ─── The Pirate Bay Provider (Fallback) ─────────────
 
-async function searchTPB(query) {
+async function searchTPB(query, cats = '200,205,207,208') {
   const streams = [];
   // Clean query: remove special chars that confuse search, trim to reasonable length
   const cleanQuery = query.replace(/['']/g, ' ').replace(/[^\w\s-]/g, ' ').replace(/\s+/g, ' ').trim();
   // apibay.org is the public TPB API — returns JSON array
+  // Video cats: 200=Video, 205=TV, 207=HD Movies, 208=HD TV
+  // Audio cats: 100=Audio, 101=Music, 104=FLAC
   const data = await fetchJSON(
-    `https://apibay.org/q.php?q=${encodeURIComponent(cleanQuery)}&cat=200,205,207,208`
+    `https://apibay.org/q.php?q=${encodeURIComponent(cleanQuery)}&cat=${encodeURIComponent(cats)}`
   );
-  // cat 200=Video, 205=TV, 207=HD Movies, 208=HD TV
   if (!data || !Array.isArray(data)) return streams;
 
   for (const t of data) {
@@ -1471,12 +1472,259 @@ async function getCompleteStreams(title, imdbId) {
   return ranked;
 }
 
+// ─── YouTube (via yt-dlp) ──────────────────────────────
+// Non-torrent source. Requires `yt-dlp` binary on the system PATH. Used as a
+// fallback when no torrent seeds an obscure track.
+
+const { spawn } = require('child_process');
+
+let _ytdlpAvailable = null;
+
+function isYtdlpAvailable() {
+  if (_ytdlpAvailable !== null) return _ytdlpAvailable;
+  return new Promise((resolve) => {
+    const proc = spawn('yt-dlp', ['--version'], { stdio: 'ignore' });
+    proc.on('error', () => { _ytdlpAvailable = false; resolve(false); });
+    proc.on('exit', (code) => { _ytdlpAvailable = code === 0; resolve(_ytdlpAvailable); });
+  });
+}
+
+async function searchYoutubeAudio(query) {
+  if (!await isYtdlpAvailable()) return [];
+  return new Promise((resolve) => {
+    const results = [];
+    // ytsearch5: returns up to 5 results. --flat-playlist skips per-video metadata fetches.
+    const args = ['--dump-single-json', '--flat-playlist', '--no-warnings', `ytsearch5:${query}`];
+    const proc = spawn('yt-dlp', args);
+    let out = '';
+    proc.stdout.on('data', (d) => { out += d.toString(); });
+    proc.on('error', () => resolve([]));
+    proc.on('exit', () => {
+      try {
+        const parsed = JSON.parse(out);
+        const entries = (parsed && parsed.entries) || [];
+        for (const e of entries) {
+          if (!e || !e.id) continue;
+          results.push({
+            infoHash: null,
+            source: 'YouTube',
+            videoId: e.id,
+            title: `${e.title || 'YouTube audio'}\n${e.channel || ''} | ${e.duration ? Math.round(e.duration) + 's' : ''}`,
+            duration: e.duration,
+            seeds: null,
+            magnetUri: null,
+            browserPlayable: true,
+            _rawName: e.title || '',
+          });
+        }
+      } catch { /* malformed output */ }
+      resolve(results);
+    });
+    // Hard timeout — yt-dlp search can hang if the network's slow.
+    setTimeout(() => { try { proc.kill('SIGTERM'); } catch {} }, 15000);
+  });
+}
+
+// ─── Music Providers ──────────────────────────────────
+// Audio-category scrapers + aggregator. Audio torrents are typically tagged
+// by format (MP3/FLAC) and bitrate (e.g. "320kbps") rather than video codec,
+// so we use a dedicated filter/rank path instead of filterAndRank().
+
+async function searchTPBAudio(query) {
+  // Audio + Music + FLAC (ignore Audio Books 102 / Sound Clips 103 to reduce noise).
+  return searchTPB(query, '100,101,104');
+}
+
+async function search1337xMusic(query) {
+  const streams = [];
+  const cleanQuery = query.replace(/['']/g, ' ').replace(/[^\w\s-]/g, ' ').replace(/\s+/g, ' ').trim();
+  const domains = ['1337x.to', '1337x.st', '1337x.gd', '1337x.ws', '1337x.is'];
+  let html = null;
+  for (const domain of domains) {
+    html = await fetchHTML(
+      `https://${domain}/category-search/${encodeURIComponent(cleanQuery)}/Music/1/`
+    );
+    if (html) break;
+  }
+  if (!html) return streams;
+
+  const $ = cheerio.load(html);
+  const links = [];
+  $('td.name a[href^="/torrent/"]').each((_, el) => {
+    const href = $(el).attr('href');
+    if (href) links.push(href);
+  });
+
+  console.log(`[1337xMusic] Found ${links.length} search results for "${query}"`);
+
+  const detailPromises = links.slice(0, 10).map(async (p) => {
+    const detailHtml = await fetchHTML(`https://1337x.to${p}`);
+    if (!detailHtml) return null;
+    const d$ = cheerio.load(detailHtml);
+    const magnetLink = d$('a[href^="magnet:"]').attr('href');
+    if (!magnetLink) return null;
+    const hashMatch = magnetLink.match(/btih:([a-fA-F0-9]{40})/);
+    if (!hashMatch) return null;
+    const title = d$('h1').first().text().trim();
+    const seedsText = d$('.seeds').first().text().trim();
+    const sizeText = d$('.info-row .list li:contains("Total size") span').text().trim()
+      || d$('.torrent-detail-page .list li').filter((_, el) => d$(el).text().includes('Total size')).find('span').text().trim();
+    return {
+      infoHash: hashMatch[1].toLowerCase(),
+      title: `${title}\n${sizeText} | Seeds: ${seedsText}`,
+      magnetUri: magnetLink,
+      size: sizeText,
+      seeds: parseInt(seedsText, 10) || 0,
+      source: '1337xMusic',
+      _rawName: title,
+    };
+  });
+
+  const results = await Promise.all(detailPromises);
+  for (const r of results) if (r) streams.push(r);
+  return streams;
+}
+
+// Extract audio format and bitrate hints from torrent names.
+function _audioClassify(name) {
+  const n = (name || '').toLowerCase();
+  let format = null;
+  if (/\bflac\b/.test(n)) format = 'FLAC';
+  else if (/\balac\b/.test(n)) format = 'ALAC';
+  else if (/\b(m4a|aac)\b/.test(n)) format = 'AAC';
+  else if (/\bogg\b|\bopus\b|\bvorbis\b/.test(n)) format = 'OGG';
+  else if (/\bmp3\b/.test(n)) format = 'MP3';
+  else if (/\bwav\b/.test(n)) format = 'WAV';
+
+  // Lossy bitrate like "320kbps", "V0", "V2"
+  let bitrate = null;
+  const kbps = n.match(/(\b|[\s_[({])(\d{2,4})\s*kbps\b/);
+  if (kbps) bitrate = parseInt(kbps[2], 10);
+  else if (/\bv0\b/.test(n)) bitrate = 245;  // LAME V0 avg
+  else if (/\bv2\b/.test(n)) bitrate = 190;
+  else if (/\b320\b/.test(n)) bitrate = 320;
+
+  // Lossless torrents are very large but we won't transcode — excluded from
+  // the default browser-playable set. Still returned; UI can note "lossless".
+  const browserPlayable = !['FLAC', 'ALAC', 'WAV'].includes(format || '');
+
+  return { format, bitrate, browserPlayable };
+}
+
+function _rankAudioStreams(streams, expectedTitle) {
+  const normalise = s => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const expectedWords = expectedTitle
+    ? normalise(expectedTitle).split(/\s+/).filter(w => w.length > 1)
+    : [];
+
+  for (const s of streams) {
+    const rawName = s._rawName || (s.title || '').split('\n')[0];
+    const cls = _audioClassify(rawName);
+    s.format = cls.format;
+    s.bitrate = cls.bitrate;
+    s.browserPlayable = cls.browserPlayable;
+    s.lossless = !cls.browserPlayable && !!cls.format;
+    const torrentName = normalise(rawName);
+    const matchCount = expectedWords.length
+      ? expectedWords.filter(w => torrentName.includes(w)).length
+      : 0;
+    s._titleRelevance = expectedWords.length ? matchCount / expectedWords.length : 1;
+  }
+
+  streams.sort((a, b) => {
+    // Strong title mismatches sink
+    const relA = a._titleRelevance >= 0.5 ? 1 : 0;
+    const relB = b._titleRelevance >= 0.5 ? 1 : 0;
+    if (relA !== relB) return relB - relA;
+    // Browser-playable (lossy) first; lossless still surfaced but below
+    const playA = a.browserPlayable ? 1 : 0;
+    const playB = b.browserPlayable ? 1 : 0;
+    if (playA !== playB) return playB - playA;
+    // Higher relevance within tier
+    if (Math.abs(a._titleRelevance - b._titleRelevance) > 0.2) return b._titleRelevance - a._titleRelevance;
+    // Then by seeds
+    return (b.seeds || 0) - (a.seeds || 0);
+  });
+
+  return streams;
+}
+
+async function getAlbumStreams(mbid, artist, albumTitle) {
+  const cacheKey = `album:${mbid || 'na'}:${(artist || '').toLowerCase()}:${(albumTitle || '').toLowerCase()}`;
+  const cached = getCachedStreams(cacheKey);
+  if (cached) {
+    console.log(`[MusicStreams] Cache hit for ${cacheKey} (${cached.length} streams)`);
+    return cached;
+  }
+
+  const query = [artist, albumTitle].filter(Boolean).join(' ').trim();
+  if (!query) return [];
+
+  console.log(`[MusicStreams] Searching album streams for "${query}"`);
+
+  const [tpb, x1337, yt] = await Promise.all([
+    searchTPBAudio(query).catch(e => { console.log(`[TPBAudio] Error: ${e.message}`); return []; }),
+    search1337xMusic(query).catch(e => { console.log(`[1337xMusic] Error: ${e.message}`); return []; }),
+    searchYoutubeAudio(query).catch(e => { console.log(`[YouTube] Error: ${e.message}`); return []; }),
+  ]);
+
+  console.log(`[MusicStreams] Provider results — TPB: ${tpb.length}, 1337xMusic: ${x1337.length}, YouTube: ${yt.length}`);
+
+  // Dedupe by infoHash for torrents; YouTube entries always pass (videoId-scoped).
+  const seen = new Set();
+  const combined = [];
+  for (const s of [...tpb, ...x1337]) {
+    if (!seen.has(s.infoHash)) {
+      seen.add(s.infoHash);
+      combined.push(s);
+    }
+  }
+  combined.push(...yt);
+
+  const expectedTitle = [artist, albumTitle].filter(Boolean).join(' ');
+  const ranked = _rankAudioStreams(combined, expectedTitle);
+  console.log(`[MusicStreams] Total: ${ranked.length} streams (${ranked.filter(s => s.browserPlayable).length} browser-playable)`);
+  if (ranked.length > 0) setCachedStreams(cacheKey, ranked);
+  return ranked;
+}
+
+async function getArtistDiscographyStreams(mbid, artistName) {
+  const cacheKey = `discog:${mbid || 'na'}:${(artistName || '').toLowerCase()}`;
+  const cached = getCachedStreams(cacheKey);
+  if (cached) return cached;
+
+  if (!artistName) return [];
+
+  const q = `${artistName} discography`;
+  console.log(`[MusicStreams] Searching discography packs for "${q}"`);
+
+  const [tpb, x1337] = await Promise.all([
+    searchTPBAudio(q).catch(() => []),
+    search1337xMusic(q).catch(() => []),
+  ]);
+
+  const seen = new Set();
+  const combined = [];
+  for (const s of [...tpb, ...x1337]) {
+    if (!seen.has(s.infoHash)) {
+      seen.add(s.infoHash);
+      combined.push(s);
+    }
+  }
+
+  const ranked = _rankAudioStreams(combined, artistName);
+  if (ranked.length > 0) setCachedStreams(cacheKey, ranked);
+  return ranked;
+}
+
 module.exports = {
   getMovieStreams,
   getSeriesStreams,
   getSeasonPackStreams,
   getCompleteStreams,
   diagnoseProviders,
+  getAlbumStreams,
+  getArtistDiscographyStreams,
   // Exposed so other server modules (e.g. tmdbFetch in server.js) can
   // share the same keep-alive pool instead of opening fresh sockets.
   httpAgent,

@@ -2960,6 +2960,52 @@ class LibraryManager {
     return getMimeType(filename);
   }
 
+  // ─── Music-specific helpers ─────────────────────
+
+  setMusicGenre(id, genre) {
+    const item = this._items.get(id);
+    if (!item || item.type !== 'album') return false;
+    if (!item.manualOverride) item.manualOverride = {};
+    item.manualOverride.genre = (genre || '').trim();
+    item.updatedAt = Date.now();
+    this._saveMetadata();
+    return true;
+  }
+
+  toggleMusicFavorite(id) {
+    const item = this._items.get(id);
+    if (!item || (item.type !== 'album' && item.type !== 'artist')) return null;
+    item.favorite = !item.favorite;
+    item.updatedAt = Date.now();
+    this._saveMetadata();
+    return item.favorite;
+  }
+
+  markMusicPlayed(id) {
+    const item = this._items.get(id);
+    if (!item || item.type !== 'album') return false;
+    item.playCount = (item.playCount || 0) + 1;
+    item.lastPlayedAt = Date.now();
+    // Don't call _saveMetadata on every play — it's a hot path. Defer to
+    // the existing periodic save (every 30s) to batch these updates.
+    return true;
+  }
+
+  // Group album items by effective genre. Manual override wins; otherwise
+  // the first MusicBrainz tag. Returns a map of genre -> [albumId, ...].
+  getMusicGenres() {
+    const out = {};
+    for (const item of this._items.values()) {
+      if (item.type !== 'album') continue;
+      const manual = item.manualOverride && item.manualOverride.genre;
+      const genre = (manual || (item.genres && item.genres[0]) || '').toString().toLowerCase().trim();
+      if (!genre) continue;
+      if (!out[genre]) out[genre] = [];
+      out[genre].push(item.id);
+    }
+    return out;
+  }
+
   /**
    * Probe a library item's file and return codec/container metadata.
    * Returns null if the item or its file can't be found. Otherwise returns

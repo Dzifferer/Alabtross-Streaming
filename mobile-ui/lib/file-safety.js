@@ -11,6 +11,10 @@ const VIDEO_EXTENSIONS = new Set([
   '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg', '.ts',
 ]);
 
+const AUDIO_EXTENSIONS = new Set([
+  '.mp3', '.m4a', '.aac', '.ogg', '.opus', '.oga',
+]);
+
 const DANGEROUS_EXTENSIONS = new Set([
   '.exe', '.bat', '.cmd', '.com', '.scr', '.pif', '.msi', '.msp',
   '.ps1', '.vbs', '.vbe', '.js', '.jse', '.wsf', '.wsh', '.sh',
@@ -67,13 +71,25 @@ const MIME_TYPES = {
   '.mpg': 'video/mpeg',
   '.mpeg': 'video/mpeg',
   '.ts': 'video/mp2t',
+  '.mp3': 'audio/mpeg',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.ogg': 'audio/ogg',
+  '.oga': 'audio/ogg',
+  '.opus': 'audio/ogg',
 };
 
 /**
  * Check if a filename is safe to serve/download.
- * Rejects path traversal, dangerous extensions, and non-video files.
+ * Rejects path traversal, dangerous extensions, and non-media files.
+ *
+ * @param {string} filename
+ * @param {'video'|'audio'|'any'} [kind='video'] - which media kind to allow.
+ *   'video' (default, backward-compatible) allows only VIDEO_EXTENSIONS.
+ *   'audio' allows only AUDIO_EXTENSIONS.
+ *   'any' allows either.
  */
-function isFileNameSafe(filename) {
+function isFileNameSafe(filename, kind = 'video') {
   if (!filename) return false;
   if (filename.includes('\0')) return false;
   const normalized = path.normalize(filename);
@@ -85,6 +101,8 @@ function isFileNameSafe(filename) {
     if (DANGEROUS_EXTENSIONS.has(ext)) return false;
   }
   const finalExt = path.extname(filename).toLowerCase();
+  if (kind === 'audio') return AUDIO_EXTENSIONS.has(finalExt);
+  if (kind === 'any') return VIDEO_EXTENSIONS.has(finalExt) || AUDIO_EXTENSIONS.has(finalExt);
   return VIDEO_EXTENSIONS.has(finalExt);
 }
 
@@ -105,6 +123,7 @@ function sanitizeFilename(filename) {
 
 module.exports = {
   VIDEO_EXTENSIONS,
+  AUDIO_EXTENSIONS,
   DANGEROUS_EXTENSIONS,
   TRACKERS,
   MIME_TYPES,

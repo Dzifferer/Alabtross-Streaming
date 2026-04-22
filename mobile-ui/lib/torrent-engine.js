@@ -181,22 +181,27 @@ class TorrentEngine {
         const peerCount = engine.swarm ? engine.swarm.wires.length : 0;
         console.log(`[TorrentEngine] Torrent ready: "${engine.torrent.name}", ${engine.files.length} files, ${peerCount} peers`);
 
-        // Deselect non-video files and find the largest video file to pre-select
+        // Deselect non-media files; pre-select the largest media file (video
+        // preferred, falling back to audio if the torrent has no video).
         let largestVideo = null;
+        let largestAudio = null;
         for (const file of engine.files) {
-          if (!isFileNameSafe(file.name)) {
+          const safeVideo = isFileNameSafe(file.name, 'video');
+          const safeAudio = isFileNameSafe(file.name, 'audio');
+          if (!safeVideo && !safeAudio) {
             file.deselect();
             console.log(`[Security] Deselected: "${file.name}"`);
-          } else if (!largestVideo || file.length > largestVideo.length) {
-            largestVideo = file;
+          } else if (safeVideo) {
+            if (!largestVideo || file.length > largestVideo.length) largestVideo = file;
+          } else {
+            if (!largestAudio || file.length > largestAudio.length) largestAudio = file;
           }
         }
 
-        // Pre-select the largest video file so piece downloading starts immediately
-        // rather than waiting for the first HTTP request
-        if (largestVideo) {
-          largestVideo.select();
-          console.log(`[TorrentEngine] Pre-selected: "${largestVideo.name}" (${(largestVideo.length / 1e6).toFixed(0)}MB)`);
+        const preselect = largestVideo || largestAudio;
+        if (preselect) {
+          preselect.select();
+          console.log(`[TorrentEngine] Pre-selected: "${preselect.name}" (${(preselect.length / 1e6).toFixed(0)}MB)`);
         }
 
         const entry = {
@@ -233,24 +238,24 @@ class TorrentEngine {
   /**
    * Get a safe video file from the torrent.
    */
-  getVideoFile(entry, fileIdx) {
+  getVideoFile(entry, fileIdx, kind = 'video') {
     const files = entry.files;
     let file = null;
 
     if (fileIdx !== undefined && fileIdx >= 0 && fileIdx < files.length) {
       file = files[fileIdx];
-      if (!isFileNameSafe(file.name)) {
-        console.warn(`[Security] Rejected fileIdx ${fileIdx}: unsafe "${file.name}"`);
+      if (!isFileNameSafe(file.name, kind)) {
+        console.warn(`[Security] Rejected fileIdx ${fileIdx}: unsafe "${file.name}" for kind=${kind}`);
         return null;
       }
     } else {
-      const videoFiles = files.filter(f => isFileNameSafe(f.name));
-      if (videoFiles.length === 0) return null;
-      if (videoFiles.length === 1) { file = videoFiles[0]; }
+      const mediaFiles = files.filter(f => isFileNameSafe(f.name, kind));
+      if (mediaFiles.length === 0) return null;
+      if (mediaFiles.length === 1) { file = mediaFiles[0]; }
       else {
         const dominated = /\b(sample|trailer|extra|bonus|featurette|interview)\b/i;
-        const mainFiles = videoFiles.filter(f => !dominated.test(f.name));
-        file = (mainFiles.length > 0 ? mainFiles : videoFiles)[0];
+        const mainFiles = mediaFiles.filter(f => !dominated.test(f.name));
+        file = (mainFiles.length > 0 ? mainFiles : mediaFiles)[0];
       }
     }
 
@@ -267,9 +272,9 @@ class TorrentEngine {
   /**
    * Serve a torrent's video file over HTTP with range support.
    */
-  async serveStream(req, res, magnetOrHash, fileIdx) {
+  async serveStream(req, res, magnetOrHash, fileIdx, kind = 'video') {
     const hash = this._extractHash(magnetOrHash);
-    console.log(`[TorrentEngine] serveStream: hash=${hash}, fileIdx=${fileIdx}`);
+    console.log(`[TorrentEngine] serveStream: hash=${hash}, fileIdx=${fileIdx}, kind=${kind}`);
 
     let entry;
     try {
@@ -280,11 +285,11 @@ class TorrentEngine {
       return;
     }
 
-    const file = this.getVideoFile(entry, fileIdx);
+    const file = this.getVideoFile(entry, fileIdx, kind);
     if (!file) {
-      console.warn(`[TorrentEngine] No safe video file in "${entry.name}"`);
+      console.warn(`[TorrentEngine] No safe ${kind} file in "${entry.name}"`);
       entry.files.forEach(f => console.log(`  - ${f.name} (${(f.length / 1e6).toFixed(1)}MB)`));
-      res.status(404).json({ error: 'No safe video file found in torrent' });
+      res.status(404).json({ error: `No safe ${kind} file found in torrent` });
       return;
     }
 
@@ -296,21 +301,25 @@ class TorrentEngine {
     // Validate magic bytes with timeout fallback. We treat 'incomplete' (data
     // not arrived in time) as a soft pass — the extension was already
     // validated by isFileNameSafe, so we don't fail-closed on slow torrents.
-    try {
-      const result = await Promise.race([
-        this._validateMagicBytes(file),
-        new Promise(resolve => setTimeout(() => resolve('incomplete'), 15000)),
-      ]);
-      if (result === 'mismatch') {
-        console.warn(`[Security] Magic byte mismatch for "${file.name}" — rejecting`);
-        res.status(403).json({ error: 'File failed video format validation' });
-        return;
+    // For audio we skip the video-signature check (extension whitelist is
+    // sufficient; browser `<audio>` will simply fail to play a malformed file).
+    if (kind === 'video') {
+      try {
+        const result = await Promise.race([
+          this._validateMagicBytes(file),
+          new Promise(resolve => setTimeout(() => resolve('incomplete'), 15000)),
+        ]);
+        if (result === 'mismatch') {
+          console.warn(`[Security] Magic byte mismatch for "${file.name}" — rejecting`);
+          res.status(403).json({ error: 'File failed video format validation' });
+          return;
+        }
+        if (result === 'incomplete') {
+          console.warn(`[Security] Magic bytes not yet available for "${file.name}" — extension-only validation`);
+        }
+      } catch (err) {
+        console.warn(`[Security] Magic byte read error for "${file.name}": ${err.message} — extension-only validation`);
       }
-      if (result === 'incomplete') {
-        console.warn(`[Security] Magic bytes not yet available for "${file.name}" — extension-only validation`);
-      }
-    } catch (err) {
-      console.warn(`[Security] Magic byte read error for "${file.name}": ${err.message} — extension-only validation`);
     }
 
     this._touchTorrent(hash);
@@ -518,7 +527,7 @@ class TorrentEngine {
   /**
    * Get status info for a torrent.
    */
-  getStatus(infoHash) {
+  getStatus(infoHash, kind = 'video') {
     const entry = this._active.get(infoHash.toLowerCase());
     if (!entry || !entry.files) return null;
     const sw = entry.engine.swarm;
@@ -529,8 +538,8 @@ class TorrentEngine {
       uploadSpeed: sw ? sw.uploadSpeed() : 0,
       numPeers: sw ? sw.wires.length : 0,
       files: entry.files
-        .filter(f => isFileNameSafe(f.name))
-        .map(f => ({ name: f.name, length: f.length })),
+        .map((f, idx) => ({ name: f.name, length: f.length, idx }))
+        .filter(f => isFileNameSafe(f.name, kind)),
     };
   }
 

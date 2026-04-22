@@ -611,7 +611,12 @@
   }
 
   function enterMusicTab() {
-    switchMusicTab(currentTab || 'home');
+    // Ensure the active tab button visually matches the in-memory state —
+    // users returning from album/artist detail expect the correct tab pill
+    // to stay highlighted.
+    const tab = currentTab || 'home';
+    $$('.music-tab').forEach(b => b.classList.toggle('active', b.dataset.musicTab === tab));
+    switchMusicTab(tab);
   }
 
   // ─── Mini / Full player wiring ─────────
@@ -657,15 +662,21 @@
     rep.classList.toggle('active', state.repeat !== 'off');
     rep.setAttribute('data-state', state.repeat);
 
-    // Queue list (upcoming)
+    // Queue list: show the current track first (marked) then the upcoming
+    // tracks. Users often want to confirm what's playing and jump back to
+    // earlier queue items, so rendering only "upcoming" hides useful context.
     const ol = $('#mpf-queue');
     ol.innerHTML = '';
     const order = state.shuffleOrder || state.queue.map((_, i) => i);
     const currentPos = order.indexOf(state.currentIndex);
-    for (let i = currentPos + 1; i < order.length; i++) {
+    for (let i = 0; i < order.length; i++) {
       const qi = order[i];
       const q = state.queue[qi];
-      const li = el('li', { class: 'queue-item', draggable: true });
+      const isCurrent = i === currentPos;
+      const li = el('li', {
+        class: 'queue-item' + (isCurrent ? ' now-playing' : ''),
+        draggable: !isCurrent,
+      });
       li.dataset.queueIdx = qi;
       li.appendChild(el('span', { class: 'queue-item__title' }, q.title || '—'));
       li.appendChild(el('span', { class: 'queue-item__artist' }, q.artist || ''));
@@ -865,6 +876,20 @@
     wireMusicSearch();
     wirePlayerControls();
     wireLibrarySelector();
+
+    // Toggle body.music-player-open so CSS can hide the redundant mini-player
+    // while the full-screen player is on screen. Uses a MutationObserver to
+    // track .active class changes so we stay in sync regardless of which
+    // part of the app triggered the navigation.
+    const fullView = document.getElementById('view-music-player');
+    if (fullView) {
+      const syncOpen = () => {
+        document.body.classList.toggle('music-player-open', fullView.classList.contains('active'));
+      };
+      new MutationObserver(syncOpen).observe(fullView, { attributes: true, attributeFilter: ['class'] });
+      syncOpen();
+    }
+
     window.MusicQueue.on((state) => {
       renderMiniPlayer(state);
       if (document.getElementById('view-music-player').classList.contains('active')) {

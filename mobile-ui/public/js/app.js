@@ -492,7 +492,7 @@
   }
 
   function updateTopBar(view, opts = {}) {
-    const showBack = ['detail', 'settings', 'share', 'player'].includes(view);
+    const showBack = ['detail', 'settings', 'share', 'player', 'music-detail', 'music-player', 'music-library'].includes(view);
     dom.backBtn.classList.toggle('hidden', !showBack);
 
     const titles = {
@@ -503,8 +503,13 @@
       'detail': opts.title || 'Details',
       'settings': 'Settings',
       'library': 'Library',
+      'library-selector': 'Library',
       'share': 'Share',
       'player': 'Now Playing',
+      'music': 'Music',
+      'music-detail': opts.title || 'Album',
+      'music-player': 'Now Playing',
+      'music-library': 'Music Library',
     };
     dom.pageTitle.textContent = titles[view] || 'Albatross';
 

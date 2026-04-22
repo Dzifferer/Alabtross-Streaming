@@ -624,12 +624,17 @@ async function lookupCollectionForImdbId(imdbId) {
 }
 
 // GET /api/collections/enrich?ids=tt123,tt456,...&names=Movie+One,Movie+Two,...
+// Per-request IMDb-ID cap. The client chunks larger libraries into multiple
+// requests; this cap keeps any single request inside the TMDB rate budget
+// and the client-side 15s fetch timeout (~5 parallel TMDB calls per batch
+// with a 300ms gap → ~200 IDs finish well under 15s).
+const COLLECTIONS_ENRICH_MAX_IDS = 200;
 app.get('/api/collections/enrich', rateLimit, async (req, res) => {
   const idsParam = (req.query.ids || '').trim();
   const namesParam = (req.query.names || '').trim();
   if (!idsParam) return res.json({ collections: {} });
 
-  const ids = idsParam.split(',').filter(id => /^tt\d+$/.test(id)).slice(0, 50);
+  const ids = idsParam.split(',').filter(id => /^tt\d+$/.test(id)).slice(0, COLLECTIONS_ENRICH_MAX_IDS);
   if (ids.length === 0) return res.json({ collections: {} });
 
   const names = namesParam ? namesParam.split('||') : [];
@@ -2714,35 +2719,54 @@ app.post('/api/library/:id/auto-match', rateLimit, async (req, res) => {
 // unresolved item in the library. Returns a summary of outcomes.
 //
 // Body (optional):
-//   { force: true }  — re-match items that already have an imdbId but
-//                      weren't confirmed manually (useful after a TMDB
-//                      outage or a parser change)
-//   { limit: 50 }    — cap the number of items processed per call so large
-//                      libraries don't hold a request open for minutes
+//   { force: true }   — re-match items that already have an imdbId but
+//                       weren't confirmed manually (useful after a TMDB
+//                       outage or a parser change)
+//   { limit: 100 }    — cap the number of items processed per call so large
+//                       libraries don't hold a request open for minutes.
+//                       Defaults to 100.
+//   { offset: 0 }     — skip the first N targets. Used by the client to
+//                       paginate through large libraries without timing out.
+//
+// Response includes { total, remaining, nextOffset } so the client can loop
+// until every target has been processed (previously the server silently
+// dropped everything beyond the first `limit` items, so "total recheck"
+// never actually rechecked libraries with more than 100 entries).
 app.post('/api/library/auto-match-all', rateLimit, async (req, res) => {
   if (!TMDB_API_KEY) return res.status(503).json({ error: 'TMDB API key not configured' });
 
-  const { force = false, limit = 100 } = req.body || {};
+  const { force = false, limit = 100, offset = 0 } = req.body || {};
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 100, 500));
+  const safeOffset = Math.max(0, Number(offset) || 0);
   const extIdCache = _makeExtIdCache();
 
-  // Pick targets.
+  // Pick targets. When `force` is true we still respect items that were
+  // already promoted to 'matched' during THIS recheck session — otherwise a
+  // looping client would re-process the same items forever. We use the
+  // auto-matcher's own audit trail (matchSource='auto' + recent matchedAt)
+  // to detect that, but the simpler solution is pagination: the client
+  // advances `offset` past items it has already seen this session.
   const all = library.getAll();
-  const targets = all.filter(i => {
+  const filtered = all.filter(i => {
     if (i.matchState === 'manual') return false;
     if (!i.fileName) return false;
     if (force) return true;
     const state = i.matchState || (i.imdbId && /^tt\d+$/.test(i.imdbId) ? 'matched' : 'unmatched');
     return state === 'unmatched' || state === 'needsReview';
-  }).slice(0, limit);
+  });
+  const total = filtered.length;
+  const targets = filtered.slice(safeOffset, safeOffset + safeLimit);
+  const nextOffset = safeOffset + targets.length;
+  const remaining = Math.max(0, total - nextOffset);
 
-  console.log(`[AutoMatch] starting pass over ${targets.length} item(s) (force=${force})`);
+  console.log(`[AutoMatch] pass ${safeOffset}..${nextOffset}/${total} (force=${force})`);
 
   // Promote any disk items we're about to process.
   for (const t of targets) {
     if (t.id.startsWith('disk_')) library.promoteDiskItem(t.id);
   }
 
-  const summary = { processed: 0, matched: 0, needsReview: 0, skipped: 0, errors: 0, items: [] };
+  const summary = { processed: 0, matched: 0, needsReview: 0, skipped: 0, errors: 0, items: [], total, remaining, nextOffset };
 
   // Sequential to stay polite with the TMDB rate limit.
   for (const t of targets) {

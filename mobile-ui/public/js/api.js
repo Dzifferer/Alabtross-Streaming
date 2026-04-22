@@ -1121,21 +1121,53 @@ class StremioAPI {
     const paired = imdbIds.map((id, i) => ({ id, name: names ? names[i] || '' : '' }))
       .filter(p => /^tt\d+$/.test(p.id));
     if (paired.length === 0) return { collections: {} };
-    try {
-      const validIds = paired.map(p => p.id);
-      const validNames = paired.map(p => p.name);
-      let url = '/api/collections/enrich?ids=' + validIds.join(',');
-      if (validNames.some(n => n)) {
-        url += '&names=' + encodeURIComponent(validNames.join('||'));
-      }
-      const resp = await fetch(url, {
-        signal: AbortSignal.timeout(15000),
-      });
-      if (!resp.ok) return { collections: {} };
-      return resp.json();
-    } catch {
-      return { collections: {} };
+
+    // Chunk so libraries larger than the server-side cap still get every
+    // movie checked — previously a hard 50-ID server cap silently dropped
+    // all extras, which broke franchise grouping for large libraries.
+    const CHUNK = 200;
+    const chunks = [];
+    for (let i = 0; i < paired.length; i += CHUNK) {
+      chunks.push(paired.slice(i, i + CHUNK));
     }
+
+    const fetchChunk = async (chunk) => {
+      try {
+        const validIds = chunk.map(p => p.id);
+        const validNames = chunk.map(p => p.name);
+        let url = '/api/collections/enrich?ids=' + validIds.join(',');
+        if (validNames.some(n => n)) {
+          url += '&names=' + encodeURIComponent(validNames.join('||'));
+        }
+        const resp = await fetch(url, { signal: AbortSignal.timeout(15000) });
+        if (!resp.ok) return { collections: {}, movieMeta: {} };
+        return await resp.json();
+      } catch {
+        return { collections: {}, movieMeta: {} };
+      }
+    };
+
+    const results = await Promise.all(chunks.map(fetchChunk));
+
+    // Merge: collections keyed by collectionId (dedupe movieIds), movieMeta
+    // keyed by imdbId (later chunks win on conflict, but in practice each
+    // imdbId appears in exactly one chunk).
+    const collections = {};
+    const movieMeta = {};
+    for (const part of results) {
+      for (const [colId, col] of Object.entries(part.collections || {})) {
+        if (!collections[colId]) {
+          collections[colId] = { name: col.name, poster: col.poster, movieIds: [] };
+        }
+        for (const mid of col.movieIds || []) {
+          if (!collections[colId].movieIds.includes(mid)) {
+            collections[colId].movieIds.push(mid);
+          }
+        }
+      }
+      Object.assign(movieMeta, part.movieMeta || {});
+    }
+    return { collections, movieMeta };
   }
 
   /**

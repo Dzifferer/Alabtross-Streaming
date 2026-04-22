@@ -239,6 +239,35 @@
         </div>
       </div>
 
+      <!-- Music View -->
+      <div id="view-music" class="view">
+        <div class="music-toolbar">
+          <div class="music-tabs">
+            <button class="music-tab active" data-music-tab="home">Home</button>
+            <button class="music-tab" data-music-tab="playlists">Playlists</button>
+            <button class="music-tab" data-music-tab="albums">Albums</button>
+            <button class="music-tab" data-music-tab="artists">Artists</button>
+            <button class="music-tab" data-music-tab="recent">Recent</button>
+            <button class="music-tab" data-music-tab="favorites">Favorites</button>
+          </div>
+        </div>
+        <div id="music-search-bar" class="music-search-bar">
+          <div class="search-input-wrap">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+            <input type="search" id="music-search-input" placeholder="Search artists, albums, tracks..." autocomplete="off">
+            <button id="music-search-clear" class="icon-btn-sm hidden">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+          </div>
+        </div>
+        <div id="music-content"></div>
+      </div>
+
+      <!-- Music Detail View -->
+      <div id="view-music-detail" class="view">
+        <div id="music-detail-content"></div>
+      </div>
+
       <!-- Library View -->
       <div id="view-library" class="view">
         <div class="library-toolbar">
@@ -344,6 +373,73 @@
       </div>
     </div>
 
+    <!-- Music Mini-Player (visible on every view while a queue is loaded) -->
+    <div id="music-player-bar" class="music-player-bar hidden" role="region" aria-label="Now playing">
+      <div class="music-player-bar__cover" id="mpb-cover"></div>
+      <div class="music-player-bar__meta">
+        <div class="music-player-bar__title" id="mpb-title">—</div>
+        <div class="music-player-bar__artist" id="mpb-artist"></div>
+      </div>
+      <div class="music-player-bar__controls">
+        <button id="mpb-prev" class="icon-btn-sm" aria-label="Previous track">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
+        </button>
+        <button id="mpb-playpause" class="icon-btn-sm" aria-label="Play / pause">
+          <svg id="mpb-playicon" width="26" height="26" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+          <svg id="mpb-pauseicon" class="hidden" width="26" height="26" viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h4v14H6zm8 0h4v14h-4z"/></svg>
+        </button>
+        <button id="mpb-next" class="icon-btn-sm" aria-label="Next track">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M16 6h2v12h-2zm-10 12l8.5-6L6 6z"/></svg>
+        </button>
+      </div>
+      <div id="mpb-progress" class="music-player-bar__progress"><div id="mpb-progress-fill"></div></div>
+    </div>
+
+    <!-- Full Music Player View -->
+    <div id="view-music-player" class="view">
+      <div class="music-player-full">
+        <button id="music-player-close" class="player-back-btn" aria-label="Collapse player">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+        </button>
+        <div class="music-player-full__cover" id="mpf-cover"></div>
+        <div class="music-player-full__meta">
+          <div class="music-player-full__title" id="mpf-title">—</div>
+          <div class="music-player-full__artist" id="mpf-artist"></div>
+          <div class="music-player-full__album" id="mpf-album"></div>
+        </div>
+        <div class="music-player-full__seek">
+          <span id="mpf-current">0:00</span>
+          <input type="range" id="mpf-seek" min="0" max="1000" value="0" step="1">
+          <span id="mpf-duration">0:00</span>
+        </div>
+        <div class="music-player-full__controls">
+          <button id="mpf-shuffle" class="icon-btn-sm" aria-label="Shuffle">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
+          </button>
+          <button id="mpf-prev" class="icon-btn-sm" aria-label="Previous">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
+          </button>
+          <button id="mpf-playpause" class="icon-btn-sm mpf-playpause" aria-label="Play / pause">
+            <svg id="mpf-playicon" width="48" height="48" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+            <svg id="mpf-pauseicon" class="hidden" width="48" height="48" viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h4v14H6zm8 0h4v14h-4z"/></svg>
+          </button>
+          <button id="mpf-next" class="icon-btn-sm" aria-label="Next">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor"><path d="M16 6h2v12h-2zm-10 12l8.5-6L6 6z"/></svg>
+          </button>
+          <button id="mpf-repeat" class="icon-btn-sm" aria-label="Repeat">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 014-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 01-4 4H3"/></svg>
+          </button>
+        </div>
+        <div class="music-player-full__queue">
+          <h3>Up next</h3>
+          <ol id="mpf-queue"></ol>
+        </div>
+      </div>
+    </div>
+
+    <!-- Shared audio element (driven by music-queue.js) -->
+    <audio id="audio-player" preload="metadata"></audio>
+
     <!-- Bottom Navigation -->
     <nav id="bottom-nav">
       <button class="nav-btn active" data-view="home">
@@ -357,6 +453,10 @@
       <button class="nav-btn" data-view="series">
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="15" rx="2" ry="2"/><polyline points="17 2 12 7 7 2"/></svg>
         <span>Series</span>
+      </button>
+      <button class="nav-btn" data-view="music">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+        <span>Music</span>
       </button>
       <button class="nav-btn" data-view="library">
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
@@ -372,6 +472,9 @@
 
   <script defer src="/js/qrcode.js"></script>
   <script defer src="/js/api.js"></script>
+  <script defer src="/js/music-api.js"></script>
+  <script defer src="/js/music-queue.js"></script>
+  <script defer src="/js/music-ui.js"></script>
   <script defer src="/js/app.js"></script>
 </body>
 </html>

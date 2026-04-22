@@ -31,10 +31,14 @@ function resolveWithFallback(hostname) {
 // http-proxy-middleware removed — Stremio server proxy no longer needed
 const {
   getMovieStreams, getSeriesStreams, getSeasonPackStreams, getCompleteStreams, diagnoseProviders,
+  getAlbumStreams, getArtistDiscographyStreams,
   httpsAgent: providersHttpsAgent,
 } = require('./lib/stream-providers');
 const TorrentEngine = require('./lib/torrent-engine');
 const LibraryManager = require('./lib/library-manager');
+const {
+  mbSearchRelease, mbSearchArtist, mbGetRelease, mbGetArtist, mbGetReleaseForGroup,
+} = require('./lib/metadata-musicbrainz');
 const { getSystemDiag } = require('./lib/system-diag');
 const { discoverDevices, getLocalIP } = require('./lib/local-discovery');
 const castManager = require('./lib/cast-manager');
@@ -181,6 +185,8 @@ const library = new LibraryManager({
   diskReserveBytes: DISK_RESERVE_BYTES,
   maxConcurrentRemoteConversions: MAX_CONCURRENT_REMOTE_CONVERSIONS,
 });
+const MusicPlaylists = require('./lib/music-playlists');
+const musicPlaylists = new MusicPlaylists(LIBRARY_PATH);
 
 // Security headers
 app.use((req, res, next) => {
@@ -253,8 +259,50 @@ app.get('/api/search', rateLimit, async (req, res) => {
   const query = (req.query.q || '').trim();
   if (!query || query.length > 200) return res.json({ results: [] });
 
-  const type = req.query.type; // 'movie', 'series', or undefined for both
+  const type = req.query.type; // 'movie', 'series', 'album', 'artist', 'music', or undefined for both movie+series
   const results = [];
+
+  // Music types dispatch to MusicBrainz; no TMDB key required.
+  if (type === 'album' || type === 'artist' || type === 'music') {
+    try {
+      const tasks = [];
+      if (type === 'album' || type === 'music') {
+        tasks.push(mbSearchRelease(query).then(rs => rs.map(r => ({
+          id: `mbr:${r.mbid}`,
+          mbid: r.mbid,
+          artistMbid: r.artistMbid,
+          type: 'album',
+          name: r.title,
+          artist: r.artist,
+          year: r.year,
+          poster: r.coverUrl,
+          overview: '',
+          vote_average: 0,
+          popularity: r.score || 0,
+        })).filter(r => r.name && r.artist)));
+      }
+      if (type === 'artist' || type === 'music') {
+        tasks.push(mbSearchArtist(query).then(rs => rs.map(r => ({
+          id: `mba:${r.mbid}`,
+          mbid: r.mbid,
+          type: 'artist',
+          name: r.name,
+          year: r.country || '',
+          poster: null,
+          overview: r.disambiguation || '',
+          vote_average: 0,
+          popularity: r.score || 0,
+        }))));
+      }
+      const [albums, artists] = await Promise.all(tasks.length === 2 ? tasks : [tasks[0], Promise.resolve([])]);
+      const combined = [...(albums || []), ...(artists || [])];
+      combined.sort((a, b) => b.popularity - a.popularity);
+      return res.json({ results: combined.slice(0, 30) });
+    } catch (err) {
+      console.error('[MB] Search error:', err.message);
+      return res.json({ results: [], error: 'Music search failed' });
+    }
+  }
 
   if (!TMDB_API_KEY) {
     return res.json({ results: [], error: 'TMDB API key not configured' });
@@ -483,6 +531,144 @@ app.get('/api/tmdb-meta-imdb/:type/:imdbId', rateLimit, async (req, res) => {
   } catch (err) {
     console.error('[TMDB] IMDB meta fetch error:', err.message);
     res.status(500).json({ error: 'Failed to fetch metadata' });
+  }
+});
+
+// ─── MusicBrainz Metadata Endpoints ─────────────────────────────────
+// GET /api/mb-meta/release/:mbid  — album detail (tracklist, cover, genres)
+// GET /api/mb-meta/artist/:mbid   — artist detail (bio, discography, tags)
+
+const MBID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+app.get('/api/mb-meta/:type/:mbid', rateLimit, async (req, res) => {
+  const { type, mbid } = req.params;
+  if (!MBID_RE.test(mbid)) {
+    return res.status(400).json({ error: 'Invalid MBID' });
+  }
+  try {
+    if (type === 'release' || type === 'album') {
+      const meta = await mbGetRelease(mbid);
+      if (!meta) return res.status(404).json({ error: 'Not found' });
+      return res.json({ meta: { ...meta, type: 'album', id: `mbr:${meta.mbid}` } });
+    }
+    if (type === 'artist') {
+      const meta = await mbGetArtist(mbid);
+      if (!meta) return res.status(404).json({ error: 'Not found' });
+      return res.json({ meta: { ...meta, type: 'artist', id: `mba:${meta.mbid}` } });
+    }
+    if (type === 'release-group') {
+      // Resolve to a representative release, then return release metadata.
+      const releaseMbid = await mbGetReleaseForGroup(mbid);
+      if (!releaseMbid) return res.status(404).json({ error: 'No releases in group' });
+      const meta = await mbGetRelease(releaseMbid);
+      if (!meta) return res.status(404).json({ error: 'Not found' });
+      return res.json({ meta: { ...meta, type: 'album', id: `mbr:${meta.mbid}`, releaseGroupMbid: mbid } });
+    }
+    return res.status(400).json({ error: 'Invalid type (expected release|artist|release-group)' });
+  } catch (err) {
+    console.error('[MB] Meta fetch error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch music metadata' });
+  }
+});
+
+// ─── Music Library Helpers ──────────────────────────────────────────
+
+// GET /api/library/music/genres — group album library items by genre
+app.get('/api/library/music/genres', (req, res) => {
+  try {
+    res.json({ genres: library.getMusicGenres() });
+  } catch (err) {
+    console.error('[Music] genres error:', err.message);
+    res.status(500).json({ error: 'Failed to compute genres' });
+  }
+});
+
+// POST /api/library/music/:id/genre  body: { genre: "..." }
+app.post('/api/library/music/:id/genre', rateLimit, express.json(), (req, res) => {
+  const { id } = req.params;
+  const genre = (req.body && req.body.genre) || '';
+  const ok = library.setMusicGenre(id, genre);
+  if (!ok) return res.status(404).json({ error: 'Album not found' });
+  res.json({ ok: true, genre });
+});
+
+// POST /api/library/music/:id/favorite — toggle favorite
+app.post('/api/library/music/:id/favorite', rateLimit, (req, res) => {
+  const { id } = req.params;
+  const result = library.toggleMusicFavorite(id);
+  if (result === null) return res.status(404).json({ error: 'Album not found' });
+  res.json({ ok: true, favorite: result });
+});
+
+// POST /api/library/music/:id/played — increment playCount, update lastPlayedAt
+app.post('/api/library/music/:id/played', rateLimit, (req, res) => {
+  const { id } = req.params;
+  const ok = library.markMusicPlayed(id);
+  if (!ok) return res.status(404).json({ error: 'Album not found' });
+  res.json({ ok: true });
+});
+
+// ─── Music Playlists ────────────────────────────────────────────────
+
+app.get('/api/music/playlists', (req, res) => {
+  res.json({ playlists: musicPlaylists.list() });
+});
+
+app.post('/api/music/playlists', rateLimit, express.json(), (req, res) => {
+  try {
+    const pl = musicPlaylists.create((req.body && req.body.name) || '');
+    res.json({ playlist: pl });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.patch('/api/music/playlists/:id', rateLimit, express.json(), (req, res) => {
+  try {
+    const pl = musicPlaylists.rename(req.params.id, (req.body && req.body.name) || '');
+    if (!pl) return res.status(404).json({ error: 'Playlist not found' });
+    res.json({ playlist: pl });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/music/playlists/:id', rateLimit, (req, res) => {
+  const ok = musicPlaylists.remove(req.params.id);
+  if (!ok) return res.status(404).json({ error: 'Playlist not found' });
+  res.json({ ok: true });
+});
+
+app.post('/api/music/playlists/:id/items', rateLimit, express.json(), (req, res) => {
+  try {
+    const { albumId, trackIndex } = req.body || {};
+    const pl = musicPlaylists.addItem(req.params.id, albumId, trackIndex);
+    if (!pl) return res.status(404).json({ error: 'Playlist not found' });
+    res.json({ playlist: pl });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.patch('/api/music/playlists/:id/items/reorder', rateLimit, express.json(), (req, res) => {
+  try {
+    const { from, to } = req.body || {};
+    const pl = musicPlaylists.reorderItem(req.params.id, from, to);
+    if (!pl) return res.status(404).json({ error: 'Playlist not found' });
+    res.json({ playlist: pl });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/music/playlists/:id/items/:index', rateLimit, (req, res) => {
+  try {
+    const index = parseInt(req.params.index, 10);
+    const pl = musicPlaylists.removeItem(req.params.id, index);
+    if (!pl) return res.status(404).json({ error: 'Playlist not found' });
+    res.json({ playlist: pl });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
   }
 });
 
@@ -1253,6 +1439,45 @@ app.get('/api/streams/series/:imdbId', rateLimit, async (req, res) => {
   }
 });
 
+// GET /api/streams/album/:mbid?artist=X&title=Y — search for album torrents
+app.get('/api/streams/album/:mbid', rateLimit, async (req, res) => {
+  const { mbid } = req.params;
+  const artist = (req.query.artist || '').toString().slice(0, 200);
+  const title = (req.query.title || '').toString().slice(0, 200);
+  if (mbid !== 'na' && !MBID_RE.test(mbid)) {
+    return res.status(400).json({ error: 'Invalid MBID' });
+  }
+  if (!artist && !title) {
+    return res.status(400).json({ error: 'artist or title query param is required' });
+  }
+  try {
+    const streams = await getAlbumStreams(mbid === 'na' ? null : mbid, artist, title);
+    res.json({ streams });
+  } catch (err) {
+    console.error('[API] Album stream error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch streams' });
+  }
+});
+
+// GET /api/streams/artist/:mbid?name=Artist — search for artist discography packs
+app.get('/api/streams/artist/:mbid', rateLimit, async (req, res) => {
+  const { mbid } = req.params;
+  const name = (req.query.name || '').toString().slice(0, 200);
+  if (mbid !== 'na' && !MBID_RE.test(mbid)) {
+    return res.status(400).json({ error: 'Invalid MBID' });
+  }
+  if (!name) {
+    return res.status(400).json({ error: 'name query param is required' });
+  }
+  try {
+    const streams = await getArtistDiscographyStreams(mbid === 'na' ? null : mbid, name);
+    res.json({ streams });
+  } catch (err) {
+    console.error('[API] Artist stream error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch streams' });
+  }
+});
+
 // GET /api/streams/season-pack/:imdbId?season=N&title=ShowName — search for season pack torrents
 app.get('/api/streams/season-pack/:imdbId', rateLimit, async (req, res) => {
   const { imdbId } = req.params;
@@ -1299,8 +1524,41 @@ app.get('/api/streams/diagnose', rateLimit, async (req, res) => {
   }
 });
 
-// GET /api/play/:infoHash — stream video from torrent
-// Optional query: ?fileIdx=N&magnet=<uri>
+// GET /api/play/youtube/:videoId — pipe yt-dlp audio to the response
+// Spawns yt-dlp with -f bestaudio and streams the extracted audio bytes directly.
+app.get('/api/play/youtube/:videoId', rateLimit, (req, res) => {
+  const { videoId } = req.params;
+  if (!/^[a-zA-Z0-9_-]{6,20}$/.test(videoId)) {
+    return res.status(400).json({ error: 'Invalid videoId' });
+  }
+  const url = `https://www.youtube.com/watch?v=${videoId}`;
+  // -f bestaudio gives a single-track audio file (usually m4a/webm). We
+  // pipe it through without re-encoding to keep CPU minimal on the Jetson.
+  const proc = spawn('yt-dlp', [
+    '-f', 'bestaudio[ext=m4a]/bestaudio/best',
+    '-o', '-',     // stdout
+    '--no-warnings',
+    '--no-part',
+    '--quiet',
+    url,
+  ]);
+  res.setHeader('Content-Type', 'audio/mp4');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Cache-Control', 'no-store');
+  proc.stdout.pipe(res);
+  proc.stderr.on('data', (d) => {
+    const msg = d.toString().trim();
+    if (msg) console.log(`[yt-dlp] ${msg}`);
+  });
+  proc.on('error', (err) => {
+    console.error('[yt-dlp] spawn error:', err.message);
+    if (!res.headersSent) res.status(500).json({ error: 'yt-dlp not available' });
+  });
+  req.on('close', () => { try { proc.kill('SIGTERM'); } catch {} });
+});
+
+// GET /api/play/:infoHash — stream video or audio from torrent
+// Optional query: ?fileIdx=N&magnet=<uri>&kind=video|audio|any
 app.get('/api/play/:infoHash', rateLimit, (req, res) => {
   const { infoHash } = req.params;
   if (!/^[0-9a-f]{40}$/i.test(infoHash)) {
@@ -1309,6 +1567,8 @@ app.get('/api/play/:infoHash', rateLimit, (req, res) => {
   const fileIdx = req.query.fileIdx !== undefined
     ? parseInt(req.query.fileIdx, 10)
     : undefined;
+  const kindRaw = (req.query.kind || 'video').toString();
+  const kind = ['video', 'audio', 'any'].includes(kindRaw) ? kindRaw : 'video';
 
   // Validate magnet URI if provided — must be a proper magnet link
   // containing this exact infoHash (prevents using the endpoint to
@@ -1323,7 +1583,7 @@ app.get('/api/play/:infoHash', rateLimit, (req, res) => {
     magnet = magnetStr;
   }
 
-  getEngine().serveStream(req, res, magnet, fileIdx);
+  getEngine().serveStream(req, res, magnet, fileIdx, kind);
 });
 
 // GET /api/cache — list items in torrent cache on disk
@@ -1397,13 +1657,16 @@ app.get('/api/play/:infoHash/remux', rateLimit, (req, res) => {
 });
 
 // GET /api/torrent-status/:infoHash — check download progress
+// Optional query: ?kind=video|audio|any  (default video, for backward compat)
 app.get('/api/torrent-status/:infoHash', (req, res) => {
   const { infoHash } = req.params;
   if (!/^[0-9a-f]{40}$/i.test(infoHash)) {
     return res.status(400).json({ error: 'Invalid infoHash' });
   }
+  const kindRaw = (req.query.kind || 'video').toString();
+  const kind = ['video', 'audio', 'any'].includes(kindRaw) ? kindRaw : 'video';
   const eng = getEngine();
-  const status = eng.getStatus(infoHash);
+  const status = eng.getStatus(infoHash, kind);
   if (!status) {
     return res.status(404).json({ error: 'Torrent not active' });
   }

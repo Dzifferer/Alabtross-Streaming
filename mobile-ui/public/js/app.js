@@ -245,6 +245,9 @@
     'library': 'view-library',
     'share': 'view-share',
     'player': 'view-player',
+    'music': 'view-music',
+    'music-detail': 'view-music-detail',
+    'music-player': 'view-music-player',
   };
 
   const dom = {
@@ -6312,6 +6315,9 @@
           loadLibrary();
         } else if (view === 'share') {
           navigateTo('share');
+        } else if (view === 'music') {
+          navigateTo('music');
+          if (window.MusicUI) window.MusicUI.enterMusicTab();
         } else {
           navigateTo('home');
           loadHome();
@@ -6604,6 +6610,9 @@
 
     // Expose for inline handlers
     window.app = { goBack };
+    // Expose for music-ui bridging
+    window.__app_navigate = navigateTo;
+    window.__app_goBack = goBack;
   }
 
   // Start

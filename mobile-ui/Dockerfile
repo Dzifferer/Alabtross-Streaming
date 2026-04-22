@@ -1,9 +1,11 @@
 FROM node:20-alpine
 
 # Install FFmpeg for MKV→MP4 remuxing (container-level copy, no re-encoding)
+# and yt-dlp (Music tab YouTube audio source).
 # Note: For local device discovery (casting via VPN), the container should be
 # run with --net=host so SSDP multicast can reach LAN devices.
-RUN apk add --no-cache ffmpeg
+RUN apk add --no-cache ffmpeg python3 py3-pip \
+    && python3 -m pip install --no-cache-dir --break-system-packages yt-dlp
 
 WORKDIR /app
 

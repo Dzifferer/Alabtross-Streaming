@@ -253,6 +253,11 @@ Metadata (movie info, posters, search) always comes from **Cinemeta** regardless
 - Season/episode navigation for TV shows
 - Auto speed-tests all available streams and picks the fastest source
 - **Library** — download movies/episodes to the server for offline playback
+- **Music** — standalone tab with MusicBrainz-powered search, genre shelves,
+  user-curated playlists, queue-based playback (shuffle / repeat-all /
+  repeat-one / drag-to-reorder up-next), recently played, favorites, and a
+  persistent mini-player bar. Audio sources: The Pirate Bay music category,
+  1337x music, and YouTube (via `yt-dlp`). Formats: MP3, M4A/AAC, OGG, Opus.
 - **Live TV** — paste an M3U/M3U8 playlist URL in Settings to browse IPTV channels
 - **Share** — Tailscale setup guide for connecting other devices
 - VPN detection — warns if you're not connected through Tailscale
@@ -271,6 +276,8 @@ tailscale status                  # Check Tailscale VPN status
 tailscale ip                      # Show Tailscale IP address
 df -h /mnt/movies                 # Check external drive space
 cat /var/log/alabtross-health.log # View health monitor log
+yt-dlp --version                  # Check yt-dlp (Music tab YouTube source)
+yt-dlp -U                         # Update yt-dlp to latest
 ```
 
 ## Architecture

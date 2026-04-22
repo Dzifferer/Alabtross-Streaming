@@ -482,6 +482,22 @@ else
   ok "Prerequisites already installed — skipping"
 fi
 
+# Install yt-dlp (used by the Music tab as a non-torrent audio source). The
+# Ubuntu-packaged yt-dlp lags months behind and frequently breaks against
+# YouTube's API changes, so prefer the official standalone binary from GitHub.
+# Idempotent: skips if already present and less than 30 days old.
+if ! command -v yt-dlp &>/dev/null \
+   || [ -z "$(find "$(command -v yt-dlp)" -mtime -30 2>/dev/null)" ]; then
+  info "Installing / refreshing yt-dlp..."
+  curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
+    -o /usr/local/bin/yt-dlp \
+    && chmod +x /usr/local/bin/yt-dlp \
+    && ok "yt-dlp installed ($(yt-dlp --version 2>/dev/null || echo '?'))" \
+    || err "yt-dlp install failed — Music tab's YouTube source will be unavailable"
+else
+  ok "yt-dlp already installed — skipping"
+fi
+
 # ---------------------------------------------------------------
 # STEP 2/9 — System update
 # ---------------------------------------------------------------

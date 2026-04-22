@@ -3002,10 +3002,42 @@
       const queuedItems = libraryItems.filter(i => i.status === 'queued').sort((a, b) => a.addedAt - b.addedAt);
       queuedItems.forEach((item, idx) => { item._queuePosition = idx + 1; });
 
-      if (libraryItems.length === 0) {
+      // True empty state — show it only when there's nothing to review AND
+      // nothing in the main library. If /api/library transiently fails or
+      // returns empty but the review queue still has items, we want the
+      // "Needs Review" section to render instead of the "library is empty"
+      // placeholder.
+      if (libraryItems.length === 0 && reviewItems.length === 0) {
         dom.libraryContent.innerHTML = '';
         dom.libraryEmpty.classList.remove('hidden');
         return;
+      }
+      // From here on we always have something to draw, so the placeholder
+      // must stay hidden even if libraryItems is empty.
+      dom.libraryEmpty.classList.add('hidden');
+
+      // ── Needs Review: paint FIRST so it survives any crash in the
+      // downstream movie/show grouping code. Previously, if e.g. the
+      // collection-enrichment call threw during a big library load, the
+      // whole render jumped to the catch block and the user never saw
+      // the review queue even though the data was already fetched.
+      const reviewHtml = reviewItems.length > 0
+        ? `
+          <div class="library-section-header library-review-header">
+            <span>Needs Review</span>
+            <span class="library-review-count">${reviewItems.length}</span>
+            <button class="library-review-run" title="Re-run auto-matcher">Auto-match</button>
+          </div>
+          <div class="library-review-grid">
+            ${reviewItems.map(item => renderReviewCard(item)).join('')}
+          </div>
+        `
+        : '';
+      if (reviewHtml) {
+        dom.libraryContent.innerHTML = reviewHtml;
+        attachLibraryHandlers();
+      } else {
+        dom.libraryContent.innerHTML = '';
       }
 
       // Separate movies and TV shows
@@ -3092,24 +3124,10 @@
         }
       }
 
-      let html = '';
-
-      // ── Needs Review: items the auto-matcher couldn't confirm ────────
-      // Rendered at the top so the user sees ambiguous imports before
-      // scrolling through matched content. Each card shows the raw
-      // filename plus up to 5 candidate posters for one-click relink.
-      if (reviewItems.length > 0) {
-        html += `
-          <div class="library-section-header library-review-header">
-            <span>Needs Review</span>
-            <span class="library-review-count">${reviewItems.length}</span>
-            <button class="library-review-run" title="Re-run auto-matcher">Auto-match</button>
-          </div>
-          <div class="library-review-grid">
-            ${reviewItems.map(item => renderReviewCard(item)).join('')}
-          </div>
-        `;
-      }
+      // Review section was already painted earlier; keep it in the final
+      // HTML string so the later innerHTML = html assignment doesn't wipe
+      // it out.
+      let html = reviewHtml;
 
       // Movies section (with collection grouping + genre grouping)
       if (movies.length > 0) {
@@ -3272,12 +3290,22 @@
         startLibraryProgressPoll();
       }
     } catch (err) {
-      dom.libraryContent.innerHTML = `
+      console.error('[Library] render failed:', err);
+      // If the review section was already drawn before the crash, keep it
+      // visible and append the error banner underneath so the user can
+      // still act on the queue.
+      const existing = dom.libraryContent.querySelector('.library-review-grid');
+      const banner = `
         <div class="empty-state" style="grid-column:1/-1">
           <p>Failed to load library</p>
           <p style="font-size:12px;color:var(--text-muted)">${escapeHTML(err.message)}</p>
         </div>
       `;
+      if (existing) {
+        dom.libraryContent.insertAdjacentHTML('beforeend', banner);
+      } else {
+        dom.libraryContent.innerHTML = banner;
+      }
     }
   }
 

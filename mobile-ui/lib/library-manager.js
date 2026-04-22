@@ -1261,8 +1261,9 @@ class LibraryManager {
     // Try S01E05 pattern in filename
     const seMatch = base.match(/S(\d+)E(\d+)/i);
     if (seMatch) return { season: parseInt(seMatch[1], 10), episode: parseInt(seMatch[2], 10) };
-    // Try 1x05 pattern in filename
-    const xMatch = base.match(/(\d+)x(\d+)/i);
+    // Try 1x05 pattern — anchor on word boundaries and bound episode digits
+    // so raw resolutions like "1920x1080" don't falsely match as S1920E1080.
+    const xMatch = base.match(/\b(\d{1,2})x(\d{1,3})\b/i);
     if (xMatch) return { season: parseInt(xMatch[1], 10), episode: parseInt(xMatch[2], 10) };
 
     // No season+episode combo in filename — try to extract season from directory path.
@@ -1333,23 +1334,30 @@ class LibraryManager {
     let base = path.basename(fileName, path.extname(fileName));
     // Strip [group] tags
     base = base.replace(/\[[^\]]*\]/g, '');
-    // Replace underscores/dots with spaces (if used as separators)
-    if (!base.includes(' ') || /^[\w.]+$/.test(base.replace(/\s/g, ''))) {
+    // Unified separator rule (same as _deriveMovieNameFromFile): collapse
+    // dots/underscores when the filename is a scene-style name (no spaces)
+    // or has 2+ of them used as word separators. This preserves titles like
+    // "Mr. Smith - S01E05" instead of mangling them to "Mr  Smith".
+    const hasSpace = /\s/.test(base);
+    const dotCount = (base.match(/\./g) || []).length;
+    const underCount = (base.match(/_/g) || []).length;
+    if (!hasSpace || dotCount >= 2 || underCount >= 2) {
       base = base.replace(/[._]/g, ' ');
     }
-    base = base.trim();
+    base = base.replace(/\s+/g, ' ').trim();
 
     // Try S01E05 pattern — show name is everything before it
     let match = base.match(/^(.+?)\s*S\d+\s*E\d+/i);
     if (match) return match[1].replace(/[-–\s]+$/, '').trim() || null;
 
-    // Try 1x05 pattern
-    match = base.match(/^(.+?)\s*\d+x\d+/i);
+    // Try 1x05 pattern (bounded so "1920x1080" resolutions don't match)
+    match = base.match(/^(.+?)\s*\b\d{1,2}x\d{1,3}\b/i);
     if (match) return match[1].replace(/[-–\s]+$/, '').trim() || null;
 
-    // Try "- 001" anime convention (e.g., "Naruto Shippuden - 001")
-    // Negative lookahead prevents matching year-like numbers (1900-2099)
-    match = base.match(/^(.+?)\s*[-–]\s*(?!(?:19|20)\d{2}\b)\d{2,4}\b/);
+    // Try "- 001" or "- 1" anime convention (e.g., "Naruto Shippuden - 001").
+    // Accepts 1-4 digits; negative lookahead prevents matching year-like
+    // numbers (1900-2099).
+    match = base.match(/^(.+?)\s*[-–]\s*(?!(?:19|20)\d{2}\b)\d{1,4}\b/);
     if (match) return match[1].replace(/[-–\s]+$/, '').trim() || null;
 
     // Try E05 pattern (without season)
@@ -1361,6 +1369,90 @@ class LibraryManager {
     if (match) return match[1].replace(/[-–\s]+$/, '').trim() || null;
 
     return null;
+  }
+
+  /**
+   * Returns true if the filename has an unambiguous episode marker
+   * (S01E05, 1x05, "- 07", "Episode 5"). Used to decide whether to treat
+   * a disk-discovered file as a series episode or a movie.
+   */
+  _looksLikeEpisode(fileName) {
+    const base = path.basename(fileName, path.extname(fileName));
+    if (/S\d+\s*E\d+/i.test(base)) return true;
+    if (/\b\d{1,2}x\d{1,3}\b/i.test(base)) return true;
+    if (/\bE\d{1,3}\b/i.test(base)) return true;
+    if (/\bEpisode\s*\d+/i.test(base)) return true;
+    // Anime " - 012" convention, rejecting year-like numbers
+    if (/[-–]\s*(?!(?:19|20)\d{2}\b)\d{2,4}\b/.test(base)) return true;
+    return false;
+  }
+
+  /**
+   * Single entry-point file-name parser. Consolidates episode-name,
+   * show-name, movie-name, and season/episode parsing into one result so
+   * every caller — downloads, manual imports, disk discovery, auto-match —
+   * sees consistent output.
+   *
+   * @param {string} fileName - basename or relative path
+   * @param {object} opts
+   * @param {'movie'|'series'|null} opts.hint - caller's best guess of type;
+   *   informs the type heuristic when the filename alone is ambiguous
+   * @param {number} opts.fallbackSeason - season to assume when the path
+   *   contains no season indicator (default 1)
+   * @returns {{
+   *   fileName: string,
+   *   isEpisode: boolean,
+   *   type: 'movie'|'series',
+   *   title: string|null,       // movie-style title (for movies or episodes)
+   *   show: string|null,        // show name (for episodes)
+   *   year: string|null,        // 4-digit YYYY
+   *   season: number|null,
+   *   episode: number|null,
+   *   episodeName: string,      // cleaned pack-style episode display name
+   *   query: string|null,       // best query string to send to TMDB
+   * }}
+   */
+  parseFileName(fileName, { hint = null, fallbackSeason = 1 } = {}) {
+    const base = path.basename(fileName);
+    const isEpisode = this._looksLikeEpisode(base);
+    const type = hint === 'movie' || hint === 'series'
+      ? hint
+      : (isEpisode ? 'series' : 'movie');
+
+    const se = this._parseSeasonEpisode(fileName, fallbackSeason);
+    const show = this._deriveShowNameFromFile(base);
+    const episodeName = this._deriveEpisodeName(base);
+    const movie = this._deriveMovieNameFromFile(base);
+
+    // _parseSeasonEpisode always returns the fallback season (usually 1)
+    // even when there's no episode marker — clear it for non-series items
+    // so the UI doesn't render "S01" on a movie.
+    const seasonOut = (type === 'series' && se.episode != null) ? se.season : (isEpisode ? se.season : null);
+
+    const result = {
+      fileName: base,
+      isEpisode,
+      type,
+      title: movie.title,
+      show,
+      year: movie.year,
+      season: seasonOut,
+      episode: se.episode,
+      episodeName,
+      query: null,
+    };
+
+    // Pick the best TMDB search query: show name for series, movie title for
+    // movies, episodeName as a last-resort fallback.
+    if (type === 'series' && show) {
+      result.query = show;
+    } else if (type === 'movie' && movie.title) {
+      result.query = movie.title;
+    } else {
+      result.query = show || movie.title || episodeName || null;
+    }
+
+    return result;
   }
 
   /**
@@ -2555,8 +2647,14 @@ class LibraryManager {
    * Re-link a library item to a different IMDB entry.
    * Updates the imdbId, name, poster, year, and optionally showName
    * without touching the downloaded file.
+   *
+   * @param {string} id
+   * @param {object} updates
+   * @param {'manual'|'auto'} source - whether this was a user-driven link
+   *   (locks the item against future auto-match overwrites) or an automated
+   *   match (can still be overridden by user or a higher-confidence pass)
    */
-  relinkItem(id, { imdbId, name, poster, year, type, showName }) {
+  relinkItem(id, { imdbId, name, poster, year, type, showName }, source = 'manual') {
     const item = this._items.get(id);
     if (!item) return false;
 
@@ -2567,9 +2665,125 @@ class LibraryManager {
     if (year !== undefined) item.year = year;
     if (type) item.type = type;
 
+    item.matchState = source === 'manual' ? 'manual' : 'matched';
+    item.matchSource = source;
+    item.matchedAt = Date.now();
+    // Clear cached candidates — they're stale after a successful link.
+    delete item.candidates;
+    delete item.candidatesTs;
+
     this._saveMetadata();
-    console.log(`[Library] Re-linked "${item.name}" (${id}) -> ${imdbId}`);
+    console.log(`[Library] ${source === 'manual' ? 'User-linked' : 'Auto-matched'} "${item.name}" (${id}) -> ${imdbId}`);
     return true;
+  }
+
+  /**
+   * Store auto-match candidates (top N TMDB results) on an item so the UI
+   * can render them as one-click options without re-hitting the TMDB API.
+   */
+  setCandidates(id, candidates, confidence = 0) {
+    const item = this._items.get(id);
+    if (!item) return false;
+    item.candidates = Array.isArray(candidates) ? candidates.slice(0, 5) : [];
+    item.candidatesTs = Date.now();
+    item.matchConfidence = confidence;
+    // Only downgrade state if not already user-linked.
+    if (item.matchState !== 'manual') {
+      item.matchState = 'needsReview';
+    }
+    this._saveMetadata();
+    return true;
+  }
+
+  /**
+   * Promote a disk-discovered item (id starts with "disk_") into a real
+   * tracked library item. Disk items are otherwise ephemeral — synthesized
+   * fresh on every getAll() call from the filesystem scan — so they can't
+   * hold match state or candidates on their own. Any caller that needs to
+   * write to a disk item (relink, auto-match) should promote it first.
+   *
+   * Returns the promoted item's id (unchanged) or null if the disk file
+   * has disappeared.
+   */
+  promoteDiskItem(id) {
+    if (!id.startsWith('disk_')) return null;
+    if (this._items.has(id)) return id; // already promoted
+
+    const relPath = id.slice(5);
+    const fullPath = path.join(this._libraryPath, relPath);
+    if (!this._isPathSafe(fullPath)) return null;
+    let stat;
+    try {
+      if (!fs.existsSync(fullPath)) return null;
+      stat = fs.statSync(fullPath);
+    } catch {
+      return null;
+    }
+
+    const fileName = path.basename(relPath);
+    const parsed = this.parseFileName(fileName);
+    const displayName = parsed.type === 'series'
+      ? (parsed.show || parsed.episodeName || fileName)
+      : (parsed.title || parsed.episodeName || fileName);
+
+    const item = {
+      id,
+      imdbId: null,
+      type: parsed.type,
+      name: displayName,
+      showName: parsed.type === 'series' ? parsed.show : null,
+      poster: '',
+      year: parsed.year || '',
+      quality: '',
+      size: '',
+      season: parsed.season,
+      episode: parsed.episode,
+      infoHash: null,
+      magnetUri: null,
+      status: 'complete',
+      progress: 100,
+      downloadSpeed: 0,
+      numPeers: 0,
+      filePath: relPath,
+      fileName,
+      fileSize: stat.size,
+      addedAt: stat.mtimeMs,
+      completedAt: stat.mtimeMs,
+      error: null,
+      matchState: 'unmatched',
+      matchConfidence: 0,
+      parsed,
+    };
+    this._items.set(id, item);
+    // Force a fresh discovery scan so the now-tracked item drops off the
+    // virtual list.
+    this._discoveryCache = null;
+    this._saveMetadata();
+    return id;
+  }
+
+  /**
+   * Compute the current match state for an item. Items become 'matched'
+   * as soon as a valid IMDB id is present (unless the user marked it manual).
+   */
+  _computeMatchState(item) {
+    if (item.matchState === 'manual') return 'manual';
+    if (item.matchState === 'needsReview') return 'needsReview';
+    if (item.imdbId && /^tt\d+$/.test(item.imdbId)) return 'matched';
+    return 'unmatched';
+  }
+
+  /**
+   * Return every item whose match is not confirmed. Includes both tracked
+   * items with a stale/missing IMDB id AND disk-discovered files that have
+   * never been matched.
+   */
+  getReviewQueue() {
+    const all = this.getAll();
+    return all.filter(i => {
+      const state = i.matchState || this._computeMatchState(i);
+      return state === 'needsReview' || state === 'unmatched';
+    });
   }
 
   /**
@@ -3494,16 +3708,28 @@ class LibraryManager {
           if (trackedPaths.has(entry.name)) continue;
 
           const stat = fs.statSync(entryPath);
-          const name = path.basename(entry.name, ext).replace(/[._]/g, ' ').trim();
+          const parsed = this.parseFileName(entry.name);
+          // Prefer TMDB-ready title / show name over raw filename.
+          const displayName = parsed.type === 'series'
+            ? (parsed.show || parsed.episodeName || entry.name)
+            : (parsed.title || parsed.episodeName || entry.name);
           discovered.push({
             id: 'disk_' + entry.name,
-            name,
-            type: 'movie',
+            name: displayName,
+            showName: parsed.type === 'series' ? parsed.show : null,
+            type: parsed.type,
+            year: parsed.year || '',
+            season: parsed.season,
+            episode: parsed.episode,
             status: 'complete',
             filePath: entry.name,
             fileName: entry.name,
             fileSize: stat.size,
             addedAt: stat.mtimeMs,
+            matchState: 'unmatched',
+            matchConfidence: 0,
+            parsed,
+            imdbId: null,
           });
         } else if (entry.isDirectory()) {
           // Scan subdirectory for video files
@@ -3523,16 +3749,33 @@ class LibraryManager {
               }
             }
             if (bestVideo && !trackedPaths.has(bestVideo.relPath)) {
-              const name = entry.name.replace(/[._]/g, ' ').trim();
+              // Parse against the inner file (carries codec/quality hints)
+              // but fall back to the containing directory name if the inner
+              // parse returns nothing usable.
+              const innerParsed = this.parseFileName(bestVideo.name);
+              const dirParsed = this.parseFileName(entry.name);
+              const useDir = !innerParsed.title && !innerParsed.show;
+              const parsed = useDir ? dirParsed : innerParsed;
+              const displayName = parsed.type === 'series'
+                ? (parsed.show || parsed.episodeName || entry.name)
+                : (parsed.title || parsed.episodeName || entry.name);
               discovered.push({
                 id: 'disk_' + bestVideo.relPath,
-                name,
-                type: 'movie',
+                name: displayName,
+                showName: parsed.type === 'series' ? parsed.show : null,
+                type: parsed.type,
+                year: parsed.year || '',
+                season: parsed.season,
+                episode: parsed.episode,
                 status: 'complete',
                 filePath: bestVideo.relPath,
                 fileName: bestVideo.name,
                 fileSize: bestVideo.size,
                 addedAt: bestVideo.mtime,
+                matchState: 'unmatched',
+                matchConfidence: 0,
+                parsed,
+                imdbId: null,
               });
             }
           } catch { /* skip unreadable dirs */ }
@@ -4598,6 +4841,7 @@ class LibraryManager {
   }
 
   _sanitizeItem(item) {
+    const matchState = item.matchState || this._computeMatchState(item);
     return {
       id: item.id,
       imdbId: item.imdbId,
@@ -4623,6 +4867,11 @@ class LibraryManager {
       convertError: item.convertError || null,
       packId: item.packId || null,
       showName: item.showName || null,
+      matchState,
+      matchConfidence: item.matchConfidence || 0,
+      matchSource: item.matchSource || null,
+      parsed: item.parsed || null,
+      candidates: Array.isArray(item.candidates) ? item.candidates : [],
     };
   }
 

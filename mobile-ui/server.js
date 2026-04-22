@@ -934,6 +934,181 @@ async function lookupMovieByName(movieName, yearHint) {
   return null;
 }
 
+/**
+ * Resolve a TMDB result to an IMDB id with a small per-run memoization so
+ * the auto-matcher doesn't fetch external_ids for the same TMDB id twice
+ * when it turns up in candidates for multiple episodes in a pack.
+ */
+function _makeExtIdCache() {
+  const cache = new Map();
+  return async function resolveImdbId(mediaType, tmdbId) {
+    const key = `${mediaType}:${tmdbId}`;
+    if (cache.has(key)) return cache.get(key);
+    try {
+      const ext = await tmdbFetch(`/${mediaType}/${tmdbId}/external_ids`);
+      const id = ext.imdb_id || null;
+      cache.set(key, id);
+      return id;
+    } catch {
+      cache.set(key, null);
+      return null;
+    }
+  };
+}
+
+/**
+ * Search TMDB for the top candidates for a name, returning both the best
+ * match (if any) and up to 5 ranked alternatives. Used by the auto-match
+ * pipeline so the UI can render one-click options for items that don't
+ * clear the confidence threshold.
+ *
+ * Returns:
+ *   {
+ *     best: { imdbId, tmdbId, poster, year, name, type } | null,
+ *     confidence: 0..1,   // relevance × overlap × yearMatch
+ *     candidates: [ { imdbId, tmdbId, name, year, poster, type, score, overlap } ]
+ *   }
+ */
+async function searchCandidates(kind, query, yearHint, extIdCache) {
+  if (!TMDB_API_KEY || !query) return { best: null, confidence: 0, candidates: [] };
+  const mediaType = kind === 'series' ? 'tv' : 'movie';
+  const resolveImdbId = extIdCache || _makeExtIdCache();
+
+  const cleaned = (query || '').trim()
+    .replace(/\s*\(\d{4}\)\s*$/, '')
+    .replace(/\s+\d{4}\s*$/, '');
+  if (!cleaned) return { best: null, confidence: 0, candidates: [] };
+
+  try {
+    const params = { query: cleaned, include_adult: 'false' };
+    if (yearHint && mediaType === 'movie') params.year = yearHint;
+    if (yearHint && mediaType === 'tv') params.first_air_date_year = yearHint;
+
+    let data = await tmdbFetch(`/search/${mediaType}`, params);
+    let results = data.results || [];
+
+    // If the year filter killed all results, retry without it.
+    if (results.length === 0 && yearHint) {
+      data = await tmdbFetch(`/search/${mediaType}`, { query: cleaned, include_adult: 'false' });
+      results = data.results || [];
+    }
+
+    // If still nothing, try progressively shorter queries (2+ words).
+    if (results.length === 0) {
+      const words = cleaned.split(/\s+/);
+      for (let len = words.length - 1; len >= Math.min(2, words.length); len--) {
+        const shorter = words.slice(0, len).join(' ');
+        try {
+          const r = await tmdbFetch(`/search/${mediaType}`, { query: shorter, include_adult: 'false' });
+          if ((r.results || []).length > 0) { results = r.results; break; }
+        } catch { /* try next */ }
+      }
+    }
+
+    if (results.length === 0) return { best: null, confidence: 0, candidates: [] };
+
+    // Rank results by relevance to the cleaned query.
+    const ranked = results
+      .map(r => {
+        const name = mediaType === 'movie' ? (r.title || '') : (r.name || '');
+        const year = (mediaType === 'movie' ? r.release_date : r.first_air_date || '').slice(0, 4);
+        const score = relevanceScore(name, cleaned);
+        const overlap = titleWordOverlap(cleaned, name);
+        return { tmdbId: r.id, name, year, poster_path: r.poster_path, score, overlap };
+      })
+      .sort((a, b) => b.score - a.score);
+
+    const top = ranked.slice(0, 5);
+
+    // Resolve IMDB ids for the top 5 (parallel, with memoization).
+    await Promise.all(top.map(async (c) => {
+      c.imdbId = await resolveImdbId(mediaType, c.tmdbId);
+    }));
+
+    const candidates = top.map(c => ({
+      imdbId: c.imdbId || null,
+      tmdbId: c.tmdbId,
+      name: c.name,
+      year: c.year,
+      poster: c.poster_path ? `https://image.tmdb.org/t/p/w342${c.poster_path}` : null,
+      type: kind,
+      score: Number(c.score.toFixed(3)),
+      overlap: Number(c.overlap.toFixed(3)),
+    }));
+
+    const topPick = candidates[0];
+    if (!topPick) return { best: null, confidence: 0, candidates: [] };
+
+    // Confidence combines:
+    //   - relevance (how well the TMDB title matches our query)
+    //   - word overlap (penalizes "Avatar" matching "Avatar Fire and Ash")
+    //   - year agreement (boost when yearHint matches ±1)
+    //   - imdb availability (modest boost — matched items need an imdbId)
+    let confidence = topPick.score * 0.6 + topPick.overlap * 0.4;
+    if (yearHint && topPick.year) {
+      const delta = Math.abs(parseInt(yearHint, 10) - parseInt(topPick.year, 10));
+      if (delta <= 1) confidence = Math.min(1, confidence + 0.08);
+      else if (delta > 2) confidence = Math.max(0, confidence - 0.2);
+    }
+    if (topPick.imdbId) confidence = Math.min(1, confidence + 0.05);
+    // A clear runner-up eats into confidence — if the #2 is within 10% of #1,
+    // we're not sure enough to auto-apply.
+    if (candidates.length >= 2) {
+      const gap = topPick.score - candidates[1].score;
+      if (gap < 0.08) confidence = Math.min(confidence, 0.75);
+    }
+
+    const best = topPick.imdbId
+      ? { imdbId: topPick.imdbId, tmdbId: topPick.tmdbId, name: topPick.name, year: topPick.year, poster: topPick.poster, type: kind }
+      : null;
+
+    return { best, confidence: Number(confidence.toFixed(3)), candidates };
+  } catch (err) {
+    console.warn(`[TMDB] searchCandidates(${kind}, "${query}") failed:`, err.message);
+    return { best: null, confidence: 0, candidates: [] };
+  }
+}
+
+/**
+ * Auto-match a single library item. Runs parseFileName → searchCandidates,
+ * auto-applies if confidence ≥ AUTO_MATCH_THRESHOLD, otherwise stores the
+ * top candidates for the UI.
+ */
+const AUTO_MATCH_THRESHOLD = 0.85;
+
+async function autoMatchOne(item, extIdCache) {
+  // Respect user locks.
+  if (item.matchState === 'manual') return { id: item.id, action: 'skipped', reason: 'manual' };
+  // Only process items we can actually read a filename from.
+  if (!item.fileName) return { id: item.id, action: 'skipped', reason: 'no_filename' };
+
+  const parsed = library.parseFileName(item.fileName, { hint: item.type || null });
+  if (!parsed.query) return { id: item.id, action: 'skipped', reason: 'unparseable' };
+
+  const kind = parsed.type === 'series' ? 'series' : 'movie';
+  const { best, confidence, candidates } = await searchCandidates(kind, parsed.query, parsed.year, extIdCache);
+
+  // Persist the parsed fields and candidates regardless of outcome — the UI
+  // uses both. setCandidates also bumps the state to needsReview.
+  if (candidates.length > 0) {
+    library.setCandidates(item.id, candidates, confidence);
+  }
+
+  if (best && confidence >= AUTO_MATCH_THRESHOLD) {
+    library.relinkItem(item.id, {
+      imdbId: best.imdbId,
+      name: best.name,
+      poster: best.poster,
+      year: best.year,
+      type: kind,
+      showName: kind === 'series' ? best.name : undefined,
+    }, 'auto');
+    return { id: item.id, action: 'matched', imdbId: best.imdbId, name: best.name, confidence };
+  }
+
+  return { id: item.id, action: 'needsReview', confidence, candidateCount: candidates.length };
+}
+
 // GET /api/streams/movie/:imdbId
 app.get('/api/streams/movie/:imdbId', rateLimit, async (req, res) => {
   let { imdbId } = req.params;
@@ -2415,8 +2590,140 @@ app.post('/api/library/:id/relink', rateLimit, (req, res) => {
   if (!imdbId) return res.status(400).json({ error: 'imdbId is required' });
   if (!/^tt\d{1,10}$/.test(imdbId)) return res.status(400).json({ error: 'Invalid IMDB ID format' });
 
-  const success = library.relinkItem(req.params.id, { imdbId, name, poster, year, type, showName });
+  let targetId = req.params.id;
+  // Disk-discovered items are virtual — promote to a tracked item before writing.
+  if (targetId.startsWith('disk_')) {
+    const promoted = library.promoteDiskItem(targetId);
+    if (!promoted) return res.status(404).json({ error: 'File not found on disk' });
+    targetId = promoted;
+  }
+
+  const success = library.relinkItem(targetId, { imdbId, name, poster, year, type, showName }, 'manual');
   if (!success) return res.status(404).json({ error: 'Item not found' });
+  res.json({ success: true, id: targetId });
+});
+
+// ─── Auto-match / Review queue ─────────────────────────────────────
+// Runs the unified filename parser → TMDB candidate search → auto-apply
+// at high confidence, else stash the top 5 candidates on the item so the
+// UI can render them as one-click options.
+
+// GET /api/library/review-queue — list every item that isn't a confirmed match.
+// Includes disk-discovered files that have never been matched.
+app.get('/api/library/review-queue', (req, res) => {
+  try {
+    const items = library.getReviewQueue();
+    // Sort worst (unmatched) first so the UI emphasises items with no options.
+    items.sort((a, b) => {
+      const rank = { unmatched: 0, needsReview: 1, matched: 2, manual: 3 };
+      const ra = rank[a.matchState] ?? 9;
+      const rb = rank[b.matchState] ?? 9;
+      if (ra !== rb) return ra - rb;
+      return (a.matchConfidence || 0) - (b.matchConfidence || 0);
+    });
+    res.json({ items, count: items.length });
+  } catch (err) {
+    console.error('[API] review-queue error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/library/:id/auto-match — run the auto-matcher on a single item.
+// Use this after editing the parsed query or after adding new torrents.
+app.post('/api/library/:id/auto-match', rateLimit, async (req, res) => {
+  if (!TMDB_API_KEY) return res.status(503).json({ error: 'TMDB API key not configured' });
+
+  let targetId = req.params.id;
+  if (targetId.startsWith('disk_')) {
+    const promoted = library.promoteDiskItem(targetId);
+    if (!promoted) return res.status(404).json({ error: 'File not found on disk' });
+    targetId = promoted;
+  }
+
+  const item = library.getItem(targetId);
+  if (!item) return res.status(404).json({ error: 'Item not found' });
+
+  try {
+    const result = await autoMatchOne(item);
+    res.json({ ...result, item: library.getItem(targetId) });
+  } catch (err) {
+    console.error('[API] auto-match error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/library/auto-match-all — run the auto-matcher against every
+// unresolved item in the library. Returns a summary of outcomes.
+//
+// Body (optional):
+//   { force: true }  — re-match items that already have an imdbId but
+//                      weren't confirmed manually (useful after a TMDB
+//                      outage or a parser change)
+//   { limit: 50 }    — cap the number of items processed per call so large
+//                      libraries don't hold a request open for minutes
+app.post('/api/library/auto-match-all', rateLimit, async (req, res) => {
+  if (!TMDB_API_KEY) return res.status(503).json({ error: 'TMDB API key not configured' });
+
+  const { force = false, limit = 100 } = req.body || {};
+  const extIdCache = _makeExtIdCache();
+
+  // Pick targets.
+  const all = library.getAll();
+  const targets = all.filter(i => {
+    if (i.matchState === 'manual') return false;
+    if (!i.fileName) return false;
+    if (force) return true;
+    const state = i.matchState || (i.imdbId && /^tt\d+$/.test(i.imdbId) ? 'matched' : 'unmatched');
+    return state === 'unmatched' || state === 'needsReview';
+  }).slice(0, limit);
+
+  console.log(`[AutoMatch] starting pass over ${targets.length} item(s) (force=${force})`);
+
+  // Promote any disk items we're about to process.
+  for (const t of targets) {
+    if (t.id.startsWith('disk_')) library.promoteDiskItem(t.id);
+  }
+
+  const summary = { processed: 0, matched: 0, needsReview: 0, skipped: 0, errors: 0, items: [] };
+
+  // Sequential to stay polite with the TMDB rate limit.
+  for (const t of targets) {
+    try {
+      const current = library.getItem(t.id);
+      if (!current) { summary.skipped++; continue; }
+      const outcome = await autoMatchOne(current, extIdCache);
+      summary.processed++;
+      if (outcome.action === 'matched') summary.matched++;
+      else if (outcome.action === 'needsReview') summary.needsReview++;
+      else summary.skipped++;
+      summary.items.push(outcome);
+    } catch (err) {
+      summary.errors++;
+      console.warn(`[AutoMatch] ${t.id}:`, err.message);
+    }
+  }
+
+  console.log(`[AutoMatch] done: ${summary.matched} matched, ${summary.needsReview} needReview, ${summary.skipped} skipped, ${summary.errors} errors`);
+  res.json(summary);
+});
+
+// POST /api/library/:id/mark-manual — mark an item as manually curated so
+// subsequent auto-match passes leave it alone. Useful when the user accepts
+// the current metadata even if no imdbId is attached.
+app.post('/api/library/:id/mark-manual', rateLimit, (req, res) => {
+  const item = library.getItem(req.params.id);
+  if (!item) return res.status(404).json({ error: 'Item not found' });
+  // Re-use relinkItem so matchState flips to manual. Pass current metadata
+  // as-is so the write is a no-op for fields the user didn't change.
+  const ok = library.relinkItem(req.params.id, {
+    imdbId: item.imdbId,
+    name: item.name,
+    poster: item.poster,
+    year: item.year,
+    type: item.type,
+    showName: item.showName,
+  }, 'manual');
+  if (!ok) return res.status(404).json({ error: 'Item not found' });
   res.json({ success: true });
 });
 

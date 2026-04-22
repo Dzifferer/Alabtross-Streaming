@@ -20,13 +20,13 @@
  *   X-Source-Codec        (optional) source video codec hint, skips probe
  *   X-Source-Audio        (optional) source audio codec hint
  *   X-Source-Audio-Copy   (optional) "1" → stream-copy audio (skip re-encode)
- *   X-Worker-Secret       (required iff WORKER_SECRET is set)
+ *   X-Worker-Secret       (required — must match WORKER_SECRET on this worker)
  *
  * Environment:
  *   WORKER_PORT     port to listen on               (default 8090)
  *   WORKER_HOST     bind address                    (default 0.0.0.0)
  *   WORKER_TEMP     scratch dir for in-flight files (default %TEMP%\alabtross-worker)
- *   WORKER_SECRET   shared secret for X-Worker-Secret header (default empty = no auth)
+ *   WORKER_SECRET   shared secret for X-Worker-Secret header (REQUIRED — worker refuses to start without it)
  *   FFMPEG_PATH     path to ffmpeg.exe              (default 'ffmpeg' from PATH)
  *   FFPROBE_PATH    path to ffprobe.exe             (default 'ffprobe' from PATH)
  *   NVENC_PRESET    NVENC quality preset p1..p7     (default 'p6')
@@ -36,8 +36,9 @@
  *   AUDIO_BITRATE   AAC bitrate when re-encoding    (default '192k')
  *
  * The Tailscale tunnel is mutually authenticated and end-to-end encrypted,
- * so plain HTTP over the tailnet is fine. Set WORKER_SECRET if you want a
- * second layer.
+ * but WORKER_SECRET is required as a second layer so that any process with
+ * network reach to this port (e.g. LAN access, another tailnet node) still
+ * can't spend GPU cycles without the shared secret.
  */
 
 const http = require('http');
@@ -52,6 +53,10 @@ const PORT          = parseInt(process.env.WORKER_PORT || '8090', 10);
 const HOST          = process.env.WORKER_HOST || '0.0.0.0';
 const TEMP_DIR      = process.env.WORKER_TEMP || path.join(os.tmpdir(), 'alabtross-worker');
 const SECRET        = process.env.WORKER_SECRET || '';
+if (!SECRET) {
+  console.error('[worker] WORKER_SECRET is required. Generate one (e.g. `openssl rand -hex 32`) and set it on both this worker and the server it talks to.');
+  process.exit(1);
+}
 const FFMPEG        = process.env.FFMPEG_PATH || 'ffmpeg';
 const FFPROBE       = process.env.FFPROBE_PATH || 'ffprobe';
 const NVENC_PRESET  = process.env.NVENC_PRESET || 'p6';
@@ -73,16 +78,24 @@ const AUDIO_BITRATE = process.env.AUDIO_BITRATE || '192k';
 fs.mkdirSync(TEMP_DIR, { recursive: true });
 
 // ─── Startup checks ───────────────────────────────────────────────────
-// Sweep stale temp files from a previous crash. Anything older than 12h is
-// junk that nobody is going to want back.
+// Sweep stale temp files from a previous crash. 24h cutoff gives slow
+// machines room to finish a single long encode (4K HEVC on weaker GPUs
+// can approach 10-12h, plus network upload/download time) without ever
+// having its tempfile deleted mid-flight. Also skip anything with mtime
+// within the last 5 minutes as a belt-and-braces guard against an edge
+// case where a sibling process is still writing to TEMP_DIR.
+const SWEEP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const SWEEP_MIN_AGE_MS = 5 * 60 * 1000;
 function sweepStaleTemp() {
-  const cutoff = Date.now() - 12 * 60 * 60 * 1000;
+  const now = Date.now();
   try {
     for (const name of fs.readdirSync(TEMP_DIR)) {
       const p = path.join(TEMP_DIR, name);
       try {
         const st = fs.statSync(p);
-        if (st.mtimeMs < cutoff) fs.unlinkSync(p);
+        const age = now - st.mtimeMs;
+        if (age < SWEEP_MIN_AGE_MS) continue;
+        if (age > SWEEP_MAX_AGE_MS) fs.unlinkSync(p);
       } catch { /* ignore */ }
     }
   } catch { /* ignore */ }
@@ -208,9 +221,15 @@ function buildFfmpegArgs(inputPath, outputPath, sourceCodec, audioCopy) {
   return args;
 }
 
+const SECRET_BUF = Buffer.from(SECRET);
 function checkAuth(req) {
-  if (!SECRET) return true;
-  return req.headers['x-worker-secret'] === SECRET;
+  const provided = req.headers['x-worker-secret'];
+  if (typeof provided !== 'string' || provided.length !== SECRET.length) return false;
+  try {
+    return crypto.timingSafeEqual(Buffer.from(provided), SECRET_BUF);
+  } catch {
+    return false;
+  }
 }
 
 function jsonResponse(res, status, body) {

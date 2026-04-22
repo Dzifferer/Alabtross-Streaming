@@ -147,7 +147,32 @@ class LibraryManager {
     this._peerMgrByEngine = new WeakMap();
     this._progressTimers = new Map(); // id -> interval timer
     this._convertProcesses = new Map(); // id -> conversion handle (local ffmpeg or remote worker)
+    // Local conversions run libx264 on the Jetson CPU and saturate all
+    // cores, so running more than one at a time is pointless. Remote
+    // conversions offload to the NVENC-equipped worker; that GPU can
+    // comfortably run several encodes in parallel, so we cap them
+    // separately and higher.
     this._maxConcurrentConversions = 1;
+    this._maxConcurrentRemoteConversions = typeof opts.maxConcurrentRemoteConversions === 'number'
+      ? Math.max(1, opts.maxConcurrentRemoteConversions)
+      : 3;
+    // Free-space reserve kept below the library's current usage. New
+    // downloads / conversions are refused when they would eat into this
+    // headroom. 1 GB is enough for metadata.json churn, ffmpeg temp
+    // output, and logs. Override with DISK_RESERVE_BYTES.
+    this._diskReserveBytes = typeof opts.diskReserveBytes === 'number'
+      ? opts.diskReserveBytes
+      : 1 * 1024 * 1024 * 1024;
+    // Lifetime conversion counters. Help the operator spot systemic
+    // issues ("80% of worker transcodes fail") that per-item error
+    // messages bury in the log. Reset on process restart.
+    this._convertStats = {
+      startedAt:     Date.now(),
+      successLocal:  0,
+      successRemote: 0,
+      failLocal:     0,
+      failRemote:    0,
+    };
     this._metadataSaveTimer = null;
     this._discoveryCache = null;      // cached result of _discoverUntrackedFiles
     this._discoveryCacheTs = 0;       // timestamp of last discovery scan
@@ -221,6 +246,10 @@ class LibraryManager {
       this._scanCompleteItemsForConversion().catch(err => {
         console.error('[Library] Conversion sweep failed:', err);
       });
+      // Drop .torrent metadata files for items the user has since deleted
+      // so the cache doesn't grow forever. Only touches files older than
+      // the safety window to avoid racing an active download.
+      this._gcTorrentCache();
     } catch (err) {
       console.error('[Library] Async init failed:', err);
     }
@@ -1633,6 +1662,7 @@ class LibraryManager {
 
       let allComplete = true;
       let advanceToNext = false;
+      let anyJustCompleted = false;
 
       for (const [itemId, item] of this._items) {
         if (item.packId !== packId || item.status !== 'downloading') continue;
@@ -1660,6 +1690,7 @@ class LibraryManager {
           item.status = 'complete';
           item.completedAt = Date.now();
           item.downloadSpeed = 0;
+          anyJustCompleted = true;
           console.log(`[Library] Pack episode complete: "${item.fileName}"`);
           this._checkAndConvert(itemId);
           if (itemId === activeId) advanceToNext = true;
@@ -1672,6 +1703,15 @@ class LibraryManager {
       // peers don't sit idle until the next poll tick.
       if (advanceToNext && !allComplete) {
         this._selectOnePackFile(packId, engine);
+      }
+
+      // Persist on every episode transition so a power loss mid-pack doesn't
+      // lose the "this episode is already done" fact — the startup sweep can
+      // recover the file from disk, but surfacing it correctly in the UI
+      // during the gap between completion and the next periodic save matters.
+      // Skipped when allComplete is about to save anyway.
+      if (anyJustCompleted && !allComplete) {
+        this._saveMetadata();
       }
 
       if (allComplete) {
@@ -2951,6 +2991,23 @@ class LibraryManager {
     };
   }
 
+  /**
+   * Lifetime conversion success/failure counters since process start.
+   * Resets on restart. Exposed so operators can see systemic issues
+   * (consistently-failing worker, every HEVC source erroring, etc.).
+   */
+  getConversionStats() {
+    const s = this._convertStats;
+    const { local, remote } = this._countActiveConversions();
+    const pending = [...this._items.values()].filter(i => i._pendingConversion).length;
+    return {
+      ...s,
+      uptimeSec: Math.round((Date.now() - s.startedAt) / 1000),
+      active: { local, remote },
+      pending,
+    };
+  }
+
   destroy() {
     console.log('[Library] Shutting down — saving download state for resumption...');
     if (this._metadataSaveTimer) {
@@ -3064,7 +3121,7 @@ class LibraryManager {
       }
     );
 
-    engine.on('ready', () => {
+    engine.on('ready', async () => {
       tm.clear();
 
       // Find the best video file
@@ -3072,6 +3129,20 @@ class LibraryManager {
       if (!file) {
         item.status = 'failed';
         item.error = 'No valid video file found in torrent';
+        this._stopDownload(id);
+        this._saveMetadata();
+        this._processQueue();
+        return;
+      }
+
+      // Disk-space preflight: refuse to start downloading a file we can't
+      // fit. Runs here (not in _startDownload) because we only know the
+      // file size after torrent metadata arrives.
+      const space = await this._checkFreeSpace(file.length, `download "${item.name}"`);
+      if (!space.ok) {
+        console.error(`[Library] ${space.reason}`);
+        item.status = 'failed';
+        item.error = space.reason;
         this._stopDownload(id);
         this._saveMetadata();
         this._processQueue();
@@ -3400,6 +3471,41 @@ class LibraryManager {
    * hasn't been rebooted yet). Copy any such files into our persistent
    * cache so the very next restart benefits, not just the one after it.
    */
+  /**
+   * Remove .torrent metadata files from the persistent cache that no
+   * tracked library item references any more. Preserves files younger
+   * than 24h so a torrent added moments before this call isn't wiped
+   * before its engine has a chance to use the cache.
+   */
+  _gcTorrentCache() {
+    try {
+      const referenced = new Set();
+      for (const it of this._items.values()) {
+        if (it.infoHash) referenced.add(String(it.infoHash).toLowerCase());
+      }
+      const now = Date.now();
+      const MIN_AGE_MS = 24 * 60 * 60 * 1000;
+      let removed = 0;
+      let freedBytes = 0;
+      for (const name of fs.readdirSync(this._torrentCachePath)) {
+        if (!name.endsWith('.torrent')) continue;
+        const infoHash = name.slice(0, -'.torrent'.length).toLowerCase();
+        if (referenced.has(infoHash)) continue;
+        const p = path.join(this._torrentCachePath, name);
+        try {
+          const st = fs.statSync(p);
+          if (now - st.mtimeMs < MIN_AGE_MS) continue;
+          fs.unlinkSync(p);
+          removed++;
+          freedBytes += st.size;
+        } catch { /* ignore */ }
+      }
+      if (removed > 0) {
+        console.log(`[Library] GC: removed ${removed} orphaned torrent metadata file(s) (${(freedBytes / 1024).toFixed(1)} KB)`);
+      }
+    } catch { /* non-fatal */ }
+  }
+
   _migrateLegacyTorrentCache() {
     try {
       const legacy = path.join('/tmp', 'torrent-stream');
@@ -3639,6 +3745,33 @@ class LibraryManager {
     this._saveMetadata();
   }
 
+  /**
+   * Check that at least `requiredBytes + reserve` are free on the library
+   * filesystem. Returns { ok, freeBytes, neededBytes, reason? }. When
+   * statfs is unavailable (rare — unsupported FS, older kernel) returns
+   * `{ ok: true, unknown: true }` so we fail open rather than block every
+   * download on a diagnostic gap.
+   */
+  async _checkFreeSpace(requiredBytes, label) {
+    try {
+      const s = await fs.promises.statfs(this._libraryPath);
+      const freeBytes = Number(s.bavail) * Number(s.bsize);
+      const neededBytes = Math.max(0, Number(requiredBytes) || 0) + this._diskReserveBytes;
+      if (freeBytes < neededBytes) {
+        return {
+          ok: false,
+          freeBytes,
+          neededBytes,
+          reason: `Insufficient disk space for ${label}: need ${(neededBytes / 1e9).toFixed(2)} GB (incl. ${(this._diskReserveBytes / 1e9).toFixed(2)} GB reserve), have ${(freeBytes / 1e9).toFixed(2)} GB free`,
+        };
+      }
+      return { ok: true, freeBytes, neededBytes };
+    } catch (err) {
+      console.warn(`[Library] Disk-space check failed (${this._libraryPath}): ${err.message} — proceeding without check`);
+      return { ok: true, unknown: true };
+    }
+  }
+
   _saveMetadata() {
     try {
       const data = [...this._items.values()].map(item => {
@@ -3672,9 +3805,28 @@ class LibraryManager {
         // Non-critical — proceed without backup
       }
 
-      // Atomic write: write to temp file then rename to prevent corruption
-      fs.writeFileSync(tmpFile, json, 'utf8');
+      // Atomic + durable write: write to temp file, fsync contents to disk,
+      // then rename. Without fsync a power loss between writeFileSync and
+      // rename can leave the tmp file with zero bytes — the rename then
+      // publishes an empty metadata.json even though `renameSync` itself is
+      // atomic. fsync-then-rename is the classic POSIX pattern for durable
+      // small-file updates.
+      const fd = fs.openSync(tmpFile, 'w');
+      try {
+        fs.writeSync(fd, json, 0, 'utf8');
+        try { fs.fsyncSync(fd); } catch { /* fsync unsupported on some FS */ }
+      } finally {
+        fs.closeSync(fd);
+      }
       fs.renameSync(tmpFile, this._metadataFile);
+      // Also fsync the parent directory so the rename itself survives power
+      // loss. Opening a directory for fsync is a no-op on Windows (EISDIR);
+      // swallow the error there — NTFS metadata ops are already journaled.
+      try {
+        const dirFd = fs.openSync(path.dirname(this._metadataFile), 'r');
+        try { fs.fsyncSync(dirFd); } catch { /* ignore */ }
+        finally { fs.closeSync(dirFd); }
+      } catch { /* ignore */ }
     } catch (err) {
       console.error(`[Library] Failed to save metadata: ${err.message}`);
     }
@@ -4144,9 +4296,19 @@ class LibraryManager {
       return;
     }
 
-    // Respect concurrent conversion limit
-    if (this._convertProcesses.size >= this._maxConcurrentConversions) {
-      console.log(`[Library] Conversion queued for "${item.name}" (${kind}) — waiting for active conversion to finish`);
+    // Respect concurrent conversion limits. Local and remote encodes have
+    // independent caps — a packed local slot shouldn't block a remote
+    // transcode the worker can handle, and vice versa.
+    const { local, remote } = this._countActiveConversions();
+    const wouldUseRemote = this._pendingItemWouldUseRemote({
+      _pendingConvertKind: kind,
+      _workerFailed: item._workerFailed,
+    });
+    const atCapacity = wouldUseRemote
+      ? remote >= this._maxConcurrentRemoteConversions
+      : local >= this._maxConcurrentConversions;
+    if (atCapacity) {
+      console.log(`[Library] Conversion queued for "${item.name}" (${kind}) — waiting for ${wouldUseRemote ? 'remote' : 'local'} slot`);
       // Store that this needs conversion and check again when a conversion completes
       item._pendingConversion = true;
       item._pendingConvertKind = kind;
@@ -4402,9 +4564,20 @@ class LibraryManager {
    * vs full transcode) is read from item.convertKind, which must have
    * been set by _checkAndConvert or the resume path before calling this.
    */
-  _startConversion(id) {
+  async _startConversion(id) {
     const item = this._items.get(id);
     if (!item || !item.filePath) return;
+
+    // Disk-space preflight: the output MP4 is written to a temp file
+    // alongside the source until finalization, so we briefly need up to
+    // ~2× source size on disk. Use source size as a conservative proxy
+    // (typical CRF-23 transcodes land at 60-90% of source size).
+    const sourceBytes = Number(item.fileSize) || 0;
+    const space = await this._checkFreeSpace(sourceBytes, `conversion of "${item.name}"`);
+    if (!space.ok) {
+      this._onConversionFailure(id, space.reason);
+      return;
+    }
 
     // Route to the remote GPU worker when:
     //   - it's configured (WORKER_URL set)
@@ -4591,7 +4764,7 @@ class LibraryManager {
       }
 
       console.log(`[Library] Remote transcode finished for "${item.name}": ${(result.outputBytes / 1e9).toFixed(2)} GB in ${result.encodeSec}s (${(result.outputBytes / Math.max(result.inputBytes, 1) * 100).toFixed(0)}% of source)`);
-      this._onConversionSuccess(id, inputPath, tempOutputPath, finalOutputPath);
+      this._onConversionSuccess(id, inputPath, tempOutputPath, finalOutputPath, true);
     }).catch((err) => {
       this._convertProcesses.delete(id);
 
@@ -4611,6 +4784,10 @@ class LibraryManager {
       // The flag is in-memory only — a server restart will retry the
       // remote path one more time, which is what we want.
       item._workerFailed = true;
+      // Count the remote attempt as failed even though we're about to
+      // retry locally — the remote path did fail and the operator needs
+      // to see that in the counters to catch a flaky worker.
+      this._convertStats.failRemote++;
       console.warn(`[Library] Remote transcode failed for "${item.name}" (${err.message}) — falling back to local libx264`);
       // Force the next probe of worker health so a transient blip doesn't
       // keep us locked out of the remote path for the full 30s interval.
@@ -4622,7 +4799,7 @@ class LibraryManager {
   /**
    * Handle successful conversion: rename temp file, delete original, update metadata.
    */
-  _onConversionSuccess(id, inputPath, tempOutputPath, finalOutputPath) {
+  _onConversionSuccess(id, inputPath, tempOutputPath, finalOutputPath, isRemote = false) {
     const item = this._items.get(id);
     if (!item) return;
 
@@ -4630,7 +4807,7 @@ class LibraryManager {
       // Verify output file exists and has non-zero size
       const stat = fs.statSync(tempOutputPath);
       if (stat.size === 0) {
-        this._onConversionFailure(id, 'Conversion produced empty file');
+        this._onConversionFailure(id, 'Conversion produced empty file', isRemote);
         return;
       }
 
@@ -4655,8 +4832,12 @@ class LibraryManager {
       item.conversionCheckedAt = Date.now();
       delete item._probeDuration;
 
+      if (isRemote) this._convertStats.successRemote++;
+      else this._convertStats.successLocal++;
+
       this._saveMetadata();
-      console.log(`[Library] Conversion complete: "${item.name}" → ${item.fileName} (${(stat.size / 1e9).toFixed(2)} GB)`);
+      const s = this._convertStats;
+      console.log(`[Library] Conversion complete: "${item.name}" → ${item.fileName} (${(stat.size / 1e9).toFixed(2)} GB) — totals: local ${s.successLocal}✓/${s.failLocal}✗ remote ${s.successRemote}✓/${s.failRemote}✗`);
 
       // Check if there are pending conversions waiting for a slot
       this._processConversionQueue();
@@ -4667,18 +4848,22 @@ class LibraryManager {
       }
     } catch (err) {
       console.error(`[Library] Conversion finalization error: ${err.message}`);
-      this._onConversionFailure(id, `Finalization error: ${err.message}`);
+      this._onConversionFailure(id, `Finalization error: ${err.message}`, isRemote);
     }
   }
 
   /**
    * Handle failed conversion: clean up temp file, revert to original, allow on-the-fly remux.
    */
-  _onConversionFailure(id, reason) {
+  _onConversionFailure(id, reason, isRemote = false) {
     const item = this._items.get(id);
     if (!item) return;
 
-    console.error(`[Library] Conversion failed for "${item.name}": ${reason}`);
+    if (isRemote) this._convertStats.failRemote++;
+    else this._convertStats.failLocal++;
+
+    const s = this._convertStats;
+    console.error(`[Library] Conversion failed for "${item.name}": ${reason} — totals: local ${s.successLocal}✓/${s.failLocal}✗ remote ${s.successRemote}✓/${s.failRemote}✗`);
 
     // Delete temp file if it exists
     const sourcePath = item.originalFilePath || item.filePath;
@@ -4720,32 +4905,75 @@ class LibraryManager {
   }
 
   /**
+   * Count currently-running conversions by routing kind so the queue can
+   * respect separate caps for local (CPU-bound) and remote (GPU-bound)
+   * encodes.
+   */
+  _countActiveConversions() {
+    let local = 0, remote = 0;
+    for (const h of this._convertProcesses.values()) {
+      if (h.isRemote) remote++;
+      else local++;
+    }
+    return { local, remote };
+  }
+
+  /**
+   * Replicates the routing decision _startConversion makes, but against
+   * a pending item's convertKind hint rather than its live state — used
+   * by the queue to figure out which cap this item counts against.
+   */
+  _pendingItemWouldUseRemote(item) {
+    const kind = item._pendingConvertKind === 'transcode' ? 'transcode' : 'remux';
+    if (kind !== 'transcode') return false;
+    if (!this._workerClient || !this._workerClient.enabled()) return false;
+    if (!this._workerHealth) return false;
+    if (item._workerFailed) return false;
+    return true;
+  }
+
+  /**
    * Check for items pending conversion and start them if a slot is available.
    * Gated on _hasActiveDownloads() so we never transcode while BT downloads
    * are running — see _pauseRunningConversionsForDownloads for the rationale.
+   *
+   * Local and remote conversions have independent caps, so this loops
+   * greedily — on a healthy worker we might start 3 remote encodes in a
+   * single tick without burning any Jetson CPU.
    */
-  _processConversionQueue() {
-    if (this._convertProcesses.size >= this._maxConcurrentConversions) return;
+  async _processConversionQueue() {
     // _canStartConversionNow() returns true when downloads are idle OR
     // when the remote GPU worker is online (since remote conversions
     // don't compete with downloads on the Orin).
     if (!this._canStartConversionNow()) return;
 
-    const pending = [...this._items.values()].find(i => i._pendingConversion);
-    if (!pending) return;
+    for (;;) {
+      const { local, remote } = this._countActiveConversions();
+      const localFull  = local  >= this._maxConcurrentConversions;
+      const remoteFull = remote >= this._maxConcurrentRemoteConversions;
+      if (localFull && remoteFull) return;
 
-    const kind = pending._pendingConvertKind === 'transcode' ? 'transcode' : 'remux';
-    delete pending._pendingConversion;
-    delete pending._pendingConvertKind;
-    pending.status = 'converting';
-    pending.convertKind = kind;
-    pending.convertProgress = 0;
-    pending.convertError = null;
-    this._saveMetadata();
-    this._startPeriodicSave();
+      const pending = [...this._items.values()].find(i => {
+        if (!i._pendingConversion) return false;
+        return this._pendingItemWouldUseRemote(i) ? !remoteFull : !localFull;
+      });
+      if (!pending) return;
 
-    console.log(`[Library] Starting queued ${kind}: "${pending.name}"`);
-    this._startConversion(pending.id);
+      const kind = pending._pendingConvertKind === 'transcode' ? 'transcode' : 'remux';
+      delete pending._pendingConversion;
+      delete pending._pendingConvertKind;
+      pending.status = 'converting';
+      pending.convertKind = kind;
+      pending.convertProgress = 0;
+      pending.convertError = null;
+      this._saveMetadata();
+      this._startPeriodicSave();
+
+      console.log(`[Library] Starting queued ${kind}: "${pending.name}"`);
+      // Await so the handle lands in _convertProcesses before we loop and
+      // re-count — otherwise we'd over-start items on the first tick.
+      await this._startConversion(pending.id);
+    }
   }
 
   /**

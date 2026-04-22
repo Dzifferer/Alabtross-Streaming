@@ -100,6 +100,54 @@ const rateLimitCleanupTimer = setInterval(() => {
   }
 }, RATE_LIMIT_WINDOW);
 
+// ─── Concurrency Gate (per-IP + global) ──────────────────────────────
+// Caps how many ffmpeg-backed streaming sessions can run at once. The
+// per-IP `rateLimit` above throttles request *rate*, but a client can
+// still hold open N long-lived transcode connections and spawn N ffmpeg
+// processes. On the Orin Nano each libx264 transcode occupies multiple
+// cores, so without this gate a handful of abusive clients can DoS the
+// entire box.
+const MAX_CONCURRENT_TRANSCODE = parseInt(process.env.MAX_CONCURRENT_TRANSCODE, 10) || 2;
+const MAX_CONCURRENT_TRANSCODE_PER_IP = parseInt(process.env.MAX_CONCURRENT_TRANSCODE_PER_IP, 10) || 1;
+const MAX_CONCURRENT_REMUX = parseInt(process.env.MAX_CONCURRENT_REMUX, 10) || 4;
+const MAX_CONCURRENT_REMUX_PER_IP = parseInt(process.env.MAX_CONCURRENT_REMUX_PER_IP, 10) || 2;
+
+function concurrencyGate(label, maxGlobal, maxPerIp) {
+  let active = 0;
+  const perIp = new Map();
+  return (req, res, next) => {
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+    const ipCount = perIp.get(ip) || 0;
+    if (active >= maxGlobal) {
+      return res.status(429).set('Retry-After', '30').json({
+        error: `Server busy — too many concurrent ${label} sessions. Try again shortly.`,
+      });
+    }
+    if (ipCount >= maxPerIp) {
+      return res.status(429).set('Retry-After', '10').json({
+        error: `Too many concurrent ${label} sessions from this client.`,
+      });
+    }
+    active++;
+    perIp.set(ip, ipCount + 1);
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      active--;
+      const remaining = (perIp.get(ip) || 1) - 1;
+      if (remaining <= 0) perIp.delete(ip);
+      else perIp.set(ip, remaining);
+    };
+    res.on('close', release);
+    res.on('finish', release);
+    next();
+  };
+}
+
+const transcodeGate = concurrencyGate('transcode', MAX_CONCURRENT_TRANSCODE, MAX_CONCURRENT_TRANSCODE_PER_IP);
+const remuxGate = concurrencyGate('remux', MAX_CONCURRENT_REMUX, MAX_CONCURRENT_REMUX_PER_IP);
+
 // ─── Torrent Engine (lazy-initialized on first custom-mode request) ───
 let engine = null;
 function getEngine() {
@@ -117,11 +165,23 @@ function getEngine() {
 // running libx264 on the Orin's CPU. See worker/README.md.
 const WORKER_URL    = process.env.WORKER_URL || '';
 const WORKER_SECRET = process.env.WORKER_SECRET || '';
+if (WORKER_URL && !WORKER_SECRET) {
+  console.error('[Config] WORKER_URL is set but WORKER_SECRET is empty. Refusing to start without worker authentication.');
+  console.error('[Config] Generate a secret (e.g. `openssl rand -hex 32`) and set WORKER_SECRET on both this server and the worker.');
+  process.exit(1);
+}
+const DISK_RESERVE_BYTES = (() => {
+  const n = parseInt(process.env.DISK_RESERVE_BYTES, 10);
+  return Number.isFinite(n) && n >= 0 ? n : 1 * 1024 * 1024 * 1024;
+})();
+const MAX_CONCURRENT_REMOTE_CONVERSIONS = parseInt(process.env.MAX_CONCURRENT_REMOTE_CONVERSIONS, 10) || 3;
 const library = new LibraryManager({
   libraryPath: LIBRARY_PATH,
   maxConcurrentDownloads: MAX_CONCURRENT_STREAMS,
   workerUrl: WORKER_URL,
   workerSecret: WORKER_SECRET,
+  diskReserveBytes: DISK_RESERVE_BYTES,
+  maxConcurrentRemoteConversions: MAX_CONCURRENT_REMOTE_CONVERSIONS,
 });
 
 // Security headers
@@ -2788,7 +2848,7 @@ app.get('/api/library/:id/stream', async (req, res) => {
 });
 
 // GET /api/library/:id/stream/remux — stream a library file remuxed to MP4 (AAC audio)
-app.get('/api/library/:id/stream/remux', async (req, res) => {
+app.get('/api/library/:id/stream/remux', rateLimit, remuxGate, async (req, res) => {
   const item = library.getItem(req.params.id);
   if (!item) return res.status(404).json({ error: 'Item not found' });
   if (item.status !== 'complete' && item.status !== 'converting') {
@@ -2894,7 +2954,7 @@ app.get('/api/library/:id/stream/remux', async (req, res) => {
 // pipeline to NVDEC, which alone buys ~30-50% more CPU headroom for
 // libx264 on HEVC sources. If you upgrade to a Jetson with NVENC later,
 // swap the encoder args for h264_nvenc or h264_nvmpi.
-app.get('/api/library/:id/stream/transcode', async (req, res) => {
+app.get('/api/library/:id/stream/transcode', rateLimit, transcodeGate, async (req, res) => {
   const item = library.getItem(req.params.id);
   if (!item) return res.status(404).json({ error: 'Item not found' });
   if (item.status !== 'complete' && item.status !== 'converting') {
@@ -3584,7 +3644,10 @@ app.get('/health', (req, res) => {
 
 // Health endpoint for VPN detection (if the client can reach this, the server is accessible)
 app.get('/api/stats', (req, res) => {
-  res.json({ ok: true });
+  res.json({
+    ok: true,
+    conversion: library.getConversionStats(),
+  });
 });
 
 // SPA fallback

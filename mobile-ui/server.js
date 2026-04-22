@@ -166,9 +166,7 @@ function getEngine() {
 const WORKER_URL    = process.env.WORKER_URL || '';
 const WORKER_SECRET = process.env.WORKER_SECRET || '';
 if (WORKER_URL && !WORKER_SECRET) {
-  console.error('[Config] WORKER_URL is set but WORKER_SECRET is empty. Refusing to start without worker authentication.');
-  console.error('[Config] Generate a secret (e.g. `openssl rand -hex 32`) and set WORKER_SECRET on both this server and the worker.');
-  process.exit(1);
+  console.warn('[Config] WORKER_URL is set but WORKER_SECRET is empty — worker traffic will be unauthenticated. Consider setting WORKER_SECRET on both ends for defence-in-depth on top of Tailscale.');
 }
 const DISK_RESERVE_BYTES = (() => {
   const n = parseInt(process.env.DISK_RESERVE_BYTES, 10);

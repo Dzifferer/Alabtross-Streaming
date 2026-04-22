@@ -252,10 +252,19 @@ function tmdbFetch(endpoint, params = {}) {
   });
 }
 
+// Lowercase + strip diacritics so titles with macrons/accents (e.g. TMDB's
+// "Naruto Shippūden") compare equal to their ASCII-spelled filenames.
+function normalizeForMatch(s) {
+  return String(s || '')
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase();
+}
+
 // Compute how relevant a title is to the search query (0.0 - 1.0)
 function relevanceScore(title, query) {
-  const t = title.toLowerCase();
-  const q = query.toLowerCase();
+  const t = normalizeForMatch(title);
+  const q = normalizeForMatch(query);
   if (t === q) return 1.0;
   let score = 0;
   if (t.startsWith(q)) score = 0.75;
@@ -1241,8 +1250,7 @@ async function lookupShowByName(showName) {
  * a different movie that just happened to share a word.
  */
 function titleWordOverlap(a, b) {
-  const norm = s => (s || '')
-    .toLowerCase()
+  const norm = s => normalizeForMatch(s)
     .replace(/[^\w\s]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()

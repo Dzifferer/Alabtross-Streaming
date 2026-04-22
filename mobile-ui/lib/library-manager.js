@@ -1541,6 +1541,7 @@ class LibraryManager {
 
       let allComplete = true;
       let advanceToNext = false;
+      let anyJustCompleted = false;
 
       for (const [itemId, item] of this._items) {
         if (item.packId !== packId || item.status !== 'downloading') continue;
@@ -1568,6 +1569,7 @@ class LibraryManager {
           item.status = 'complete';
           item.completedAt = Date.now();
           item.downloadSpeed = 0;
+          anyJustCompleted = true;
           console.log(`[Library] Pack episode complete: "${item.fileName}"`);
           this._checkAndConvert(itemId);
           if (itemId === activeId) advanceToNext = true;
@@ -1580,6 +1582,15 @@ class LibraryManager {
       // peers don't sit idle until the next poll tick.
       if (advanceToNext && !allComplete) {
         this._selectOnePackFile(packId, engine);
+      }
+
+      // Persist on every episode transition so a power loss mid-pack doesn't
+      // lose the "this episode is already done" fact — the startup sweep can
+      // recover the file from disk, but surfacing it correctly in the UI
+      // during the gap between completion and the next periodic save matters.
+      // Skipped when allComplete is about to save anyway.
+      if (anyJustCompleted && !allComplete) {
+        this._saveMetadata();
       }
 
       if (allComplete) {
@@ -3458,9 +3469,28 @@ class LibraryManager {
         // Non-critical — proceed without backup
       }
 
-      // Atomic write: write to temp file then rename to prevent corruption
-      fs.writeFileSync(tmpFile, json, 'utf8');
+      // Atomic + durable write: write to temp file, fsync contents to disk,
+      // then rename. Without fsync a power loss between writeFileSync and
+      // rename can leave the tmp file with zero bytes — the rename then
+      // publishes an empty metadata.json even though `renameSync` itself is
+      // atomic. fsync-then-rename is the classic POSIX pattern for durable
+      // small-file updates.
+      const fd = fs.openSync(tmpFile, 'w');
+      try {
+        fs.writeSync(fd, json, 0, 'utf8');
+        try { fs.fsyncSync(fd); } catch { /* fsync unsupported on some FS */ }
+      } finally {
+        fs.closeSync(fd);
+      }
       fs.renameSync(tmpFile, this._metadataFile);
+      // Also fsync the parent directory so the rename itself survives power
+      // loss. Opening a directory for fsync is a no-op on Windows (EISDIR);
+      // swallow the error there — NTFS metadata ops are already journaled.
+      try {
+        const dirFd = fs.openSync(path.dirname(this._metadataFile), 'r');
+        try { fs.fsyncSync(dirFd); } catch { /* ignore */ }
+        finally { fs.closeSync(dirFd); }
+      } catch { /* ignore */ }
     } catch (err) {
       console.error(`[Library] Failed to save metadata: ${err.message}`);
     }

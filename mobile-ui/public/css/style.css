@@ -462,6 +462,10 @@ html, body {
 #view-music-player {
   min-height: 0;
   display: none;
+  /* The mini-player is hidden while this view is open, so reclaim the
+     inherited .view padding-bottom — .music-player-full already reserves
+     its own safe bottom space. */
+  padding-bottom: 0;
 }
 #view-music-player.active {
   display: block;
@@ -4673,6 +4677,9 @@ body.music-player-open .music-player-bar { display: none; }
   padding: 12px 10px;
   min-height: 44px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  /* Reserve the now-playing accent bar on every row so adding/removing
+     .now-playing doesn't shift the text 2px horizontally. */
+  border-left: 2px solid transparent;
   display: flex;
   flex-direction: column;
   gap: 2px;

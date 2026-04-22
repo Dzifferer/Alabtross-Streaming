@@ -431,16 +431,22 @@
     _lastRankedStreams = [];
     _selectedStreamIndex = -1;
 
-    const prev = state.viewHistory.pop();
-    if (prev) {
-      state.currentView = prev;
-      $$('.view').forEach(v => v.classList.remove('active'));
+    // Fallback destinations so goBack never leaves an overlay stuck on
+    // screen when viewHistory is empty (e.g. deep-link into a player view).
+    const fallbackFor = {
+      'music-player': 'music',
+      'music-detail': 'music',
+      'music-library': 'library-selector',
+      'library-selector': 'home',
+    };
+    const prev = state.viewHistory.pop() || fallbackFor[state.currentView] || 'home';
+    state.currentView = prev;
+    $$('.view').forEach(v => v.classList.remove('active'));
 
-      const target = $('#' + (VIEW_MAP[prev] || 'view-home'));
-      if (target) target.classList.add('active');
-      updateNavUI(prev);
-      updateTopBar(prev);
-    }
+    const target = $('#' + (VIEW_MAP[prev] || 'view-home'));
+    if (target) target.classList.add('active');
+    updateNavUI(prev);
+    updateTopBar(prev);
 
     // Abort in-flight speed tests when leaving detail
     if (api._speedTestController) api._speedTestController.abort();
@@ -481,9 +487,21 @@
   }
 
   function updateNavUI(view) {
+    // Music views map to the Music tab pill; library/library-selector map to
+    // the Library pill. Everything else except the explicit non-home views
+    // below falls through to Home so the pill stays lit on sub-views.
+    const musicViews = ['music', 'music-detail', 'music-player', 'music-library'];
+    const libraryViews = ['library', 'library-selector'];
+    const nonHomeViews = ['movies', 'series', 'search', 'detail', 'settings', 'share', 'player',
+                          ...musicViews, ...libraryViews];
     dom.navBtns.forEach(btn => {
-      btn.classList.toggle('active', btn.dataset.view === view ||
-        (btn.dataset.view === 'home' && !['movies', 'series', 'search', 'detail', 'settings', 'library', 'share', 'player'].includes(view)));
+      const v = btn.dataset.view;
+      const isActive =
+        v === view ||
+        (v === 'music' && musicViews.includes(view)) ||
+        (v === 'library' && libraryViews.includes(view)) ||
+        (v === 'home' && !nonHomeViews.includes(view));
+      btn.classList.toggle('active', isActive);
     });
 
     // Show/hide bottom nav

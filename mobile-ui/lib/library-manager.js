@@ -1421,6 +1421,44 @@ class LibraryManager {
   }
 
   /**
+   * Heuristic: a show name derived from the filename is "weak" when it's
+   * almost certainly not a real title — a generic episode marker like "Ep"
+   * or "Episode", or something implausibly short. Callers use this to
+   * decide whether to fall back to a parent-directory name instead.
+   */
+  _weakShowName(show) {
+    if (!show) return true;
+    const s = show.trim();
+    if (s.length < 3) return true;
+    if (/^(?:ep|episode|episodio|chapter|ch|ova|oav|special|specials|pilot|prologue|epilogue|part|pt|disc|disk|volume|vol)$/i.test(s)) return true;
+    return false;
+  }
+
+  /**
+   * Walk a file's ancestor directories and return the best "show name" hint,
+   * skipping generic season/extras folders. For
+   * "Breaking Bad/Season 4/Ep 01 - Box Cutter.mkv" this returns "Breaking Bad".
+   * Returns { query, year } or null.
+   */
+  deriveSeriesQueryFromPath(relPath) {
+    if (!relPath) return null;
+    const parts = String(relPath).split(/[\\/]/);
+    if (parts.length < 2) return null; // no parent dir
+    const genericDir = /^(?:season\s*\d+|s\d{1,2}|specials|extras|bonus|featurettes|behind\s*the\s*scenes|deleted\s*scenes|disc\s*\d+|disk\s*\d+|cd\s*\d+|part\s*\d+)$/i;
+    // Iterate ancestors from nearest to furthest, skipping generic folders.
+    for (let i = parts.length - 2; i >= 0; i--) {
+      const seg = (parts[i] || '').trim();
+      if (!seg || seg === '.' || seg === '..') continue;
+      if (genericDir.test(seg)) continue;
+      const derived = this._deriveMovieNameFromFile(seg);
+      if (derived.title) return { query: derived.title, year: derived.year || null };
+      const cleaned = seg.replace(/[._]+/g, ' ').replace(/\s+/g, ' ').trim();
+      if (cleaned) return { query: cleaned, year: null };
+    }
+    return null;
+  }
+
+  /**
    * Returns true if the filename has an unambiguous episode marker
    * (S01E05, 1x05, "- 07", "Episode 5"). Used to decide whether to treat
    * a disk-discovered file as a series episode or a movie.
@@ -4046,14 +4084,27 @@ class LibraryManager {
 
     const buildItem = (relPath, stat) => {
       const fileName = path.basename(relPath);
-      const dirName  = path.dirname(relPath);
       // Prefer the inner-file parse (has codec/quality hints), but fall back
       // to the enclosing directory name for torrents that store the real
-      // title on the folder and a generic "video.mkv" inside.
+      // title on the folder and a generic "video.mkv" inside. For series
+      // with a junk filename-derived show (e.g. "Ep 01 - Box Cutter.mkv"
+      // under "Breaking Bad/"), override just the show/query from the
+      // directory while keeping season/episode info parsed from the file.
       const innerParsed = this.parseFileName(fileName);
+      const dirHint = this.deriveSeriesQueryFromPath(relPath);
+      let parsed = innerParsed;
       const needsDirFallback = !innerParsed.title && !innerParsed.show;
-      const dirHint = dirName && dirName !== '.' ? path.basename(dirName) : null;
-      const parsed = needsDirFallback && dirHint ? this.parseFileName(dirHint) : innerParsed;
+      if (needsDirFallback && dirHint) {
+        parsed = this.parseFileName(dirHint.query);
+        if (dirHint.year && !parsed.year) parsed = { ...parsed, year: dirHint.year };
+      } else if (innerParsed.type === 'series' && this._weakShowName(innerParsed.show) && dirHint) {
+        parsed = {
+          ...innerParsed,
+          show: dirHint.query,
+          year: innerParsed.year || dirHint.year || null,
+          query: dirHint.query,
+        };
+      }
       const displayName = parsed.type === 'series'
         ? (parsed.show || parsed.episodeName || fileName)
         : (parsed.title || parsed.episodeName || fileName);

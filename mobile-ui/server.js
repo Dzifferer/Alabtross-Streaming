@@ -1417,6 +1417,15 @@ async function searchCandidates(kind, query, yearHint, extIdCache) {
       c.imdbId = await resolveImdbId(mediaType, c.tmdbId);
     }));
 
+    // Prefer IMDb-backed entries over TMDB-only ones (often fan/unofficial
+    // duplicates). Stable sort preserves relevance order within each group.
+    top.sort((a, b) => {
+      const aHas = a.imdbId ? 1 : 0;
+      const bHas = b.imdbId ? 1 : 0;
+      if (aHas !== bHas) return bHas - aHas;
+      return b.score - a.score;
+    });
+
     const candidates = top.map(c => ({
       imdbId: c.imdbId || null,
       tmdbId: c.tmdbId,
@@ -1466,7 +1475,7 @@ async function searchCandidates(kind, query, yearHint, extIdCache) {
  * auto-applies if confidence ≥ AUTO_MATCH_THRESHOLD, otherwise stores the
  * top candidates for the UI.
  */
-const AUTO_MATCH_THRESHOLD = 0.70;
+const AUTO_MATCH_THRESHOLD = 0.65;
 
 async function autoMatchOne(item, extIdCache) {
   // Respect user locks.
@@ -1478,7 +1487,22 @@ async function autoMatchOne(item, extIdCache) {
   if (!parsed.query) return { id: item.id, action: 'skipped', reason: 'unparseable' };
 
   const kind = parsed.type === 'series' ? 'series' : 'movie';
-  const { best, confidence, candidates } = await searchCandidates(kind, parsed.query, parsed.year, extIdCache);
+  let { best, confidence, candidates } = await searchCandidates(kind, parsed.query, parsed.year, extIdCache);
+
+  // For series, the filename sometimes carries only an episode title
+  // (e.g. "Ep 01 - Box Cutter.mkv"). Also search using the enclosing
+  // directory as a show-name query and keep whichever result is stronger.
+  if (kind === 'series' && item.filePath) {
+    const dirHint = library.deriveSeriesQueryFromPath(item.filePath);
+    if (dirHint && dirHint.query && dirHint.query.toLowerCase() !== String(parsed.query).toLowerCase()) {
+      const dirResult = await searchCandidates(kind, dirHint.query, dirHint.year || parsed.year, extIdCache);
+      const currentHasBest = best ? 1 : 0;
+      const dirHasBest = dirResult.best ? 1 : 0;
+      const dirWins = dirHasBest > currentHasBest
+        || (dirHasBest === currentHasBest && dirResult.confidence > confidence);
+      if (dirWins) ({ best, confidence, candidates } = dirResult);
+    }
+  }
 
   // Persist the parsed fields and candidates regardless of outcome — the UI
   // uses both. setCandidates also bumps the state to needsReview.

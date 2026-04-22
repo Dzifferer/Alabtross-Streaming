@@ -339,6 +339,16 @@
         if (s.size) tags.push(s.size);
         if (s.source) tags.push(s.source);
         row.appendChild(el('div', { class: 'stream-row__tags' }, tags.join(' · ')));
+        const actions = el('div', { class: 'stream-row__actions' });
+        const playBtn = el('button', { class: 'btn-sm' }, 'Play');
+        playBtn.addEventListener('click', (ev) => { ev.stopPropagation(); playRemoteAlbumStream(meta, s); });
+        actions.appendChild(playBtn);
+        if (s.source !== 'YouTube' && s.infoHash) {
+          const addBtn = el('button', { class: 'btn-sm' }, 'Add to library');
+          addBtn.addEventListener('click', (ev) => { ev.stopPropagation(); addAlbumToLibrary(meta, s); });
+          actions.appendChild(addBtn);
+        }
+        row.appendChild(actions);
         row.addEventListener('click', () => playRemoteAlbumStream(meta, s));
         list.appendChild(row);
       }
@@ -728,12 +738,133 @@
     });
   }
 
+  // ─── Library selector + music library view ─────────────
+
+  async function refreshLibrarySelectorCounts() {
+    try {
+      const [videos, albums] = await Promise.all([
+        fetch('/api/library').then(r => r.json()).then(d => (d.items || []).length).catch(() => null),
+        fetch('/api/music-library').then(r => r.json()).then(d => (d.items || []).length).catch(() => null),
+      ]);
+      const v = document.getElementById('library-selector-video-count');
+      const m = document.getElementById('library-selector-music-count');
+      if (v && videos != null) v.textContent = `${videos} item${videos === 1 ? '' : 's'}`;
+      if (m && albums != null) m.textContent = `${albums} album${albums === 1 ? '' : 's'}`;
+    } catch {}
+  }
+
+  function wireLibrarySelector() {
+    $$('.library-selector__card').forEach(card => {
+      card.addEventListener('click', () => {
+        const target = card.dataset.selectorTarget;
+        if (!window.__app_navigate) return;
+        if (target === 'library') {
+          window.__app_navigate('library');
+        } else if (target === 'music-library') {
+          window.__app_navigate('music-library');
+          renderMusicLibrary();
+        }
+      });
+    });
+  }
+
+  async function renderMusicLibrary() {
+    const host = document.getElementById('music-library-content');
+    const empty = document.getElementById('music-library-empty');
+    if (!host) return;
+    host.innerHTML = '<div class="loading-state"><div class="spinner"></div><p>Loading music library...</p></div>';
+    let items = [];
+    try {
+      const data = await fetch('/api/music-library').then(r => r.json());
+      items = data.items || [];
+    } catch {}
+    host.innerHTML = '';
+    if (!items.length) {
+      empty && empty.classList.remove('hidden');
+      return;
+    }
+    empty && empty.classList.add('hidden');
+    // Newest-first.
+    items.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+    for (const item of items) {
+      const card = el('div', { class: 'music-card music-lib-card', 'data-id': item.id });
+      const cover = el('div', { class: 'music-card__cover' });
+      if (item.coverUrl) cover.style.backgroundImage = `url(${item.coverUrl})`;
+      card.appendChild(cover);
+      card.appendChild(el('div', { class: 'music-card__title' }, item.title || item.name));
+      if (item.artist) card.appendChild(el('div', { class: 'music-card__subtitle' }, item.artist));
+      if (item.status && item.status !== 'complete') {
+        const pct = Math.max(0, Math.min(100, Math.round(item.progress || 0)));
+        card.appendChild(el('div', { class: 'music-lib-card__status' }, `${item.status} · ${pct}%`));
+      }
+      card.addEventListener('click', () => {
+        if (item.status === 'complete') playMusicLibraryAlbum(item);
+        else alert(`${item.status === 'downloading' ? 'Still downloading' : 'Not playable yet'} — ${Math.round(item.progress || 0)}%`);
+      });
+      host.appendChild(card);
+    }
+  }
+
+  async function playMusicLibraryAlbum(item, startIndex = 0) {
+    const tracks = item.tracks || [];
+    if (!tracks.length) { alert('No tracks found in this album.'); return; }
+    const queue = tracks.map((t, i) => ({
+      kind: 'music-library',
+      libraryId: item.id,
+      trackIndex: i,
+      albumId: item.id,
+      title: t.title || `Track ${i + 1}`,
+      artist: item.artist,
+      album: item.title,
+      coverUrl: item.coverUrl,
+      duration: t.duration,
+    }));
+    window.MusicQueue.playQueue(queue, startIndex);
+    if (window.__app_navigate) window.__app_navigate('music-player');
+  }
+
+  // ─── Add-to-library action from remote album streams ─────────
+
+  async function addAlbumToLibrary(meta, stream) {
+    if (stream.source === 'YouTube') {
+      alert('YouTube streams play directly — no library storage.');
+      return;
+    }
+    if (!stream.infoHash || !stream.magnetUri) {
+      alert('This stream has no magnet URI, can’t add to library.');
+      return;
+    }
+    try {
+      const res = await fetch('/api/music-library/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          infoHash: stream.infoHash,
+          magnetUri: stream.magnetUri,
+          mbid: meta.mbid,
+          artistMbid: meta.artistMbid,
+          title: meta.title,
+          artist: meta.artist,
+          year: meta.year,
+          coverUrl: meta.coverUrl,
+          genres: meta.genres || [],
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Add failed');
+      alert(`Added to Music Library — ${data.status || 'started'}`);
+    } catch (err) {
+      alert('Failed to add to library: ' + err.message);
+    }
+  }
+
   // ─── Wire up on load ─────────────────────
 
   function init() {
     $$('.music-tab').forEach(b => b.addEventListener('click', () => switchMusicTab(b.dataset.musicTab)));
     wireMusicSearch();
     wirePlayerControls();
+    wireLibrarySelector();
     window.MusicQueue.on((state) => {
       renderMiniPlayer(state);
       if (document.getElementById('view-music-player').classList.contains('active')) {
@@ -757,5 +888,8 @@
     openLibraryAlbumDetail,
     openArtistDetail,
     openPlaylistDetail,
+    refreshLibrarySelectorCounts,
+    renderMusicLibrary,
+    addAlbumToLibrary,
   };
 })();

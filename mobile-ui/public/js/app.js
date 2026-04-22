@@ -242,7 +242,9 @@
     'search': 'view-search',
     'detail': 'view-detail',
     'settings': 'view-settings',
+    'library-selector': 'view-library-selector',
     'library': 'view-library',
+    'music-library': 'view-music-library',
     'share': 'view-share',
     'player': 'view-player',
     'music': 'view-music',
@@ -6311,7 +6313,11 @@
           navigateTo('series');
           loadHome('series');
         } else if (view === 'library') {
-          navigateTo('library');
+          // Library tab now opens a Video vs Music selector; each card
+          // navigates further. loadLibrary still triggers so counts/state
+          // are hydrated in the background for the Video card.
+          navigateTo('library-selector');
+          if (window.MusicUI) window.MusicUI.refreshLibrarySelectorCounts();
           loadLibrary();
         } else if (view === 'share') {
           navigateTo('share');

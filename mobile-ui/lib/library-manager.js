@@ -856,14 +856,20 @@ class LibraryManager {
    * Add a movie/episode to the library and start downloading.
    */
   addItem(opts) {
-    const { imdbId, type, name, poster, year, magnetUri, infoHash, quality, size, season, episode } = opts;
+    const {
+      imdbId, type, name, poster, year, magnetUri, infoHash, quality, size, season, episode,
+      // Music-only fields (ignored for movies/series):
+      mbid, artistMbid, artist, title, coverUrl, genres,
+    } = opts;
 
     if (!infoHash || !magnetUri) {
       throw new Error('infoHash and magnetUri are required');
     }
 
+    const isMusic = type === 'album' || type === 'artist';
+
     // Generate a unique ID
-    const idPrefix = imdbId || 'manual';
+    const idPrefix = imdbId || (isMusic && mbid ? `mb_${mbid.slice(0, 8)}` : 'manual');
     const id = season != null && episode != null
       ? `${idPrefix}_s${season}e${episode}_${infoHash.slice(0, 8)}`
       : `${idPrefix}_${infoHash.slice(0, 8)}`;
@@ -893,8 +899,8 @@ class LibraryManager {
       id,
       imdbId,
       type: type || 'movie',
-      name: name || 'Unknown',
-      poster: poster || '',
+      name: name || title || 'Unknown',
+      poster: poster || coverUrl || '',
       year: year || '',
       quality: quality || '',
       size: size || '',
@@ -912,6 +918,20 @@ class LibraryManager {
       addedAt: Date.now(),
       completedAt: null,
       error: null,
+      // Music-only fields populated for type: 'album' / 'artist'.
+      ...(isMusic ? {
+        mbid: mbid || null,
+        artistMbid: artistMbid || null,
+        artist: artist || '',
+        title: title || name || 'Unknown',
+        coverUrl: coverUrl || poster || '',
+        genres: Array.isArray(genres) ? genres : [],
+        manualOverride: {},
+        tracks: [],
+        playCount: 0,
+        lastPlayedAt: null,
+        favorite: false,
+      } : {}),
     };
 
     this._items.set(id, item);
@@ -2960,6 +2980,21 @@ class LibraryManager {
     return getMimeType(filename);
   }
 
+  // For music albums: resolve a specific track's on-disk path.
+  // trackIndex is 0-based into item.tracks[].
+  getTrackFilePath(id, trackIndex) {
+    const item = this._items.get(id);
+    if (!item || item.type !== 'album' || !Array.isArray(item.tracks)) return null;
+    if (!Number.isInteger(trackIndex) || trackIndex < 0 || trackIndex >= item.tracks.length) return null;
+    const track = item.tracks[trackIndex];
+    if (!track || !track.file) return null;
+    if (!item.filePath) return null;
+    const fullPath = path.join(this._libraryPath, item.filePath, track.file);
+    if (!this._isPathSafe(fullPath)) return null;
+    if (!fs.existsSync(fullPath)) return null;
+    return fullPath;
+  }
+
   // ─── Music-specific helpers ─────────────────────
 
   setMusicGenre(id, genre) {
@@ -3170,6 +3205,13 @@ class LibraryManager {
     engine.on('ready', async () => {
       tm.clear();
 
+      // Music album branch: audio torrents contain multiple tracks rather
+      // than one dominant video file. Select every safe audio file and
+      // watch them collectively for completion.
+      if (item.type === 'album') {
+        return this._startMusicAlbumFromEngine(id, engine, itemDir);
+      }
+
       // Find the best video file
       const file = this._selectVideoFile(engine.files);
       if (!file) {
@@ -3261,6 +3303,111 @@ class LibraryManager {
       this._saveMetadata();
       this._processQueue();
     });
+  }
+
+  // Music album variant of the post-ready download branch. Selects every
+  // safe audio file in the torrent, tracks collective completion, then
+  // scans the item folder to build tracks[] metadata when done. Skips the
+  // video codec/remux/worker-transcode pipeline entirely.
+  async _startMusicAlbumFromEngine(id, engine, itemDir) {
+    const item = this._items.get(id);
+    if (!item) { this._destroyEngine(engine); return; }
+
+    const audioFiles = engine.files.filter(f => isFileNameSafe(f.name, 'audio'));
+    if (!audioFiles.length) {
+      item.status = 'failed';
+      item.error = 'No audio files found in torrent';
+      this._stopDownload(id);
+      this._saveMetadata();
+      this._processQueue();
+      return;
+    }
+
+    const totalBytes = audioFiles.reduce((n, f) => n + (f.length || 0), 0);
+    const space = await this._checkFreeSpace(totalBytes, `music "${item.name}"`);
+    if (!space.ok) {
+      console.error(`[Library] ${space.reason}`);
+      item.status = 'failed';
+      item.error = space.reason;
+      this._stopDownload(id);
+      this._saveMetadata();
+      this._processQueue();
+      return;
+    }
+
+    for (const f of engine.files) {
+      if (audioFiles.includes(f)) f.select();
+      else f.deselect();
+    }
+
+    // Sort by filename so track ordering reflects the usual "01 - …, 02 - …"
+    // naming convention torrents use. Fall back to natural locale order.
+    audioFiles.sort((a, b) => (a.name || '').localeCompare(b.name || '', undefined, { numeric: true }));
+
+    // itemDir is the folder torrent-stream writes to.
+    const itemDirRel = path.relative(this._libraryPath, itemDir);
+    item.filePath = itemDirRel; // Pointing at the directory, not a single file.
+    item.fileName = path.basename(audioFiles[0].name);
+    item.fileSize = totalBytes;
+    item.tracks = audioFiles.map((f, i) => ({
+      position: i + 1,
+      file: f.path,
+      title: this._prettifyTrackName(path.basename(f.name)),
+      duration: null,
+      fileSize: f.length,
+    }));
+    this._saveMetadata();
+
+    console.log(`[Library] Downloading album "${item.name}": ${audioFiles.length} tracks, ${(totalBytes / 1e6).toFixed(0)}MB`);
+
+    const progressTimer = setInterval(() => {
+      if (!this._engines.has(id)) {
+        clearInterval(progressTimer);
+        return;
+      }
+      const sw = engine.swarm;
+      item.downloadSpeed = sw ? sw.downloadSpeed() : 0;
+      item.numPeers = sw ? sw.wires.length : 0;
+
+      let completedBytes = 0;
+      let allComplete = true;
+      for (const f of audioFiles) {
+        const { progressPct, isComplete } = computeFileProgress(engine, f);
+        completedBytes += (f.length || 0) * (progressPct / 100);
+        if (!isComplete) allComplete = false;
+      }
+      item.progress = totalBytes > 0 ? Math.min(100, Math.round((completedBytes / totalBytes) * 100)) : 0;
+
+      if (allComplete) {
+        // Re-map tracks[] indices to match engine.files indices so /stream?fileIdx
+        // on a served torrent (or on a library path) resolves reliably.
+        item.tracks = audioFiles.map((f, i) => ({
+          position: i + 1,
+          file: f.path,
+          title: this._prettifyTrackName(path.basename(f.name)),
+          duration: null,
+          fileSize: f.length,
+        }));
+        item.status = 'complete';
+        item.completedAt = Date.now();
+        item.downloadSpeed = 0;
+        console.log(`[Library] Music album complete: "${item.name}" (${audioFiles.length} tracks)`);
+        this._stopDownload(id);
+        this._saveMetadata();
+        this._processQueue();
+      }
+    }, PROGRESS_POLL_INTERVAL);
+
+    this._progressTimers.set(id, progressTimer);
+  }
+
+  // "01 - Everything In Its Right Place.mp3" → "Everything In Its Right Place"
+  _prettifyTrackName(filename) {
+    const base = filename.replace(/\.[a-z0-9]+$/i, '');
+    return base
+      .replace(/^\s*\d+\s*[-._)]\s*/, '')
+      .replace(/[_]+/g, ' ')
+      .trim();
   }
 
   _stopDownload(id) {
@@ -4387,6 +4534,9 @@ class LibraryManager {
   async _checkAndConvert(id) {
     const item = this._items.get(id);
     if (!item || item.status !== 'complete' || !item.filePath) return;
+    // Music albums don't get transcoded — the audio pipeline has a
+    // lossy-only whitelist, so every file is already browser-playable.
+    if (item.type === 'album') return;
 
     const fullPath = path.join(this._libraryPath, item.filePath);
     if (!fs.existsSync(fullPath)) return;

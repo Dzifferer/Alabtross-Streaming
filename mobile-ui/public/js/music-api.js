@@ -91,8 +91,9 @@
   // ─── Library (music items) ─────────────────────────
 
   async function getLibrary() {
-    const data = await json('/api/library');
-    return (data.items || []).filter(i => i.type === 'album' || i.type === 'artist');
+    // Music library is now a separate disk path + metadata file.
+    const data = await json('/api/music-library');
+    return data.items || [];
   }
 
   async function getGenres() {

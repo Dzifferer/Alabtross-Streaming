@@ -3651,6 +3651,16 @@
       </div>`;
     }
 
+    // "Find missing" opens the original source torrent for every pack in this
+    // group and registers any episodes that aren't already tracked as items,
+    // preserving files that are already complete on disk.
+    const findMissingBtn = collectGroupPackIds(groupData).length > 0
+      ? `<button class="library-overlay-find-missing" title="Re-check the original torrent and download any missing episodes">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+          <span>Find missing</span>
+        </button>`
+      : '';
+
     overlay.innerHTML = `
       <div class="library-group-overlay-header">
         <button class="library-group-overlay-back" aria-label="Back">
@@ -3659,9 +3669,15 @@
           </svg>
         </button>
         <span class="library-group-overlay-title">${name}</span>
+        ${findMissingBtn}
       </div>
       ${bodyHtml}
     `;
+
+    const findMissingEl = overlay.querySelector('.library-overlay-find-missing');
+    if (findMissingEl) {
+      findMissingEl.addEventListener('click', () => findMissingForGroup(groupData, findMissingEl));
+    }
 
     overlay.classList.remove('hidden');
     dom.libraryContent.classList.add('hidden');
@@ -3837,6 +3853,74 @@
     }
     _showOverlayTitleMap = null;
     dom.libraryContent.classList.remove('hidden');
+  }
+
+  // Collect unique packIds across every library item in a group (show seasons
+  // or movie collection/genre). Items created by manual single-file imports
+  // have no packId and are skipped.
+  function collectGroupPackIds(groupData) {
+    const ids = new Set();
+    if (!groupData) return [];
+    if (groupData.type === 'show') {
+      for (const s of groupData.seasons || []) {
+        for (const ep of s.episodes || []) {
+          if (ep.packId) ids.add(ep.packId);
+        }
+      }
+    } else if (Array.isArray(groupData.movies)) {
+      for (const m of groupData.movies) {
+        if (m.packId) ids.add(m.packId);
+      }
+    }
+    return [...ids];
+  }
+
+  // Re-open the source torrent for every pack in this group. The server
+  // preserves already-complete items and registers any files from the
+  // torrent that aren't yet tracked, so gaps in a previously-downloaded
+  // pack get filled in.
+  async function findMissingForGroup(groupData, btn) {
+    const packIds = collectGroupPackIds(groupData);
+    if (packIds.length === 0) {
+      showToast('No pack source info for this group');
+      return;
+    }
+    const originalHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<span>Checking…</span>';
+
+    let added = 0;
+    let errors = 0;
+    for (const packId of packIds) {
+      try {
+        const r = await fetch('/api/library/restart-pack', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ packId }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) { errors++; continue; }
+        if (Array.isArray(data.items)) {
+          added += data.items.filter(i => i.status === 'started').length;
+        }
+      } catch {
+        errors++;
+      }
+    }
+
+    btn.disabled = false;
+    btn.innerHTML = originalHtml;
+
+    if (added > 0) {
+      showToast(`Downloading ${added} missing ${added === 1 ? 'episode' : 'episodes'}`);
+    } else if (errors > 0) {
+      showToast('Could not re-check source torrent');
+    } else {
+      showToast('No missing episodes found');
+    }
+
+    hideLibraryGroupOverlay();
+    loadLibrary();
   }
 
   function showManualImportModal() {

@@ -17,6 +17,15 @@ const MB_BASE = 'https://musicbrainz.org/ws/2';
 const CAA_BASE = 'https://coverartarchive.org';
 const UA = 'AlabtrossStreaming/1.0 (https://github.com/Dzifferer/alabtross-streaming)';
 
+// Covers are returned as proxied paths (/api/cover/release/...) instead of
+// the direct coverartarchive.org URL. coverartarchive 307-redirects to
+// archive.org which is slow and flaky over VPN; our server proxy caches
+// the bytes and sets a long Cache-Control so cards paint instantly on the
+// second load.
+function coverProxyUrl(releaseMbid, size = 500) {
+  return `/api/cover/release/${releaseMbid}?size=${size}`;
+}
+
 // Serial queue — MusicBrainz rate limits to ~1 req/s per IP.
 const MIN_INTERVAL_MS = 1100;
 let _lastCall = 0;
@@ -112,7 +121,7 @@ async function mbSearchRelease(query, limit = 15) {
     country: r.country || '',
     trackCount: (r['track-count'] !== undefined) ? r['track-count'] : (r.media && r.media.reduce((n, m) => n + (m['track-count'] || 0), 0)) || 0,
     score: r.score || 0,
-    coverUrl: `${CAA_BASE}/release/${r.id}/front-500`,
+    coverUrl: coverProxyUrl(r.id, 500),
   }));
 }
 
@@ -162,7 +171,7 @@ async function mbGetRelease(mbid) {
     genres: genres.length ? genres : rgGenres,
     primaryType: rg['primary-type'] || '',
     tracks,
-    coverUrl: `${CAA_BASE}/release/${mbid}/front-500`,
+    coverUrl: coverProxyUrl(mbid, 500),
   };
 }
 
@@ -218,7 +227,7 @@ async function mbGetReleaseForGroup(releaseGroupMbid) {
 }
 
 function mbGetCoverArt(releaseMbid, size = 500) {
-  return `${CAA_BASE}/release/${releaseMbid}/front-${size}`;
+  return coverProxyUrl(releaseMbid, size);
 }
 
 module.exports = {

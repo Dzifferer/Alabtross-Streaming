@@ -23,6 +23,19 @@ const DEFAULT_MAX_CONCURRENT_DOWNLOADS = 5;
 const METADATA_SAVE_INTERVAL = 30 * 1000; // Save metadata every 30s during active downloads
 const PROGRESS_POLL_INTERVAL = 3000; // 3s — matches frontend poll cadence
 
+// Funnel Cover Art Archive URLs through our own caching proxy so the client
+// doesn't have to follow the archive.org redirect chain on every page load
+// (which is the main reason album covers feel slow).
+// Matches: https://coverartarchive.org/release/<mbid>/front[-<size>]
+const _CAA_RE = /^https?:\/\/coverartarchive\.org\/release\/([0-9a-f-]{36})\/front(?:-(\d+))?(?:\.(?:jpg|jpeg|png))?$/i;
+function rewriteCoverUrl(url) {
+  if (!url || typeof url !== 'string') return url || '';
+  const m = url.match(_CAA_RE);
+  if (!m) return url;
+  const size = m[2] || '500';
+  return `/api/cover/release/${m[1]}?size=${size}`;
+}
+
 // Optional ffmpeg hwaccel (e.g. 'cuda', 'nvdec', 'v4l2m2m'). On Jetson Orin
 // Nano this offloads the DECODE side of a transcode to NVDEC; the encode
 // stays on libx264 because the SoC has no NVENC. Opt-in because stock
@@ -5498,7 +5511,7 @@ class LibraryManager {
 
   _sanitizeItem(item) {
     const matchState = item.matchState || this._computeMatchState(item);
-    return {
+    const base = {
       id: item.id,
       imdbId: item.imdbId,
       type: item.type,
@@ -5529,6 +5542,24 @@ class LibraryManager {
       parsed: item.parsed || null,
       candidates: Array.isArray(item.candidates) ? item.candidates : [],
     };
+    // Music items (type: 'album' / 'artist') carry metadata that the video
+    // schema doesn't know about — tracklist, cover art, MBIDs, favorite
+    // state, per-user genre override. These must flow through to the
+    // client or the album detail view renders with no songs.
+    if (item.type === 'album' || item.type === 'artist') {
+      base.mbid = item.mbid || null;
+      base.artistMbid = item.artistMbid || null;
+      base.artist = item.artist || '';
+      base.title = item.title || item.name || '';
+      base.coverUrl = rewriteCoverUrl(item.coverUrl || '');
+      base.genres = Array.isArray(item.genres) ? item.genres : [];
+      base.manualOverride = item.manualOverride || {};
+      base.tracks = Array.isArray(item.tracks) ? item.tracks : [];
+      base.playCount = item.playCount || 0;
+      base.lastPlayedAt = item.lastPlayedAt || null;
+      base.favorite = !!item.favorite;
+    }
+    return base;
   }
 
   _safeDirectoryName(item) {

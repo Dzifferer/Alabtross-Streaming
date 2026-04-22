@@ -1466,7 +1466,7 @@ async function searchCandidates(kind, query, yearHint, extIdCache) {
  * auto-applies if confidence ≥ AUTO_MATCH_THRESHOLD, otherwise stores the
  * top candidates for the UI.
  */
-const AUTO_MATCH_THRESHOLD = 0.70;
+const AUTO_MATCH_THRESHOLD = 0.65;
 
 async function autoMatchOne(item, extIdCache) {
   // Respect user locks.

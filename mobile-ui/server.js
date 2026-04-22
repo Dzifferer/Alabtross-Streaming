@@ -2963,6 +2963,56 @@ app.post('/api/library/restart-pack', rateLimit, async (req, res) => {
   }
 });
 
+// POST /api/library/find-missing-show — find missing episodes for a tracked
+// show that has no original pack torrent (e.g. disk-discovered items, or an
+// old import where packId was never set). Searches for a complete series pack
+// by imdbId, picks the best result, and hands it to addSeasonPack — which
+// now dedupes by (imdbId, season, episode) so episodes we already have on
+// disk are not re-downloaded.
+app.post('/api/library/find-missing-show', rateLimit, express.json(), async (req, res) => {
+  const { imdbId } = req.body || {};
+  let { title, year, poster } = req.body || {};
+
+  if (!imdbId || !/^tt\d+$/.test(imdbId)) {
+    return res.status(400).json({ error: 'Valid imdbId is required' });
+  }
+
+  // Fill missing title/year/poster from an existing library item for this show.
+  if (!title || !poster) {
+    const existing = library.getAll().find(i => i.imdbId === imdbId);
+    if (existing) {
+      title = title || existing.showName || existing.name;
+      year = year || existing.year;
+      poster = poster || existing.poster;
+    }
+  }
+  if (!title) return res.status(400).json({ error: 'title is required (none inferred from existing items)' });
+
+  try {
+    const streams = await getCompleteStreams(title, imdbId);
+    if (!streams || streams.length === 0) {
+      return res.status(404).json({ error: 'No complete pack found for this show' });
+    }
+    const top = streams[0];
+    const result = await library.addSeasonPack({
+      imdbId,
+      name: title,
+      poster: poster || '',
+      year: year || '',
+      magnetUri: top.magnetUri,
+      infoHash: top.infoHash,
+      quality: top.quality || '',
+      size: top.size || '',
+      season: 0,
+    });
+    const started = (result.items || []).filter(i => i.status === 'started').length;
+    res.json({ started, pack: { title: top.title, infoHash: top.infoHash, size: top.size }, result });
+  } catch (err) {
+    console.error('[API] Find-missing-show error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // DELETE /api/library/:id — remove item from library
 app.delete('/api/library/:id', rateLimit, (req, res) => {
   const removed = library.removeItem(req.params.id);

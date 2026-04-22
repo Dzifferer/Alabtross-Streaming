@@ -3651,11 +3651,16 @@
       </div>`;
     }
 
-    // "Find missing" opens the original source torrent for every pack in this
-    // group and registers any episodes that aren't already tracked as items,
-    // preserving files that are already complete on disk.
-    const findMissingBtn = collectGroupPackIds(groupData).length > 0
-      ? `<button class="library-overlay-find-missing" title="Re-check the original torrent and download any missing episodes">
+    // "Find missing" tries to fill in gaps for this show. If any item in the
+    // group has a packId we reopen the original source torrent(s); otherwise
+    // — for shows that were disk-discovered or imported without a pack — we
+    // search for a complete series pack by imdbId and add it. The server
+    // dedupes by (imdbId, season, episode) so episodes already on disk are
+    // not re-downloaded.
+    const hasPackSource = collectGroupPackIds(groupData).length > 0;
+    const hasImdbMatch = groupData.type === 'show' && groupData.imdbId && /^tt\d+$/.test(groupData.imdbId);
+    const findMissingBtn = (hasPackSource || hasImdbMatch)
+      ? `<button class="library-overlay-find-missing" title="Download any episodes missing from this show">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
           <span>Find missing</span>
         </button>`
@@ -3881,8 +3886,9 @@
   // pack get filled in.
   async function findMissingForGroup(groupData, btn) {
     const packIds = collectGroupPackIds(groupData);
-    if (packIds.length === 0) {
-      showToast('No pack source info for this group');
+    const hasImdb = groupData && groupData.imdbId && /^tt\d+$/.test(groupData.imdbId);
+    if (packIds.length === 0 && !hasImdb) {
+      showToast('Match this show to IMDb first');
       return;
     }
     const originalHtml = btn.innerHTML;
@@ -3891,6 +3897,8 @@
 
     let added = 0;
     let errors = 0;
+
+    // Preferred path: reopen original source torrent(s) for any tracked pack.
     for (const packId of packIds) {
       try {
         const r = await fetch('/api/library/restart-pack', {
@@ -3908,14 +3916,44 @@
       }
     }
 
+    // Fallback path: no pack source. Search providers for a complete series
+    // pack by imdbId and add it. Server dedupes by (imdbId, season, episode)
+    // so episodes already on disk are not re-downloaded.
+    if (packIds.length === 0 && hasImdb) {
+      try {
+        const r = await fetch('/api/library/find-missing-show', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            imdbId: groupData.imdbId,
+            title: groupData.name,
+            year: groupData.year,
+            poster: groupData.poster,
+          }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (r.ok) {
+          added += data.started || 0;
+        } else if (r.status === 404) {
+          showToast('No complete pack found for this show');
+        } else {
+          errors++;
+        }
+      } catch {
+        errors++;
+      }
+    }
+
     btn.disabled = false;
     btn.innerHTML = originalHtml;
 
     if (added > 0) {
       showToast(`Downloading ${added} missing ${added === 1 ? 'episode' : 'episodes'}`);
     } else if (errors > 0) {
-      showToast('Could not re-check source torrent');
-    } else {
+      showToast('Could not find missing episodes');
+    } else if (packIds.length > 0 || hasImdb) {
+      // Only say "no missing" when we actually ran a check — the no-match
+      // case above already showed its own toast.
       showToast('No missing episodes found');
     }
 

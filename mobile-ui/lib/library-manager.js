@@ -1038,6 +1038,23 @@ class LibraryManager {
             ? `${imdbId}_s${seasonNum}e${episodeNum}_${infoHash.slice(0, 8)}`
             : `${imdbId}_pack_${infoHash.slice(0, 8)}_${path.basename(file.name, path.extname(file.name)).replace(/[^\w]/g, '_').slice(0, 30)}`;
 
+          // Broad dedup: skip this file if we already have a tracked item for
+          // the same (imdbId, season, episode) from ANY source. Without this,
+          // find-missing using a different torrent would re-download every
+          // episode we already have and create duplicate entries.
+          if (imdbId && episodeNum) {
+            const existingAcrossSources = [...this._items.values()].find(x =>
+              x.imdbId === imdbId
+              && x.season === seasonNum
+              && x.episode === episodeNum
+              && (x.status === 'complete' || x.status === 'downloading')
+            );
+            if (existingAcrossSources) {
+              createdItems.push({ id: existingAcrossSources.id, status: 'already_exists', episode: episodeNum });
+              continue;
+            }
+          }
+
           // Skip if already in library
           if (this._items.has(itemId)) {
             const existing = this._items.get(itemId);

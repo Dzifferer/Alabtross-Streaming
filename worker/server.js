@@ -20,13 +20,13 @@
  *   X-Source-Codec        (optional) source video codec hint, skips probe
  *   X-Source-Audio        (optional) source audio codec hint
  *   X-Source-Audio-Copy   (optional) "1" → stream-copy audio (skip re-encode)
- *   X-Worker-Secret       (required — must match WORKER_SECRET on this worker)
+ *   X-Worker-Secret       (required iff WORKER_SECRET is set)
  *
  * Environment:
  *   WORKER_PORT     port to listen on               (default 8090)
  *   WORKER_HOST     bind address                    (default 0.0.0.0)
  *   WORKER_TEMP     scratch dir for in-flight files (default %TEMP%\alabtross-worker)
- *   WORKER_SECRET   shared secret for X-Worker-Secret header (REQUIRED — worker refuses to start without it)
+ *   WORKER_SECRET   shared secret for X-Worker-Secret header (default empty = no auth)
  *   FFMPEG_PATH     path to ffmpeg.exe              (default 'ffmpeg' from PATH)
  *   FFPROBE_PATH    path to ffprobe.exe             (default 'ffprobe' from PATH)
  *   NVENC_PRESET    NVENC quality preset p1..p7     (default 'p6')
@@ -36,9 +36,8 @@
  *   AUDIO_BITRATE   AAC bitrate when re-encoding    (default '192k')
  *
  * The Tailscale tunnel is mutually authenticated and end-to-end encrypted,
- * but WORKER_SECRET is required as a second layer so that any process with
- * network reach to this port (e.g. LAN access, another tailnet node) still
- * can't spend GPU cycles without the shared secret.
+ * so plain HTTP over the tailnet is fine. Set WORKER_SECRET if you want a
+ * second layer.
  */
 
 const http = require('http');
@@ -54,8 +53,7 @@ const HOST          = process.env.WORKER_HOST || '0.0.0.0';
 const TEMP_DIR      = process.env.WORKER_TEMP || path.join(os.tmpdir(), 'alabtross-worker');
 const SECRET        = process.env.WORKER_SECRET || '';
 if (!SECRET) {
-  console.error('[worker] WORKER_SECRET is required. Generate one (e.g. `openssl rand -hex 32`) and set it on both this worker and the server it talks to.');
-  process.exit(1);
+  console.warn('[worker] WORKER_SECRET is empty — running without auth. Set WORKER_SECRET for an extra layer on top of Tailscale.');
 }
 const FFMPEG        = process.env.FFMPEG_PATH || 'ffmpeg';
 const FFPROBE       = process.env.FFPROBE_PATH || 'ffprobe';
@@ -221,8 +219,9 @@ function buildFfmpegArgs(inputPath, outputPath, sourceCodec, audioCopy) {
   return args;
 }
 
-const SECRET_BUF = Buffer.from(SECRET);
+const SECRET_BUF = SECRET ? Buffer.from(SECRET) : null;
 function checkAuth(req) {
+  if (!SECRET) return true;
   const provided = req.headers['x-worker-secret'];
   if (typeof provided !== 'string' || provided.length !== SECRET.length) return false;
   try {

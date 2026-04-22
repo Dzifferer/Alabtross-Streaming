@@ -3841,101 +3841,99 @@ class LibraryManager {
     const trackedPaths = new Set(
       [...this._items.values()]
         .filter(i => i.filePath)
-        .map(i => i.filePath)
+        .map(i => path.normalize(i.filePath))
     );
 
-    try {
-      const entries = fs.readdirSync(this._libraryPath, { withFileTypes: true });
+    // Files smaller than this are almost always samples/trailers/featurettes
+    // shipped alongside the real content. Skipping them stops the review
+    // queue from being drowned in noise on the first scan of a big library.
+    const MIN_VIDEO_SIZE = 50 * 1024 * 1024;
+    const MAX_DEPTH = 6;
+    const MAX_DISCOVERED = 5000;
+
+    const buildItem = (relPath, stat) => {
+      const fileName = path.basename(relPath);
+      const dirName  = path.dirname(relPath);
+      // Prefer the inner-file parse (has codec/quality hints), but fall back
+      // to the enclosing directory name for torrents that store the real
+      // title on the folder and a generic "video.mkv" inside.
+      const innerParsed = this.parseFileName(fileName);
+      const needsDirFallback = !innerParsed.title && !innerParsed.show;
+      const dirHint = dirName && dirName !== '.' ? path.basename(dirName) : null;
+      const parsed = needsDirFallback && dirHint ? this.parseFileName(dirHint) : innerParsed;
+      const displayName = parsed.type === 'series'
+        ? (parsed.show || parsed.episodeName || fileName)
+        : (parsed.title || parsed.episodeName || fileName);
+      return {
+        id: 'disk_' + relPath,
+        name: displayName,
+        showName: parsed.type === 'series' ? parsed.show : null,
+        type: parsed.type,
+        year: parsed.year || '',
+        season: parsed.season,
+        episode: parsed.episode,
+        status: 'complete',
+        filePath: relPath,
+        fileName,
+        fileSize: stat.size,
+        addedAt: stat.mtimeMs,
+        matchState: 'unmatched',
+        matchConfidence: 0,
+        parsed,
+        imdbId: null,
+      };
+    };
+
+    const walk = (absDir, relDir, depth) => {
+      if (discovered.length >= MAX_DISCOVERED) return;
+      if (depth > MAX_DEPTH) return;
+
+      let entries;
+      try {
+        entries = fs.readdirSync(absDir, { withFileTypes: true });
+      } catch (err) {
+        if (depth === 0) console.error(`[Library] Disk scan error: ${err.message}`);
+        return;
+      }
 
       for (const entry of entries) {
-        if (entry.name.startsWith('_metadata')) continue;
-        if (entry.name === this._torrentCacheName) continue;
-        if (entry.name.endsWith('.tmp')) continue;
+        if (discovered.length >= MAX_DISCOVERED) return;
 
-        const entryPath = path.join(this._libraryPath, entry.name);
-
-        if (entry.isFile()) {
-          const ext = path.extname(entry.name).toLowerCase();
-          if (!VIDEO_EXTENSIONS.has(ext)) continue;
-          if (trackedPaths.has(entry.name)) continue;
-
-          const stat = fs.statSync(entryPath);
-          const parsed = this.parseFileName(entry.name);
-          // Prefer TMDB-ready title / show name over raw filename.
-          const displayName = parsed.type === 'series'
-            ? (parsed.show || parsed.episodeName || entry.name)
-            : (parsed.title || parsed.episodeName || entry.name);
-          discovered.push({
-            id: 'disk_' + entry.name,
-            name: displayName,
-            showName: parsed.type === 'series' ? parsed.show : null,
-            type: parsed.type,
-            year: parsed.year || '',
-            season: parsed.season,
-            episode: parsed.episode,
-            status: 'complete',
-            filePath: entry.name,
-            fileName: entry.name,
-            fileSize: stat.size,
-            addedAt: stat.mtimeMs,
-            matchState: 'unmatched',
-            matchConfidence: 0,
-            parsed,
-            imdbId: null,
-          });
-        } else if (entry.isDirectory()) {
-          // Scan subdirectory for video files
-          try {
-            const subFiles = fs.readdirSync(entryPath);
-            let bestVideo = null;
-            let bestSize = 0;
-            for (const f of subFiles) {
-              const ext = path.extname(f).toLowerCase();
-              if (!VIDEO_EXTENSIONS.has(ext)) continue;
-              const relPath = path.join(entry.name, f);
-              if (trackedPaths.has(relPath)) continue;
-              const stat = fs.statSync(path.join(entryPath, f));
-              if (stat.size > bestSize) {
-                bestVideo = { name: f, relPath, size: stat.size, mtime: stat.mtimeMs };
-                bestSize = stat.size;
-              }
-            }
-            if (bestVideo && !trackedPaths.has(bestVideo.relPath)) {
-              // Parse against the inner file (carries codec/quality hints)
-              // but fall back to the containing directory name if the inner
-              // parse returns nothing usable.
-              const innerParsed = this.parseFileName(bestVideo.name);
-              const dirParsed = this.parseFileName(entry.name);
-              const useDir = !innerParsed.title && !innerParsed.show;
-              const parsed = useDir ? dirParsed : innerParsed;
-              const displayName = parsed.type === 'series'
-                ? (parsed.show || parsed.episodeName || entry.name)
-                : (parsed.title || parsed.episodeName || entry.name);
-              discovered.push({
-                id: 'disk_' + bestVideo.relPath,
-                name: displayName,
-                showName: parsed.type === 'series' ? parsed.show : null,
-                type: parsed.type,
-                year: parsed.year || '',
-                season: parsed.season,
-                episode: parsed.episode,
-                status: 'complete',
-                filePath: bestVideo.relPath,
-                fileName: bestVideo.name,
-                fileSize: bestVideo.size,
-                addedAt: bestVideo.mtime,
-                matchState: 'unmatched',
-                matchConfidence: 0,
-                parsed,
-                imdbId: null,
-              });
-            }
-          } catch { /* skip unreadable dirs */ }
+        // Skip internal bookkeeping at the library root.
+        if (depth === 0) {
+          if (entry.name.startsWith('_metadata')) continue;
+          if (entry.name === this._torrentCacheName) continue;
         }
+        if (entry.name.endsWith('.tmp')) continue;
+        if (entry.name.startsWith('.')) continue; // hidden / .Trash / .DS_Store
+
+        const absPath = path.join(absDir, entry.name);
+        const relPath = relDir ? path.join(relDir, entry.name) : entry.name;
+
+        if (entry.isDirectory()) {
+          walk(absPath, relPath, depth + 1);
+          continue;
+        }
+        if (!entry.isFile()) continue;
+
+        const ext = path.extname(entry.name).toLowerCase();
+        if (!VIDEO_EXTENSIONS.has(ext)) continue;
+
+        const normRel = path.normalize(relPath);
+        if (trackedPaths.has(normRel)) continue;
+        // Also match legacy tracked entries that stored just a basename.
+        if (trackedPaths.has(entry.name)) continue;
+
+        let stat;
+        try { stat = fs.statSync(absPath); }
+        catch { continue; }
+        if (stat.size < MIN_VIDEO_SIZE) continue;
+
+        discovered.push(buildItem(relPath, stat));
       }
-    } catch (err) {
-      console.error(`[Library] Disk scan error: ${err.message}`);
-    }
+    };
+
+    walk(this._libraryPath, '', 0);
 
     if (discovered.length > 0) {
       console.log(`[Library] Discovered ${discovered.length} untracked file(s) on disk`);

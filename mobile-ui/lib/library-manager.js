@@ -1430,7 +1430,7 @@ class LibraryManager {
     if (/S\d+\s*E\d+/i.test(base)) return true;
     if (/\b\d{1,2}x\d{1,3}\b/i.test(base)) return true;
     if (/\bE\d{1,3}\b/i.test(base)) return true;
-    if (/\bEpisode\s*\d+/i.test(base)) return true;
+    if (/\bepisode\b/i.test(base)) return true;
     // Anime " - 012" convention, rejecting year-like numbers
     if (/[-–]\s*(?!(?:19|20)\d{2}\b)\d{2,4}\b/.test(base)) return true;
     return false;

@@ -63,6 +63,173 @@
     } catch { /* ignore quota errors */ }
   }
 
+  // ─── Resume Playback (video progress) ────────────
+  // Remember where the user was watching each video so playback can pick
+  // up after a disconnection, a manual exit, or a tab close. A single
+  // localStorage entry holds an object keyed by a stable source identifier
+  // (torrent infoHash+fileIdx, library item id, or direct URL). Each entry
+  // stores { time, duration, updatedAt, title }. Saves are throttled to
+  // once every few seconds during playback plus forced saves on pause,
+  // visibilitychange, and beforeunload.
+  const RESUME_STORAGE_KEY = 'video_progress_v1';
+  const RESUME_MIN_SECONDS = 10;       // ignore resumes for first few seconds
+  const RESUME_NEAR_END_SECONDS = 30;  // treat last 30s as "finished"
+  const RESUME_SAVE_THROTTLE_MS = 5000;
+  const RESUME_MAX_ENTRIES = 200;
+
+  function loadResumeStore() {
+    try {
+      const raw = localStorage.getItem(RESUME_STORAGE_KEY);
+      if (!raw) return {};
+      const parsed = JSON.parse(raw);
+      return (parsed && typeof parsed === 'object') ? parsed : {};
+    } catch { return {}; }
+  }
+
+  function writeResumeStore(store) {
+    try {
+      const keys = Object.keys(store);
+      if (keys.length > RESUME_MAX_ENTRIES) {
+        keys.sort((a, b) => (store[a].updatedAt || 0) - (store[b].updatedAt || 0));
+        const removeCount = keys.length - RESUME_MAX_ENTRIES;
+        for (let i = 0; i < removeCount; i++) delete store[keys[i]];
+      }
+      localStorage.setItem(RESUME_STORAGE_KEY, JSON.stringify(store));
+    } catch { /* quota or serialization — drop silently */ }
+  }
+
+  function getResumeEntry(key) {
+    if (!key) return null;
+    const store = loadResumeStore();
+    return store[key] || null;
+  }
+
+  function saveResumeEntry(key, time, duration, meta) {
+    if (!key) return;
+    if (!Number.isFinite(time) || time < 0) return;
+    if (!Number.isFinite(duration) || duration <= 0) return;
+    const store = loadResumeStore();
+    store[key] = {
+      time,
+      duration,
+      updatedAt: Date.now(),
+      title: (meta && meta.title) || (store[key] && store[key].title) || '',
+    };
+    writeResumeStore(store);
+  }
+
+  function clearResumeEntry(key) {
+    if (!key) return;
+    const store = loadResumeStore();
+    if (store[key]) {
+      delete store[key];
+      writeResumeStore(store);
+    }
+  }
+
+  function resumeKeyForStream(stream) {
+    if (!stream) return null;
+    if (stream.infoHash) {
+      const idx = stream.fileIdx !== undefined && stream.fileIdx !== null ? stream.fileIdx : 'main';
+      return `torrent:${stream.infoHash}:${idx}`;
+    }
+    if (stream.url) return `url:${stream.url}`;
+    return null;
+  }
+
+  function resumeKeyForLibrary(id) {
+    if (!id) return null;
+    return `library:${id}`;
+  }
+
+  function shouldResume(entry, duration) {
+    if (!entry) return false;
+    const t = Number(entry.time);
+    if (!Number.isFinite(t) || t < RESUME_MIN_SECONDS) return false;
+    const dur = Number.isFinite(duration) && duration > 0 ? duration : entry.duration;
+    if (Number.isFinite(dur) && dur > 0 && t > dur - RESUME_NEAR_END_SECONDS) return false;
+    return true;
+  }
+
+  function formatResumeTimecode(secs) {
+    const s = Math.max(0, Math.floor(secs));
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const r = s % 60;
+    const pad = (n) => String(n).padStart(2, '0');
+    return h > 0 ? `${h}:${pad(m)}:${pad(r)}` : `${m}:${pad(r)}`;
+  }
+
+  // Seek the video element to a saved resume time if one exists and is
+  // worth resuming to. Intended to be called after the element has enough
+  // metadata to accept a seek (e.g. on loadedmetadata/canplay). Returns
+  // true if a seek was performed.
+  function applyResumeSeek(key) {
+    if (!key) return false;
+    const entry = getResumeEntry(key);
+    if (!shouldResume(entry, dom.videoPlayer.duration)) return false;
+    try {
+      dom.videoPlayer.currentTime = entry.time;
+      showToast(`Resumed at ${formatResumeTimecode(entry.time)}`);
+      return true;
+    } catch (e) {
+      console.warn('[resume] seek failed:', e);
+      return false;
+    }
+  }
+
+  // Attach listeners that persist the current playback position. Returns
+  // a detach function; pass false to skip the final save-on-detach.
+  let _resumeTrackerDetach = null;
+  function attachResumeTracker(key, meta) {
+    if (!key) return () => {};
+    const v = dom.videoPlayer;
+    let lastSaveAt = 0;
+
+    const persist = (force) => {
+      const dur = v.duration;
+      if (!Number.isFinite(dur) || dur <= 0) return;
+      if (v.currentTime <= 0.5) return; // ignore preload zero
+      const now = Date.now();
+      if (!force && now - lastSaveAt < RESUME_SAVE_THROTTLE_MS) return;
+      lastSaveAt = now;
+      // Past the near-end cutoff we treat it as done — clear instead of save.
+      if (v.currentTime > dur - RESUME_NEAR_END_SECONDS) {
+        clearResumeEntry(key);
+        return;
+      }
+      saveResumeEntry(key, v.currentTime, dur, meta);
+    };
+
+    const onTimeUpdate = () => persist(false);
+    const onPause = () => persist(true);
+    const onEnded = () => clearResumeEntry(key);
+    const onBeforeUnload = () => persist(true);
+    const onVisibility = () => { if (document.visibilityState === 'hidden') persist(true); };
+
+    v.addEventListener('timeupdate', onTimeUpdate);
+    v.addEventListener('pause', onPause);
+    v.addEventListener('ended', onEnded);
+    window.addEventListener('beforeunload', onBeforeUnload);
+    document.addEventListener('visibilitychange', onVisibility);
+
+    return function detach(saveOnDetach) {
+      if (saveOnDetach !== false) persist(true);
+      v.removeEventListener('timeupdate', onTimeUpdate);
+      v.removeEventListener('pause', onPause);
+      v.removeEventListener('ended', onEnded);
+      window.removeEventListener('beforeunload', onBeforeUnload);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }
+
+  function stopResumeTracker(saveOnDetach) {
+    if (_resumeTrackerDetach) {
+      try { _resumeTrackerDetach(saveOnDetach); } catch { /* ignore */ }
+      _resumeTrackerDetach = null;
+    }
+  }
+
   // ─── DOM Refs ────────────────────────────────────
 
   const $ = (sel) => document.querySelector(sel);
@@ -276,6 +443,7 @@
     // Stop video if leaving player
     if (state.currentView !== 'player') {
       state.playerStarted = false;
+      stopResumeTracker(true); // force a final save before we drop src
       clearUpNextOverlay();
       dom.videoPlayer.pause();
       dom.videoPlayer.src = '';
@@ -2142,6 +2310,7 @@
 
   async function playStream(stream) {
     if (_playStreamCleanup) { _playStreamCleanup(); _playStreamCleanup = null; }
+    stopResumeTracker(true); // save any in-progress position before switching
     clearUpNextOverlay();
 
     const url = api.getPlaybackUrl(stream);
@@ -2222,8 +2391,16 @@
       });
 
       if (statusInterval) clearInterval(statusInterval);
+      const resumeKey = resumeKeyForStream(stream);
+      if (resumeKey) applyResumeSeek(resumeKey);
       await dom.videoPlayer.play();
       openCurtains();
+
+      if (resumeKey) {
+        _resumeTrackerDetach = attachResumeTracker(resumeKey, {
+          title: (state.currentMeta && state.currentMeta.name) || '',
+        });
+      }
 
       // Mid-playback stall detection — re-show overlay during rebuffering
       const onStalled = () => {
@@ -2252,6 +2429,10 @@
         _endFired = true;
         if (_nearEndTimer) { clearTimeout(_nearEndTimer); _nearEndTimer = null; }
         console.log(`[autoplay] playback ended (${reason})`);
+        // Synthetic end-of-playback paths bypass the native 'ended' event,
+        // so clear the saved position here too — otherwise we'd offer to
+        // resume a finished video next time it's opened.
+        if (resumeKey) clearResumeEntry(resumeKey);
         handlePlaybackEnded();
       };
       const onEnded = () => fireEnded('ended-event');
@@ -4208,7 +4389,7 @@
   // (progress, loadedmetadata, suspend) and reset the stall timer on
   // each one. Only a genuinely stuck stream — no bytes received, no
   // metadata parsed, nothing — will actually time out.
-  function tryLibraryStream(url, action) {
+  function tryLibraryStream(url, action, resumeKey) {
     return new Promise((resolve, reject) => {
       const v = dom.videoPlayer;
 
@@ -4313,6 +4494,10 @@
         logEvent(e.type + ' (READY)');
         settled = true;
         cleanupListeners();
+        // Seek to saved position BEFORE play() so playback starts from the
+        // resume point without a visible jump. Ignored if no saved entry,
+        // duration unknown, or within the near-end cutoff.
+        if (resumeKey) applyResumeSeek(resumeKey);
         try {
           await v.play();
           resolve();
@@ -4386,11 +4571,17 @@
     const myGeneration = ++_libraryPlayGeneration;
     const isStale = () => _libraryPlayGeneration !== myGeneration;
 
+    // Flush any prior playback's position and detach its tracker so the
+    // upcoming attempt starts clean. (The fallback chain can rebuild src
+    // several times, and we only want one tracker attached at a time.)
+    stopResumeTracker(true);
+
     // Grab poster/title from the library card before we navigate away —
     // once we're on the player view, the library DOM is gone.
     const itemEl = dom.libraryContent.querySelector(`.card[data-id="${CSS.escape(id)}"]`);
     const libPoster = itemEl?.querySelector('.card-poster img')?.src || '';
     const libTitle = itemEl?.querySelector('.card-title')?.textContent || '';
+    const resumeKey = resumeKeyForLibrary(id);
 
     navigateTo('player');
     showCurtainOverlay({ poster: libPoster, title: libTitle, status: 'Checking file...' });
@@ -4510,9 +4701,12 @@
       }
 
       try {
-        await tryLibraryStream(endpoint, action);
+        await tryLibraryStream(endpoint, action, resumeKey);
         if (isStale()) return;
         openCurtains();
+        if (resumeKey) {
+          _resumeTrackerDetach = attachResumeTracker(resumeKey, { title: libTitle });
+        }
         return;
       } catch (e) {
         if (isStale()) return;

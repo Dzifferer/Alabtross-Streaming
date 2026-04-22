@@ -42,6 +42,7 @@ const {
 const { getSystemDiag } = require('./lib/system-diag');
 const { discoverDevices, getLocalIP } = require('./lib/local-discovery');
 const castManager = require('./lib/cast-manager');
+const { titleWordOverlap } = require('./lib/tmdb-scoring');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -1233,37 +1234,17 @@ async function lookupShowByName(showName) {
 }
 
 /**
- * Compute word-level overlap between two titles, normalized to lowercase and
- * stripped of punctuation. Returns the fraction of common words over the
- * larger of the two word counts — i.e. both "missing words" (query has more
- * than title) and "extra words" (title has more than query) drag the score
- * down. Used to sanity-check TMDB matches: a low overlap means the match is
- * a different movie that just happened to share a word.
- */
-function titleWordOverlap(a, b) {
-  const norm = s => (s || '')
-    .toLowerCase()
-    .replace(/[^\w\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .split(' ')
-    .filter(Boolean);
-  const wa = norm(a), wb = norm(b);
-  if (wa.length === 0 || wb.length === 0) return 0;
-  const common = wa.filter(w => wb.includes(w)).length;
-  return common / Math.max(wa.length, wb.length);
-}
-
-/**
  * Search TMDB for a movie by name (and optional year hint) and return the
  * best match's metadata. Like lookupShowByName, it progressively drops trailing
  * words if the full query doesn't produce a confident match. If the year-scoped
  * search comes up empty the query is retried without the year filter.
  *
  * Guards against wrong matches:
- *   1. Word-overlap floor (0.5): the match's title must share at least half
- *      its words with the cleaned query. Rejects e.g. "Avatar Fire and Ash"
- *      matching "Avatar: The Way of Water" (only "avatar" in common).
+ *   1. Query-word overlap floor (0.5): at least half of the query's words
+ *      must appear in the match's title. Rejects e.g. "Avatar Fire and Ash"
+ *      matching "Avatar: The Way of Water" (only "avatar" of 4 query words
+ *      present). Short franchise queries like "Harry Potter" still pass
+ *      against long subtitled titles because overlap is query-biased.
  *   2. Year delta (±2): if both a filename year hint and the TMDB release
  *      year are present and differ by more than 2 years, reject. Catches the
  *      case where TMDB returns a related movie from a different era.

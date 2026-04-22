@@ -2188,6 +2188,27 @@ app.get('/api/library/packs', rateLimit, (req, res) => {
   res.json({ packCount: out.length, packs: out });
 });
 
+// GET /api/library/review-queue — list every item that isn't a confirmed match.
+// Includes disk-discovered files that have never been matched.
+// Defined before `/:id` so Express does not match it as an item id.
+app.get('/api/library/review-queue', (req, res) => {
+  try {
+    const items = library.getReviewQueue();
+    // Sort worst (unmatched) first so the UI emphasises items with no options.
+    items.sort((a, b) => {
+      const rank = { unmatched: 0, needsReview: 1, matched: 2, manual: 3 };
+      const ra = rank[a.matchState] ?? 9;
+      const rb = rank[b.matchState] ?? 9;
+      if (ra !== rb) return ra - rb;
+      return (a.matchConfidence || 0) - (b.matchConfidence || 0);
+    });
+    res.json({ items, count: items.length });
+  } catch (err) {
+    console.error('[API] review-queue error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/library/:id', (req, res) => {
   const item = library.getItem(req.params.id);
   if (!item) return res.status(404).json({ error: 'Item not found' });
@@ -3076,26 +3097,7 @@ app.post('/api/library/:id/relink', rateLimit, (req, res) => {
 // Runs the unified filename parser → TMDB candidate search → auto-apply
 // at high confidence, else stash the top 5 candidates on the item so the
 // UI can render them as one-click options.
-
-// GET /api/library/review-queue — list every item that isn't a confirmed match.
-// Includes disk-discovered files that have never been matched.
-app.get('/api/library/review-queue', (req, res) => {
-  try {
-    const items = library.getReviewQueue();
-    // Sort worst (unmatched) first so the UI emphasises items with no options.
-    items.sort((a, b) => {
-      const rank = { unmatched: 0, needsReview: 1, matched: 2, manual: 3 };
-      const ra = rank[a.matchState] ?? 9;
-      const rb = rank[b.matchState] ?? 9;
-      if (ra !== rb) return ra - rb;
-      return (a.matchConfidence || 0) - (b.matchConfidence || 0);
-    });
-    res.json({ items, count: items.length });
-  } catch (err) {
-    console.error('[API] review-queue error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
+// (The GET /review-queue route lives above /:id to avoid the :id match.)
 
 // POST /api/library/:id/auto-match — run the auto-matcher on a single item.
 // Use this after editing the parsed query or after adding new torrents.

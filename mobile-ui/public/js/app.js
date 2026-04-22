@@ -4089,20 +4089,34 @@
       });
     });
 
-    // Section-header "Auto-match" button re-runs the pass.
+    // Section-header "Auto-match" button re-runs the pass. Paginates so
+    // libraries with more than one page worth of unmatched items all get
+    // checked in a single click.
     container.querySelectorAll('.library-review-run').forEach(btn => {
       btn.addEventListener('click', async (e) => {
         e.stopPropagation();
         btn.disabled = true;
         btn.textContent = 'Matching…';
+        const totals = { matched: 0, needsReview: 0 };
+        let offset = 0;
+        const MAX_PAGES = 50;
         try {
-          const resp = await fetch('/api/library/auto-match-all', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({}),
-          });
-          const data = await resp.json();
-          showToast(`Matched ${data.matched || 0}, ${data.needsReview || 0} need review`);
+          for (let page = 0; page < MAX_PAGES; page++) {
+            const resp = await fetch('/api/library/auto-match-all', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ offset }),
+            });
+            if (!resp.ok) throw new Error('Auto-match failed');
+            const data = await resp.json();
+            totals.matched     += data.matched     || 0;
+            totals.needsReview += data.needsReview || 0;
+            if (data.total) btn.textContent = `Matching ${Math.min(data.nextOffset, data.total)}/${data.total}…`;
+            if (!data.remaining || data.remaining <= 0) break;
+            if (typeof data.nextOffset !== 'number' || data.nextOffset <= offset) break;
+            offset = data.nextOffset;
+          }
+          showToast(`Matched ${totals.matched}, ${totals.needsReview} need review`);
           loadLibrary();
         } catch (err) {
           btn.disabled = false;
@@ -6132,19 +6146,43 @@
       const origLabel = label ? label.textContent : null;
       btn.disabled = true;
       if (label) label.textContent = 'Matching…';
+      // Loop through pages so libraries larger than the per-request cap
+      // (100 items) are fully processed. Without this, "total recheck"
+      // would only re-run against the first 100 items in the library.
+      const totals = { matched: 0, needsReview: 0, skipped: 0, errors: 0, processed: 0 };
+      let offset = 0;
+      const MAX_PAGES = 50;
       try {
-        const resp = await fetch('/api/library/auto-match-all', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ force: !!force }),
-        });
-        if (resp.status === 503) {
-          showToast('TMDB key not configured on server');
-          return;
+        for (let page = 0; page < MAX_PAGES; page++) {
+          const resp = await fetch('/api/library/auto-match-all', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ force: !!force, offset }),
+          });
+          if (resp.status === 503) {
+            showToast('TMDB key not configured on server');
+            return;
+          }
+          if (!resp.ok) throw new Error('Auto-match failed');
+          const data = await resp.json();
+          totals.matched     += data.matched     || 0;
+          totals.needsReview += data.needsReview || 0;
+          totals.skipped     += data.skipped     || 0;
+          totals.errors      += data.errors      || 0;
+          totals.processed   += data.processed   || 0;
+
+          if (label && data.total) {
+            label.textContent = `Matching ${Math.min(data.nextOffset, data.total)}/${data.total}…`;
+          }
+
+          // Advance. Stop when the server says nothing is left, or when it
+          // failed to advance (defensive: prevents an infinite loop if the
+          // response is missing pagination fields).
+          if (!data.remaining || data.remaining <= 0) break;
+          if (typeof data.nextOffset !== 'number' || data.nextOffset <= offset) break;
+          offset = data.nextOffset;
         }
-        if (!resp.ok) throw new Error('Auto-match failed');
-        const data = await resp.json();
-        showToast(`Matched ${data.matched || 0} · ${data.needsReview || 0} need review`);
+        showToast(`Matched ${totals.matched} · ${totals.needsReview} need review`);
         refreshLibraryBadge();
         // Only reload library view if user is currently on it
         const libView = document.getElementById('view-library');

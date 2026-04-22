@@ -268,6 +268,35 @@
         <div id="music-detail-content"></div>
       </div>
 
+      <!-- Library Selector View — shown when the bottom-nav Library tab is tapped -->
+      <div id="view-library-selector" class="view">
+        <div class="library-selector">
+          <button class="library-selector__card" data-selector-target="library">
+            <div class="library-selector__icon">
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="20" height="20" rx="2"/><path d="M7 2v20M17 2v20M2 12h20M2 7h5M2 17h5M17 17h5M17 7h5"/></svg>
+            </div>
+            <div class="library-selector__title">Video Library</div>
+            <div class="library-selector__sub" id="library-selector-video-count">Movies &amp; series</div>
+          </button>
+          <button class="library-selector__card" data-selector-target="music-library">
+            <div class="library-selector__icon">
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+            </div>
+            <div class="library-selector__title">Music Library</div>
+            <div class="library-selector__sub" id="library-selector-music-count">Albums</div>
+          </button>
+        </div>
+      </div>
+
+      <!-- Music Library View -->
+      <div id="view-music-library" class="view">
+        <div id="music-library-content" class="library-grid"></div>
+        <div id="music-library-empty" class="empty-state hidden">
+          <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+          <p>No albums added yet. Search for music in the Music tab.</p>
+        </div>
+      </div>
+
       <!-- Library View -->
       <div id="view-library" class="view">
         <div class="library-toolbar">

@@ -47,6 +47,11 @@ const app = express();
 const PORT = process.env.PORT || 8080;
 const TORRENT_CACHE_PATH = process.env.TORRENT_CACHE || path.join(__dirname, '.torrent-cache');
 const LIBRARY_PATH = process.env.LIBRARY_PATH || path.join(TORRENT_CACHE_PATH, 'library');
+// Music library defaults to a sibling folder on the same drive so music
+// albums don't commingle with movie folders on disk. Override with
+// MUSIC_LIBRARY_PATH if you want them elsewhere entirely.
+const MUSIC_LIBRARY_PATH = process.env.MUSIC_LIBRARY_PATH
+  || path.join(path.dirname(LIBRARY_PATH), 'music-library');
 const SETTINGS_PATH = path.join(TORRENT_CACHE_PATH, 'settings.json');
 
 // Optional ffmpeg hwaccel for the live transcode endpoint. Mirrors the
@@ -185,8 +190,18 @@ const library = new LibraryManager({
   diskReserveBytes: DISK_RESERVE_BYTES,
   maxConcurrentRemoteConversions: MAX_CONCURRENT_REMOTE_CONVERSIONS,
 });
+// Separate LibraryManager instance for music with its own _metadata.json.
+// Music items are type: 'album' and take a different completion path
+// internally (multi-file audio download, tracks[] scan, no video transcode).
+// Workers aren't useful for audio so it doesn't receive the worker config.
+fs.mkdirSync(MUSIC_LIBRARY_PATH, { recursive: true });
+const musicLibrary = new LibraryManager({
+  libraryPath: MUSIC_LIBRARY_PATH,
+  maxConcurrentDownloads: MAX_CONCURRENT_STREAMS,
+  diskReserveBytes: DISK_RESERVE_BYTES,
+});
 const MusicPlaylists = require('./lib/music-playlists');
-const musicPlaylists = new MusicPlaylists(LIBRARY_PATH);
+const musicPlaylists = new MusicPlaylists(MUSIC_LIBRARY_PATH);
 
 // Security headers
 app.use((req, res, next) => {
@@ -576,7 +591,7 @@ app.get('/api/mb-meta/:type/:mbid', rateLimit, async (req, res) => {
 // GET /api/library/music/genres — group album library items by genre
 app.get('/api/library/music/genres', (req, res) => {
   try {
-    res.json({ genres: library.getMusicGenres() });
+    res.json({ genres: musicLibrary.getMusicGenres() });
   } catch (err) {
     console.error('[Music] genres error:', err.message);
     res.status(500).json({ error: 'Failed to compute genres' });
@@ -587,7 +602,7 @@ app.get('/api/library/music/genres', (req, res) => {
 app.post('/api/library/music/:id/genre', rateLimit, express.json(), (req, res) => {
   const { id } = req.params;
   const genre = (req.body && req.body.genre) || '';
-  const ok = library.setMusicGenre(id, genre);
+  const ok = musicLibrary.setMusicGenre(id, genre);
   if (!ok) return res.status(404).json({ error: 'Album not found' });
   res.json({ ok: true, genre });
 });
@@ -595,7 +610,7 @@ app.post('/api/library/music/:id/genre', rateLimit, express.json(), (req, res) =
 // POST /api/library/music/:id/favorite — toggle favorite
 app.post('/api/library/music/:id/favorite', rateLimit, (req, res) => {
   const { id } = req.params;
-  const result = library.toggleMusicFavorite(id);
+  const result = musicLibrary.toggleMusicFavorite(id);
   if (result === null) return res.status(404).json({ error: 'Album not found' });
   res.json({ ok: true, favorite: result });
 });
@@ -603,9 +618,137 @@ app.post('/api/library/music/:id/favorite', rateLimit, (req, res) => {
 // POST /api/library/music/:id/played — increment playCount, update lastPlayedAt
 app.post('/api/library/music/:id/played', rateLimit, (req, res) => {
   const { id } = req.params;
-  const ok = library.markMusicPlayed(id);
+  const ok = musicLibrary.markMusicPlayed(id);
   if (!ok) return res.status(404).json({ error: 'Album not found' });
   res.json({ ok: true });
+});
+
+// ─── Music Library (separate LibraryManager instance, disk sibling) ────
+// These mirror /api/library/* but hit the music-specific instance so the
+// metadata file, on-disk folder layout, and ingest path stay separate
+// from movies/series. Music items are always type: 'album'.
+
+// GET /api/music-library — list music library items
+app.get('/api/music-library', (req, res) => {
+  res.json({ items: musicLibrary.getAll() });
+});
+
+// GET /api/music-library/:id — fetch a single music item
+app.get('/api/music-library/:id', (req, res) => {
+  const item = musicLibrary.getItem(req.params.id);
+  if (!item) return res.status(404).json({ error: 'Item not found' });
+  res.json({ item });
+});
+
+// POST /api/music-library/add — add an album from a torrent to the music library
+// body: { magnetUri, infoHash, mbid, title, artist, coverUrl, year, genres? }
+app.post('/api/music-library/add', rateLimit, express.json(), (req, res) => {
+  const b = req.body || {};
+  if (!b.infoHash || !b.magnetUri) {
+    return res.status(400).json({ error: 'infoHash and magnetUri are required' });
+  }
+  if (!/^[0-9a-f]{40}$/i.test(b.infoHash)) {
+    return res.status(400).json({ error: 'Invalid infoHash' });
+  }
+  try {
+    const result = musicLibrary.addItem({
+      type: 'album',
+      infoHash: b.infoHash.toLowerCase(),
+      magnetUri: b.magnetUri,
+      mbid: b.mbid || null,
+      artistMbid: b.artistMbid || null,
+      name: [b.artist, b.title].filter(Boolean).join(' — ') || b.title || 'Album',
+      title: b.title || '',
+      artist: b.artist || '',
+      year: b.year || '',
+      coverUrl: b.coverUrl || '',
+      genres: Array.isArray(b.genres) ? b.genres : [],
+    });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error('[MusicLibrary] add error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/music-library/:id
+app.delete('/api/music-library/:id', rateLimit, (req, res) => {
+  const ok = musicLibrary.removeItem(req.params.id);
+  if (!ok) return res.status(404).json({ error: 'Item not found' });
+  res.json({ ok: true });
+});
+
+// POST /api/music-library/:id/pause | /resume | /retry
+app.post('/api/music-library/:id/pause', rateLimit, (req, res) => {
+  const ok = musicLibrary.pauseItem(req.params.id);
+  res.json({ ok });
+});
+app.post('/api/music-library/:id/resume', rateLimit, (req, res) => {
+  const ok = musicLibrary.resumeItem(req.params.id);
+  res.json({ ok });
+});
+app.post('/api/music-library/:id/retry', rateLimit, (req, res) => {
+  const ok = musicLibrary.retryItem(req.params.id);
+  res.json({ ok });
+});
+
+// GET /api/music-library/:id/stream?track=N — stream a specific track file
+app.get('/api/music-library/:id/stream', async (req, res) => {
+  const item = musicLibrary.getItem(req.params.id);
+  if (!item) return res.status(404).json({ error: 'Item not found' });
+  if (item.status !== 'complete') {
+    return res.status(400).json({ error: 'Download not complete' });
+  }
+  const trackIndex = req.query.track !== undefined
+    ? parseInt(req.query.track, 10)
+    : 0;
+  if (!Number.isInteger(trackIndex) || trackIndex < 0) {
+    return res.status(400).json({ error: 'Invalid track index' });
+  }
+  const filePath = musicLibrary.getTrackFilePath(req.params.id, trackIndex);
+  if (!filePath) return res.status(404).json({ error: 'Track file not found' });
+
+  let stat;
+  try { stat = await fs.promises.stat(filePath); }
+  catch { return res.status(404).json({ error: 'Track file not found on disk' }); }
+
+  const fileSize = stat.size;
+  const mimeType = musicLibrary.getMimeType(filePath);
+  const safeFilename = path.basename(filePath)
+    .replace(/[^\w\s.\-()[\]]/g, '_').replace(/["\\]/g, '_').substring(0, 200);
+
+  const headers = {
+    'Content-Type': mimeType,
+    'X-Content-Type-Options': 'nosniff',
+    'Content-Disposition': `inline; filename="${safeFilename}"`,
+    'Cache-Control': 'no-store',
+    'Accept-Ranges': 'bytes',
+  };
+
+  const range = req.headers.range;
+  if (range) {
+    const parts = range.replace(/bytes=/, '').split('-');
+    const start = parseInt(parts[0], 10);
+    const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+    if (isNaN(start) || isNaN(end) || start >= fileSize || end >= fileSize || start > end) {
+      return res.status(416).set('Content-Range', `bytes */${fileSize}`).end();
+    }
+    res.status(206).set({
+      ...headers,
+      'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+      'Content-Length': end - start + 1,
+    });
+    const stream = fs.createReadStream(filePath, { start, end });
+    stream.pipe(res);
+    stream.on('error', () => res.end());
+    res.on('close', () => stream.destroy());
+  } else {
+    res.status(200).set({ ...headers, 'Content-Length': fileSize });
+    const stream = fs.createReadStream(filePath);
+    stream.pipe(res);
+    stream.on('error', () => res.end());
+    res.on('close', () => stream.destroy());
+  }
 });
 
 // ─── Music Playlists ────────────────────────────────────────────────

@@ -74,6 +74,11 @@
       if (item.fileIdx !== undefined && item.fileIdx !== null) params.set('fileIdx', item.fileIdx);
       return `/api/library/${item.libraryId}/stream?${params.toString()}`;
     }
+    if (item.kind === 'music-library' && item.libraryId) {
+      const params = new URLSearchParams();
+      if (item.trackIndex !== undefined && item.trackIndex !== null) params.set('track', item.trackIndex);
+      return `/api/music-library/${item.libraryId}/stream?${params.toString()}`;
+    }
     return item.src || '';
   }
 

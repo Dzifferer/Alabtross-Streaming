@@ -78,16 +78,24 @@ const AUDIO_BITRATE = process.env.AUDIO_BITRATE || '192k';
 fs.mkdirSync(TEMP_DIR, { recursive: true });
 
 // ─── Startup checks ───────────────────────────────────────────────────
-// Sweep stale temp files from a previous crash. Anything older than 12h is
-// junk that nobody is going to want back.
+// Sweep stale temp files from a previous crash. 24h cutoff gives slow
+// machines room to finish a single long encode (4K HEVC on weaker GPUs
+// can approach 10-12h, plus network upload/download time) without ever
+// having its tempfile deleted mid-flight. Also skip anything with mtime
+// within the last 5 minutes as a belt-and-braces guard against an edge
+// case where a sibling process is still writing to TEMP_DIR.
+const SWEEP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const SWEEP_MIN_AGE_MS = 5 * 60 * 1000;
 function sweepStaleTemp() {
-  const cutoff = Date.now() - 12 * 60 * 60 * 1000;
+  const now = Date.now();
   try {
     for (const name of fs.readdirSync(TEMP_DIR)) {
       const p = path.join(TEMP_DIR, name);
       try {
         const st = fs.statSync(p);
-        if (st.mtimeMs < cutoff) fs.unlinkSync(p);
+        const age = now - st.mtimeMs;
+        if (age < SWEEP_MIN_AGE_MS) continue;
+        if (age > SWEEP_MAX_AGE_MS) fs.unlinkSync(p);
       } catch { /* ignore */ }
     }
   } catch { /* ignore */ }

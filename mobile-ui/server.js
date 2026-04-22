@@ -170,11 +170,18 @@ if (WORKER_URL && !WORKER_SECRET) {
   console.error('[Config] Generate a secret (e.g. `openssl rand -hex 32`) and set WORKER_SECRET on both this server and the worker.');
   process.exit(1);
 }
+const DISK_RESERVE_BYTES = (() => {
+  const n = parseInt(process.env.DISK_RESERVE_BYTES, 10);
+  return Number.isFinite(n) && n >= 0 ? n : 1 * 1024 * 1024 * 1024;
+})();
+const MAX_CONCURRENT_REMOTE_CONVERSIONS = parseInt(process.env.MAX_CONCURRENT_REMOTE_CONVERSIONS, 10) || 3;
 const library = new LibraryManager({
   libraryPath: LIBRARY_PATH,
   maxConcurrentDownloads: MAX_CONCURRENT_STREAMS,
   workerUrl: WORKER_URL,
   workerSecret: WORKER_SECRET,
+  diskReserveBytes: DISK_RESERVE_BYTES,
+  maxConcurrentRemoteConversions: MAX_CONCURRENT_REMOTE_CONVERSIONS,
 });
 
 // Security headers
@@ -3330,7 +3337,10 @@ app.get('/health', (req, res) => {
 
 // Health endpoint for VPN detection (if the client can reach this, the server is accessible)
 app.get('/api/stats', (req, res) => {
-  res.json({ ok: true });
+  res.json({
+    ok: true,
+    conversion: library.getConversionStats(),
+  });
 });
 
 // SPA fallback

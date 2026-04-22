@@ -1417,6 +1417,15 @@ async function searchCandidates(kind, query, yearHint, extIdCache) {
       c.imdbId = await resolveImdbId(mediaType, c.tmdbId);
     }));
 
+    // Prefer IMDb-backed entries over TMDB-only ones (often fan/unofficial
+    // duplicates). Stable sort preserves relevance order within each group.
+    top.sort((a, b) => {
+      const aHas = a.imdbId ? 1 : 0;
+      const bHas = b.imdbId ? 1 : 0;
+      if (aHas !== bHas) return bHas - aHas;
+      return b.score - a.score;
+    });
+
     const candidates = top.map(c => ({
       imdbId: c.imdbId || null,
       tmdbId: c.tmdbId,

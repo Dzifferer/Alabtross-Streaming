@@ -2964,17 +2964,19 @@ app.post('/api/library/restart-pack', rateLimit, async (req, res) => {
 });
 
 // POST /api/library/find-missing-show — find missing episodes for a tracked
-// show that has no original pack torrent (e.g. disk-discovered items, or an
-// old import where packId was never set). Searches for a complete series pack
-// by imdbId, picks the best result, and hands it to addSeasonPack — which
-// now dedupes by (imdbId, season, episode) so episodes we already have on
-// disk are not re-downloaded.
+// show. Uses TMDB to determine the show's true season/episode list, then
+// for every season that's not fully present locally, searches for a season
+// pack torrent and adds it. addSeasonPack dedupes by (imdbId, season,
+// episode) so episodes already on disk are not re-downloaded.
 app.post('/api/library/find-missing-show', rateLimit, express.json(), async (req, res) => {
   const { imdbId } = req.body || {};
   let { title, year, poster } = req.body || {};
 
   if (!imdbId || !/^tt\d+$/.test(imdbId)) {
     return res.status(400).json({ error: 'Valid imdbId is required' });
+  }
+  if (!TMDB_API_KEY) {
+    return res.status(503).json({ error: 'TMDB API key not configured' });
   }
 
   // Fill missing title/year/poster from an existing library item for this show.
@@ -2989,24 +2991,66 @@ app.post('/api/library/find-missing-show', rateLimit, express.json(), async (req
   if (!title) return res.status(400).json({ error: 'title is required (none inferred from existing items)' });
 
   try {
-    const streams = await getCompleteStreams(title, imdbId);
-    if (!streams || streams.length === 0) {
-      return res.status(404).json({ error: 'No complete pack found for this show' });
+    // IMDb → TMDB id, then fetch season list with episode counts.
+    const findResult = await tmdbFetch(`/find/${imdbId}`, { external_source: 'imdb_id' });
+    const tvResults = findResult.tv_results || [];
+    if (tvResults.length === 0) return res.status(404).json({ error: 'Show not found on TMDB' });
+    const tmdbId = tvResults[0].id;
+    const seriesData = await tmdbFetch(`/tv/${tmdbId}`);
+    const tmdbSeasons = (seriesData.seasons || []).filter(s => s.season_number > 0 && (s.episode_count || 0) > 0);
+    if (tmdbSeasons.length === 0) return res.status(404).json({ error: 'No seasons found on TMDB' });
+
+    // What do we already have locally for this show?
+    const haveBySeason = new Map(); // seasonNum -> Set<episodeNum>
+    for (const i of library.getAll()) {
+      if (i.imdbId !== imdbId) continue;
+      if (!i.season || !i.episode) continue;
+      if (!haveBySeason.has(i.season)) haveBySeason.set(i.season, new Set());
+      haveBySeason.get(i.season).add(i.episode);
     }
-    const top = streams[0];
-    const result = await library.addSeasonPack({
-      imdbId,
-      name: title,
-      poster: poster || '',
-      year: year || '',
-      magnetUri: top.magnetUri,
-      infoHash: top.infoHash,
-      quality: top.quality || '',
-      size: top.size || '',
-      season: 0,
-    });
-    const started = (result.items || []).filter(i => i.status === 'started').length;
-    res.json({ started, pack: { title: top.title, infoHash: top.infoHash, size: top.size }, result });
+
+    // Which seasons are incomplete? (Includes fully-missing seasons.)
+    const incompleteSeasons = tmdbSeasons
+      .map(s => ({ season: s.season_number, expected: s.episode_count, have: (haveBySeason.get(s.season_number) || new Set()).size }))
+      .filter(s => s.have < s.expected);
+
+    if (incompleteSeasons.length === 0) {
+      return res.json({ started: 0, seasons: [], message: 'All seasons fully present' });
+    }
+
+    // For each incomplete season, search for a season pack and add it.
+    // Sequential to avoid hammering torrent providers and to let each
+    // addSeasonPack finish registering items before the next one starts.
+    const seasonResults = [];
+    let totalStarted = 0;
+    for (const s of incompleteSeasons) {
+      try {
+        const streams = await getSeasonPackStreams(title, s.season, imdbId);
+        if (!streams || streams.length === 0) {
+          seasonResults.push({ season: s.season, missing: s.expected - s.have, error: 'no_pack_found' });
+          continue;
+        }
+        const top = streams[0];
+        const r = await library.addSeasonPack({
+          imdbId,
+          name: title,
+          poster: poster || '',
+          year: year || '',
+          magnetUri: top.magnetUri,
+          infoHash: top.infoHash,
+          quality: top.quality || '',
+          size: top.size || '',
+          season: s.season,
+        });
+        const started = (r.items || []).filter(i => i.status === 'started').length;
+        totalStarted += started;
+        seasonResults.push({ season: s.season, missing: s.expected - s.have, started });
+      } catch (err) {
+        seasonResults.push({ season: s.season, missing: s.expected - s.have, error: err.message });
+      }
+    }
+
+    res.json({ started: totalStarted, seasons: seasonResults });
   } catch (err) {
     console.error('[API] Find-missing-show error:', err.message);
     res.status(500).json({ error: err.message });

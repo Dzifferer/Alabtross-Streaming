@@ -678,7 +678,7 @@ app.delete('/api/music-library/:id', rateLimit, (req, res) => {
   res.json({ ok: true });
 });
 
-// POST /api/music-library/:id/pause | /resume | /retry
+// POST /api/music-library/:id/pause | /resume | /retry | /start
 app.post('/api/music-library/:id/pause', rateLimit, (req, res) => {
   const ok = musicLibrary.pauseItem(req.params.id);
   res.json({ ok });
@@ -689,6 +689,17 @@ app.post('/api/music-library/:id/resume', rateLimit, (req, res) => {
 });
 app.post('/api/music-library/:id/retry', rateLimit, (req, res) => {
   const ok = musicLibrary.retryItem(req.params.id);
+  res.json({ ok });
+});
+app.post('/api/music-library/:id/start', rateLimit, (req, res) => {
+  const result = musicLibrary.startQueuedItem(req.params.id);
+  if (result && result.error) return res.status(400).json(result);
+  res.json({ ok: true, ...(result || {}) });
+});
+app.post('/api/music-library/:id/reorder', rateLimit, express.json(), (req, res) => {
+  const pos = parseInt((req.body && req.body.position), 10);
+  if (!Number.isFinite(pos) || pos < 0) return res.status(400).json({ error: 'Invalid position' });
+  const ok = musicLibrary.reorderQueue(req.params.id, pos);
   res.json({ ok });
 });
 

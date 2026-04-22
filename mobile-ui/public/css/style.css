@@ -3649,6 +3649,19 @@ select.manual-import-input {
   text-overflow: ellipsis;
 }
 
+.download-kind-badge {
+  display: inline-block;
+  background: rgba(99, 110, 250, 0.18);
+  color: var(--accent, #636efa);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  margin-right: 6px;
+  vertical-align: 1px;
+}
+
 .download-meta {
   font-size: 12px;
   color: var(--text-muted);

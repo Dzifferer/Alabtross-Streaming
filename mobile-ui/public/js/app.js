@@ -5260,11 +5260,26 @@
     if (!panel) return;
 
     try {
-      const resp = await fetch('/api/library');
-      if (!resp.ok) throw new Error('Failed');
-      const data = await resp.json();
-      const items = data.items || [];
-      const slots = data.slots || { active: 0, max: 5 };
+      const [videoResp, musicResp] = await Promise.all([
+        fetch('/api/library').catch(() => null),
+        fetch('/api/music-library').catch(() => null),
+      ]);
+      if (!videoResp || !videoResp.ok) throw new Error('Failed');
+      const videoData = await videoResp.json();
+      const musicData = (musicResp && musicResp.ok) ? await musicResp.json() : { items: [] };
+
+      // Tag each item with which library instance it belongs to so the
+      // action buttons can route to the right endpoint. Music items get a
+      // poster/name derived from their music-specific fields when absent.
+      const videoItems = (videoData.items || []).map(i => ({ ...i, _library: 'video' }));
+      const musicItems = (musicData.items || []).map(i => ({
+        ...i,
+        _library: 'music',
+        poster: i.poster || i.coverUrl || '',
+        name: i.name || [i.artist, i.title].filter(Boolean).join(' — ') || 'Album',
+      }));
+      const items = [...videoItems, ...musicItems];
+      const slots = videoData.slots || { active: 0, max: 5 };
       const hasSlots = slots.active < slots.max;
 
       // Group pack items into single aggregate rows
@@ -5546,11 +5561,15 @@
       : 'Queued';
 
     const queueIdxAttr = queueIdx != null ? ` data-queue-idx="${queueIdx}"` : '';
+    const libraryAttr = item._library ? ` data-library="${escapeHTML(item._library)}"` : '';
+    const kindBadge = item._library === 'music'
+      ? '<span class="download-kind-badge">MUSIC</span>'
+      : '';
     return `
-      <div class="download-item"${queueIdxAttr}>
+      <div class="download-item"${queueIdxAttr}${libraryAttr}>
         ${poster}
         <div class="download-info">
-          <div class="download-name">${escapeHTML(item.name)}</div>
+          <div class="download-name">${kindBadge}${escapeHTML(item.name)}</div>
           <div class="download-meta">${escapeHTML(statusLabel)}${meta ? ' \u00b7 ' + escapeHTML(meta) : ''}</div>
           ${progressBar}
         </div>
@@ -5637,9 +5656,17 @@
           return;
         }
 
+        // Determine which library this action targets. The row is tagged
+        // with data-library='music' for music items; movies/series fall
+        // through the default and hit /api/library/* as before.
+        const row = btn.closest('.download-item');
+        const libBase = row && row.dataset && row.dataset.library === 'music'
+          ? '/api/music-library'
+          : '/api/library';
+
         if (action === 'start' && id) {
           try {
-            const r = await fetch(`/api/library/${encodeURIComponent(id)}/start`, { method: 'POST' });
+            const r = await fetch(`${libBase}/${encodeURIComponent(id)}/start`, { method: 'POST' });
             if (!r.ok) { const d = await r.json(); showToast(d.error || 'Cannot start'); }
           } catch { showToast('Failed to start'); }
           renderDownloads();
@@ -5655,38 +5682,36 @@
           renderDownloads();
         } else if (action === 'pause') {
           try {
-            await fetch(`/api/library/${encodeURIComponent(id)}/pause`, { method: 'POST' });
+            await fetch(`${libBase}/${encodeURIComponent(id)}/pause`, { method: 'POST' });
           } catch { showToast('Failed to pause'); }
           renderDownloads();
         } else if (action === 'resume') {
           try {
-            await fetch(`/api/library/${encodeURIComponent(id)}/resume`, { method: 'POST' });
+            await fetch(`${libBase}/${encodeURIComponent(id)}/resume`, { method: 'POST' });
           } catch { showToast('Failed to resume'); }
           renderDownloads();
         } else if (action === 'retry') {
           try {
-            await fetch(`/api/library/${encodeURIComponent(id)}/retry`, { method: 'POST' });
+            await fetch(`${libBase}/${encodeURIComponent(id)}/retry`, { method: 'POST' });
             showToast('Retrying download...');
           } catch { showToast('Failed to retry'); }
           renderDownloads();
         } else if (action === 'remove') {
           try {
-            await fetch(`/api/library/${encodeURIComponent(id)}`, { method: 'DELETE' });
+            await fetch(`${libBase}/${encodeURIComponent(id)}`, { method: 'DELETE' });
             showToast('Download removed');
           } catch { showToast('Failed to remove'); }
           renderDownloads();
         } else if (action === 'move-up' || action === 'move-down') {
-          const row = btn.closest('.download-item');
           const currentIdx = parseInt(row?.dataset?.queueIdx || '0', 10);
           const newPos = action === 'move-up' ? Math.max(0, currentIdx - 1) : currentIdx + 1;
-          await fetch(`/api/library/${encodeURIComponent(id)}/reorder`, {
+          await fetch(`${libBase}/${encodeURIComponent(id)}/reorder`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ position: newPos }),
           });
           renderDownloads();
         } else if (action === 'move-up-pack' || action === 'move-down-pack') {
-          const row = btn.closest('.download-item');
           const currentIdx = parseInt(row?.dataset?.queueIdx || '0', 10);
           const newPos = action === 'move-up-pack' ? Math.max(0, currentIdx - 1) : currentIdx + 1;
           await fetch('/api/library/reorder-pack', {

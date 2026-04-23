@@ -19,6 +19,7 @@ const os = require('os');
 const crypto = require('crypto');
 const { VIDEO_EXTENSIONS, TRACKERS, isFileNameSafe, getMimeType } = require('./file-safety');
 const { PeerManager } = require('./peer-manager');
+const { PeerReputation } = require('./peer-reputation');
 const { WorkerClient } = require('./worker-client');
 
 const DEFAULT_MAX_CONCURRENT_DOWNLOADS = 5;
@@ -172,6 +173,13 @@ class LibraryManager {
     // library volume so resume becomes instant.
     this._torrentCacheName = '_torrent-cache';
     this._torrentCachePath = path.join(this._libraryPath, this._torrentCacheName);
+    // Cross-torrent peer reputation. Shared by every PeerManager we
+    // instantiate so a bad peer on torrent A is pre-blocked when we
+    // later start torrent B, and a peer that reliably delivered bytes
+    // gets re-added to the swarm first. Persisted at the torrent-cache
+    // path so it survives restarts.
+    this._peerReputation = new PeerReputation({ cacheDir: this._torrentCachePath });
+    this._peerReputation.startPersistTimer();
     this._maxConcurrentDownloads = opts.maxConcurrentDownloads || DEFAULT_MAX_CONCURRENT_DOWNLOADS;
     this._items = new Map();       // id -> library item
     this._engines = new Map();     // id -> torrent engine (active downloads only)
@@ -1038,6 +1046,7 @@ class LibraryManager {
       this._startIncomingListener(engine, `pack ${infoHash.slice(0, 8)}`);
       this._attachPeerCacheRecorder(engine, infoHash);
       this._primeSwarmFromPeerCache(engine, infoHash, `pack ${infoHash.slice(0, 8)}`);
+      this._primeEngineFromReputation(engine, `pack ${infoHash.slice(0, 8)}`);
       if (cacheHit) {
         console.log(`[Library] pack ${infoHash.slice(0, 8)}: using cached torrent metadata (skipping BEP-9)`);
       }
@@ -1229,6 +1238,7 @@ class LibraryManager {
       this._attachPeerManager(engine, `scan ${infoHash.slice(0, 8)}`);
       this._attachPeerCacheRecorder(engine, infoHash);
       this._primeSwarmFromPeerCache(engine, infoHash, `scan ${infoHash.slice(0, 8)}`);
+      this._primeEngineFromReputation(engine, `scan ${infoHash.slice(0, 8)}`);
       this._startIncomingListener(engine, `scan ${infoHash.slice(0, 8)}`);
       if (cacheHit) {
         console.log(`[Library] scan ${infoHash.slice(0, 8)}: using cached torrent metadata (skipping BEP-9)`);
@@ -1917,6 +1927,7 @@ class LibraryManager {
     this._attachPeerManager(engine, `resume ${first.infoHash.slice(0, 8)}`);
     this._attachPeerCacheRecorder(engine, first.infoHash);
     this._primeSwarmFromPeerCache(engine, first.infoHash, `resume ${first.infoHash.slice(0, 8)}`);
+    this._primeEngineFromReputation(engine, `resume ${first.infoHash.slice(0, 8)}`);
     this._startIncomingListener(engine, `resume ${first.infoHash.slice(0, 8)}`);
 
     // Store engine immediately to prevent retryItem from creating duplicates
@@ -3273,6 +3284,10 @@ class LibraryManager {
       this._metadataSaveTimer = null;
     }
     this._stopAutoRetryDaemon();
+    // Flush cross-torrent peer reputation before we destroy engines
+    // (engine destruction triggers peer-cache writes which may create
+    // more reputation updates via their wire-close paths).
+    try { if (this._peerReputation) this._peerReputation.stop(); } catch { /* ignore */ }
     for (const id of [...this._engines.keys()]) {
       this._stopDownload(id);
     }
@@ -3359,6 +3374,7 @@ class LibraryManager {
     this._pauseRunningConversionsForDownloads();
     this._attachPeerCacheRecorder(engine, item.infoHash);
     this._primeSwarmFromPeerCache(engine, item.infoHash, `dl ${item.infoHash.slice(0, 8)}`);
+    this._primeEngineFromReputation(engine, `dl ${item.infoHash.slice(0, 8)}`);
     this._attachPeerManager(engine, `dl ${item.infoHash.slice(0, 8)}`);
     this._startIncomingListener(engine, `dl ${item.infoHash.slice(0, 8)}`);
     if (cacheHit) {
@@ -3644,9 +3660,36 @@ class LibraryManager {
    * See lib/peer-manager.js for the full rationale.
    */
   _attachPeerManager(engine, label) {
-    const mgr = new PeerManager(engine, { label });
+    const mgr = new PeerManager(engine, { label, reputation: this._peerReputation });
     this._peerMgrByEngine.set(engine, mgr);
     return mgr;
+  }
+
+  // Prime a freshly-created engine from the cross-torrent reputation
+  // store: pre-block every known-bad IP so peer-wire-swarm won't even
+  // attempt a connection, then swarm.add() the top good addresses so
+  // they jump to the front of the connect queue. Both steps are safe
+  // no-ops on empty reputation (first run, or freshly-loaded empty map).
+  _primeEngineFromReputation(engine, label) {
+    if (!engine || !this._peerReputation) return;
+    try {
+      const bad = this._peerReputation.knownBadIps();
+      if (bad.size > 0 && typeof engine.block === 'function') {
+        for (const ip of bad) {
+          try { engine.block(ip); } catch { /* ignore — block is idempotent */ }
+        }
+        console.log(`[Library] ${label}: pre-blocked ${bad.size} IP(s) with bad reputation`);
+      }
+      const good = this._peerReputation.topGoodAddrs(20);
+      if (good.length > 0 && engine.swarm && typeof engine.swarm.add === 'function') {
+        for (const addr of good) {
+          try { engine.swarm.add(addr); } catch { /* ignore */ }
+        }
+        console.log(`[Library] ${label}: primed swarm with ${good.length} high-reputation peer(s)`);
+      }
+    } catch (err) {
+      console.warn(`[Library] ${label}: reputation prime failed: ${err.message}`);
+    }
   }
 
   /**

@@ -453,8 +453,32 @@
       hero.appendChild(info);
       container.appendChild(hero);
 
+      const releaseGroups = meta.releaseGroups || [];
+
+      if (releaseGroups.length) {
+        const actions = el('div', { class: 'album-actions' });
+        const dlAllBtn = el('button', { class: 'btn-primary' }, `Download discography (${releaseGroups.length})`);
+        dlAllBtn.addEventListener('click', async () => {
+          if (!confirm(`Queue ${releaseGroups.length} albums by ${meta.name} for download? This may take a while and consume significant bandwidth and storage.`)) return;
+          dlAllBtn.disabled = true;
+          const originalText = dlAllBtn.textContent;
+          dlAllBtn.textContent = 'Starting…';
+          try {
+            const r = await window.MusicAPI.addDiscographyToLibrary(mbid);
+            musicToast(`Queued ${r.total || releaseGroups.length} albums — check Library for progress.`);
+            dlAllBtn.textContent = 'Queued ✓';
+          } catch (err) {
+            musicToast('Failed to start discography download: ' + err.message);
+            dlAllBtn.disabled = false;
+            dlAllBtn.textContent = originalText;
+          }
+        });
+        actions.appendChild(dlAllBtn);
+        container.appendChild(actions);
+      }
+
       const grid = el('div', { class: 'music-grid' });
-      for (const rg of (meta.releaseGroups || [])) {
+      for (const rg of releaseGroups) {
         const card = el('div', { class: 'music-card' });
         card.appendChild(el('div', { class: 'music-card__cover' }));
         card.appendChild(el('div', { class: 'music-card__title' }, rg.title));

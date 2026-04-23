@@ -97,6 +97,14 @@
     return data.streams || [];
   }
 
+  async function addDiscographyToLibrary(artistMbid) {
+    return json('/api/music-library/add-discography', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ artistMbid }),
+    });
+  }
+
   // List files in a torrent (audio only).
   async function listTorrentAudioFiles(infoHash) {
     const data = await json(`/api/torrent-status/${infoHash}?kind=audio`);
@@ -192,6 +200,7 @@
     getReleaseForGroup,
     getAlbumStreams,
     getArtistStreams,
+    addDiscographyToLibrary,
     listTorrentAudioFiles,
     getLibrary,
     getGenres,

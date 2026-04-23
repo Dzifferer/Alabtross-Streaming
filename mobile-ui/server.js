@@ -832,6 +832,76 @@ app.post('/api/music-library/add', rateLimit, express.json(), (req, res) => {
   }
 });
 
+// POST /api/music-library/add-discography — bulk-enqueue every studio album,
+// EP and single in an artist's MusicBrainz discography.
+// body: { artistMbid }
+//
+// The artist's release-groups are fetched up-front so the client gets an
+// immediate count, then per-album metadata + stream search runs in the
+// background. The standard music library queue caps concurrent downloads.
+app.post('/api/music-library/add-discography', rateLimit, express.json(), async (req, res) => {
+  const { artistMbid } = req.body || {};
+  if (!artistMbid || !MBID_RE.test(artistMbid)) {
+    return res.status(400).json({ error: 'Valid artistMbid is required' });
+  }
+
+  let artistMeta;
+  try {
+    artistMeta = await mbGetArtist(artistMbid);
+  } catch (err) {
+    console.error('[Discography] Failed to fetch artist:', err.message);
+    return res.status(502).json({ error: 'Failed to fetch artist metadata' });
+  }
+  if (!artistMeta) return res.status(404).json({ error: 'Artist not found' });
+
+  const releaseGroups = artistMeta.releaseGroups || [];
+  if (!releaseGroups.length) {
+    return res.json({ ok: true, total: 0, artist: artistMeta.name });
+  }
+
+  res.json({ ok: true, total: releaseGroups.length, artist: artistMeta.name });
+
+  (async () => {
+    console.log(`[Discography] Starting bulk download for "${artistMeta.name}" (${releaseGroups.length} releases)`);
+    let added = 0, skipped = 0, errors = 0;
+    for (const rg of releaseGroups) {
+      try {
+        const releaseMbid = await mbGetReleaseForGroup(rg.releaseGroupMbid);
+        if (!releaseMbid) { skipped++; continue; }
+        const release = await mbGetRelease(releaseMbid);
+        if (!release) { skipped++; continue; }
+
+        const streams = await getAlbumStreams(releaseMbid, artistMeta.name, rg.title);
+        const best = (streams || []).find(s => s.infoHash && s.magnetUri);
+        if (!best) {
+          console.log(`[Discography] No torrent stream for "${rg.title}" — skipping`);
+          skipped++;
+          continue;
+        }
+
+        musicLibrary.addItem({
+          type: 'album',
+          infoHash: best.infoHash.toLowerCase(),
+          magnetUri: best.magnetUri,
+          mbid: releaseMbid,
+          artistMbid,
+          name: [artistMeta.name, rg.title].filter(Boolean).join(' — '),
+          title: rg.title,
+          artist: artistMeta.name,
+          year: rg.year || '',
+          coverUrl: release.coverUrl || '',
+          genres: release.genres || [],
+        });
+        added++;
+      } catch (err) {
+        console.error(`[Discography] Error on "${rg.title}":`, err.message);
+        errors++;
+      }
+    }
+    console.log(`[Discography] Done for "${artistMeta.name}": added=${added}, skipped=${skipped}, errors=${errors}`);
+  })().catch(err => console.error('[Discography] Background task crashed:', err.message));
+});
+
 // DELETE /api/music-library/:id
 app.delete('/api/music-library/:id', rateLimit, (req, res) => {
   const ok = musicLibrary.removeItem(req.params.id);

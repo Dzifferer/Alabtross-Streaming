@@ -204,9 +204,15 @@ body.music-playing {
 }
 
 html, body {
+  /* Explicitly size the document to the *visible* viewport so the app shell
+     never reserves room for a retractable browser toolbar that isn't there.
+     - 100% / 100vh: fallback for older engines.
+     - -webkit-fill-available: old iOS Safari dynamic-height trick.
+     - 100dvh: modern dynamic viewport — resizes with the browser chrome. */
   height: 100%;
-  min-height: 100dvh;
-  min-height: -webkit-fill-available;
+  height: 100vh;
+  height: -webkit-fill-available;
+  height: 100dvh;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   background-color: var(--bg);
   background-image: linear-gradient(135deg, var(--bg), #0f0f1e, var(--bg));
@@ -215,6 +221,8 @@ html, body {
   color: var(--text);
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
+  margin: 0;
+  padding: 0;
 }
 
 @keyframes ambientGlow {
@@ -223,21 +231,19 @@ html, body {
 }
 
 #app {
+  /* Fill the document (which is now pinned to the dynamic viewport) with a
+     flex column so the top bar, scrollable #content, and bottom nav divide
+     the visible area — no `position: fixed` + `bottom: 0` trick, which on
+     iOS anchors to the large viewport and leaves the bottom tabs hidden
+     behind a phantom browser toolbar. `position: relative` keeps the
+     absolutely-positioned overlays (e.g. #view-music-player) anchored to
+     the shell rather than the body. */
   display: flex;
   flex-direction: column;
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  /* `position: fixed` with `bottom: 0` anchors to the large viewport on iOS
-     Safari and Chrome mobile, which reserves room for a retractable browser
-     toolbar that may not be present — pushing the top under the header and
-     hiding the bottom tabs off-screen. Pinning the height to the dynamic
-     viewport keeps the app sized to what's actually visible, so the bottom
-     tabs stay flush with the screen edge and the top isn't clipped. */
-  height: 100vh;
-  height: 100dvh;
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
   background: var(--bg);
 }
 

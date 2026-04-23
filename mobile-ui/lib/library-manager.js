@@ -24,6 +24,15 @@ const { WorkerClient } = require('./worker-client');
 
 const DEFAULT_MAX_CONCURRENT_DOWNLOADS = 5;
 const METADATA_SAVE_INTERVAL = 30 * 1000; // Save metadata every 30s during active downloads
+
+// Pack (season/multi-episode) torrents have info dicts an order of
+// magnitude bigger than single-file torrents — 100-episode packs
+// routinely have 100-300 KiB of piece hashes, streamed 16 KiB at a
+// time via BEP-9. The single-file default (90 s initial / 10 min
+// cap) can fire before the full dict has transferred even on a
+// healthy swarm. Pack engines use these looser bounds so metadata
+// fetch has room to actually finish before we give up.
+const PACK_METADATA_TIMEOUT_OPTS = { initialMs: 180 * 1000, maxMs: 15 * 60 * 1000 };
 const PROGRESS_POLL_INTERVAL = 3000; // 3s — matches frontend poll cadence
 
 // Funnel Cover Art Archive URLs through our own caching proxy so the client
@@ -180,6 +189,11 @@ class LibraryManager {
     // path so it survives restarts.
     this._peerReputation = new PeerReputation({ cacheDir: this._torrentCachePath });
     this._peerReputation.startPersistTimer();
+    // Per-pack stall recycle count. Keyed by packId, not by engine, so
+    // recycling (which destroys the old engine and creates a new one)
+    // doesn't reset the counter. Bounded retry stops the worst case of
+    // a genuinely stuck pack from cycling forever.
+    this._packStallRecycles = new Map();
     this._maxConcurrentDownloads = opts.maxConcurrentDownloads || DEFAULT_MAX_CONCURRENT_DOWNLOADS;
     this._items = new Map();       // id -> library item
     this._engines = new Map();     // id -> torrent engine (active downloads only)
@@ -1059,7 +1073,8 @@ class LibraryManager {
           console.error(`[Library] pack ${infoHash.slice(0, 8)}: metadata timeout — ${diag} — ${reason}`);
           this._destroyEngine(engine);
           reject(new Error(`Torrent metadata timeout (${totalS}s) — ${diag} — ${reason}`));
-        }
+        },
+        PACK_METADATA_TIMEOUT_OPTS
       );
 
       engine.on('error', (err) => {
@@ -1252,7 +1267,8 @@ class LibraryManager {
           console.error(`[Library] scan ${infoHash.slice(0, 8)}: metadata timeout — ${diag} — ${reason}`);
           this._destroyEngine(engine);
           reject(new Error(`Torrent metadata timeout (${totalS}s) — ${diag} — ${reason}`));
-        }
+        },
+        PACK_METADATA_TIMEOUT_OPTS
       );
 
       engine.on('error', (err) => {
@@ -1872,6 +1888,49 @@ class LibraryManager {
         this._stopPackEngine(packId);
         this._saveMetadata();
         this._processQueue();
+        return;
+      }
+
+      // Pack stall watchdog. Same mechanism as the single-file case
+      // but with a longer threshold (15 min vs 10 min) because packs
+      // legitimately go long stretches without byte advance during
+      // info-dict transfer and piece-picker warmup. When a pack IS
+      // genuinely stuck, recycling is the right call even though it
+      // affects every episode sharing the engine — the alternative is
+      // staying stuck until the user intervenes.
+      const stall = this._checkEngineStall(engine, `pack ${packId}`, { thresholdMs: 15 * 60 * 1000 });
+      if (stall.stalled) {
+        const recycles = this._packStallRecycles.get(packId) || 0;
+        const MAX_PACK_RECYCLES = 3;
+        if (recycles >= MAX_PACK_RECYCLES) {
+          console.warn(`[Library] Pack ${packId}: giving up after ${MAX_PACK_RECYCLES} stall recycles — marking episodes failed`);
+          for (const [, item] of this._items) {
+            if (item.packId === packId && item.status === 'downloading') {
+              item.status = 'failed';
+              item.error = `Pack stalled after ${MAX_PACK_RECYCLES} engine recycles`;
+            }
+          }
+          clearInterval(progressTimer);
+          this._stopPackEngine(packId);
+          this._saveMetadata();
+          this._processQueue();
+          return;
+        }
+        this._packStallRecycles.set(packId, recycles + 1);
+        const packItems = [...this._items.values()].filter(
+          (i) => i.packId === packId && i.status === 'downloading'
+        );
+        console.log(`[Library] Recycling pack ${packId} engine (stall recycle #${recycles + 1}, ${packItems.length} episode(s))`);
+        clearInterval(progressTimer);
+        this._stopPackEngine(packId);
+        // Brief delay so the old engine's TCP state clears before we
+        // dial the same peers from a fresh engine.
+        setTimeout(() => {
+          const stillDownloading = [...this._items.values()].filter(
+            (i) => i.packId === packId && i.status === 'downloading'
+          );
+          if (stillDownloading.length > 0) this._resumePackDownload(packId, stillDownloading);
+        }, 1000);
       }
     }, PROGRESS_POLL_INTERVAL);
 
@@ -1951,7 +2010,8 @@ class LibraryManager {
         this._engines.delete(packId);
         this._saveMetadata();
         this._processQueue();
-      }
+      },
+      PACK_METADATA_TIMEOUT_OPTS
     );
 
     engine.on('error', (err) => {
@@ -3933,6 +3993,20 @@ class LibraryManager {
       30 * 60 * 1000,      // 30 min
       60 * 60 * 1000,      // 1 hour
     ];
+    // Pack items get a shorter first-retry window. A pack metadata
+    // failure is disproportionately likely to be transient (big info
+    // dict, peer churn, tracker flakiness), and a 2-min wait is dead
+    // time for a user watching their shows queue up. retryItem
+    // deduplicates — when the first pack item retries it spawns the
+    // shared engine; subsequent items in the same pack are no-ops.
+    const PACK_BACKOFF_SCHEDULE_MS = [
+      30 * 1000,           // 30 s
+      2 * 60 * 1000,       // 2 min
+      5 * 60 * 1000,       // 5 min
+      15 * 60 * 1000,      // 15 min
+      30 * 60 * 1000,      // 30 min
+      60 * 60 * 1000,      // 1 hour
+    ];
     const MAX_ATTEMPTS = 8; // ≈ 7 retries spanning ~4 hours before we give up
     for (const item of this._items.values()) {
       if (item.status !== 'failed') {
@@ -3942,9 +4016,10 @@ class LibraryManager {
       }
       if (!this._isAutoRetryableError(item.error)) continue;
 
+      const schedule = item.packId ? PACK_BACKOFF_SCHEDULE_MS : BACKOFF_SCHEDULE_MS;
       let state = this._autoRetryState.get(item.id);
       if (!state) {
-        state = { attempts: 0, nextAtMs: now + BACKOFF_SCHEDULE_MS[0] };
+        state = { attempts: 0, nextAtMs: now + schedule[0] };
         this._autoRetryState.set(item.id, state);
         continue;
       }
@@ -3955,8 +4030,8 @@ class LibraryManager {
       // 'downloading' and we'd otherwise clear state — if retry ends up
       // failing again we want the NEXT nextAtMs already computed.
       state.attempts += 1;
-      const slot = Math.min(state.attempts, BACKOFF_SCHEDULE_MS.length - 1);
-      state.nextAtMs = now + BACKOFF_SCHEDULE_MS[slot];
+      const slot = Math.min(state.attempts, schedule.length - 1);
+      state.nextAtMs = now + schedule[slot];
 
       console.log(`[Library] Auto-retry attempt ${state.attempts}/${MAX_ATTEMPTS}: "${item.name}" (${item.error || 'no reason'})`);
       try { this.retryItem(item.id); } catch (e) {
@@ -4143,9 +4218,9 @@ class LibraryManager {
     return st;
   }
 
-  _checkEngineStall(engine, label) {
+  _checkEngineStall(engine, label, opts = {}) {
     if (!engine || !engine.swarm) return { stalled: false };
-    const STALL_THRESHOLD_MS = 10 * 60 * 1000; // 10 min
+    const thresholdMs = opts.thresholdMs != null ? opts.thresholdMs : 10 * 60 * 1000;
     const wires = engine.swarm.wires ? engine.swarm.wires.length : 0;
     const bytesDown = engine.swarm.downloaded || 0;
     const st = this._stallState(engine);
@@ -4158,7 +4233,7 @@ class LibraryManager {
     // (otherwise _startMetadataTimeout / normal peer cycling owns it).
     if (wires === 0) return { stalled: false };
     const idleMs = Date.now() - st.lastAdvanceAt;
-    if (idleMs < STALL_THRESHOLD_MS) return { stalled: false };
+    if (idleMs < thresholdMs) return { stalled: false };
     console.warn(`[Library] ${label}: no byte progress for ${Math.round(idleMs / 60000)}min with ${wires} wire(s) — considering stalled`);
     return { stalled: true, idleMs, wires };
   }

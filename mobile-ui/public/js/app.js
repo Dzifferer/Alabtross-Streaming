@@ -5411,6 +5411,13 @@
           ? Math.round(packItems.reduce((s, i) => s + effectivePct(i), 0) / packItems.length)
           : 0;
       }
+      // Cap at 99% when not every item has actually finalized. Byte-weighted
+      // progress can read 100 while a single item is still missing a piece
+      // (bitfield incomplete); showing 100% in that case reads as "done" to
+      // the user even though the pack is stuck at "8/9 episodes".
+      if (totalProgress >= 100 && completedCount < packItems.length) {
+        totalProgress = 99;
+      }
       // Aggregate speed/peers (shared engine, so take max — they're the same)
       const speed = Math.max(...packItems.map(i => i.downloadSpeed || 0));
       const peers = Math.max(...packItems.map(i => i.numPeers || 0));

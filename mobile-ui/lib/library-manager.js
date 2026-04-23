@@ -1925,6 +1925,44 @@ class LibraryManager {
         return;
       }
 
+      // Per-item near-complete give-up. The swarm-wide stall watchdog keys
+      // on engine.swarm.downloaded, so any byte activity anywhere in the
+      // engine — including failed-verification retries of a piece no peer
+      // actually has — keeps resetting it. A single item genuinely missing
+      // one piece on the swarm can therefore sit at "100% but not done"
+      // forever while the engine looks busy. After 5 min of no progress on
+      // a near-complete item specifically, mark IT failed so the pack
+      // aggregates to 'failed' and the user gets a Retry button instead
+      // of watching a permanent 100%/N-1 of N display.
+      const NEAR_COMPLETE_STUCK_MS = 5 * 60 * 1000;
+      let markedNearCompleteFailed = false;
+      for (const [, item] of this._items) {
+        if (item.packId !== packId) continue;
+        if (item.status !== 'downloading') continue;
+        if (!item._nearCompleteSince) continue;
+        if (Date.now() - item._nearCompleteSince < NEAR_COMPLETE_STUCK_MS) continue;
+        console.warn(`[Library] Pack ${packId}: item "${item.fileName}" stuck near-complete for >5min — marking failed so user can retry`);
+        item.status = 'failed';
+        item.error = 'Missing piece unavailable from peers after 5 min — retry to pick new peers';
+        delete item._nearCompleteSince;
+        markedNearCompleteFailed = true;
+      }
+      if (markedNearCompleteFailed) {
+        // If that leaves the pack with no more 'downloading' items, tear
+        // down the engine; otherwise persist and continue the poll loop.
+        const stillDownloading = [...this._items.values()].some(
+          (i) => i.packId === packId && i.status === 'downloading'
+        );
+        if (!stillDownloading) {
+          clearInterval(progressTimer);
+          this._stopPackEngine(packId);
+          this._saveMetadata();
+          this._processQueue();
+          return;
+        }
+        this._saveMetadata();
+      }
+
       // Pack stall watchdog. Same mechanism as the single-file case
       // but with a longer threshold (15 min vs 10 min) because packs
       // legitimately go long stretches without byte advance during

@@ -230,6 +230,14 @@ html, body {
   left: 0;
   right: 0;
   bottom: 0;
+  /* `position: fixed` with `bottom: 0` anchors to the large viewport on iOS
+     Safari and Chrome mobile, which reserves room for a retractable browser
+     toolbar that may not be present — pushing the top under the header and
+     hiding the bottom tabs off-screen. Pinning the height to the dynamic
+     viewport keeps the app sized to what's actually visible, so the bottom
+     tabs stay flush with the screen edge and the top isn't clipped. */
+  height: 100vh;
+  height: 100dvh;
   background: var(--bg);
 }
 

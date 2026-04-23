@@ -209,6 +209,9 @@ function _stopHlsSession(itemId, reason) {
   if (!sess) return;
   hlsSessions.delete(itemId);
   sess.ended = true;
+  // Release the live-transcode slot so any background conversion that
+  // was deferred by this HLS session can resume when we hit zero.
+  try { library.decrementLiveTranscodes(); } catch { /* library not ready */ }
   try { sess.ffmpeg.kill('SIGTERM'); } catch { /* already dead */ }
   // Give ffmpeg a beat to release file handles before we rm the dir.
   setTimeout(() => {
@@ -307,6 +310,9 @@ function _startHlsSession(itemId, filePath) {
   });
 
   hlsSessions.set(itemId, session);
+  // Claim a live-transcode slot so background libx264 conversions defer
+  // to us. _stopHlsSession mirrors this with decrementLiveTranscodes().
+  library.incrementLiveTranscodes();
   console.log(`[HLS] Session started for ${itemId} → ${dir}`);
   return session;
 }
@@ -3877,6 +3883,19 @@ app.get('/api/library/:id/stream/transcode', rateLimit, transcodeGate, async (re
     return res.status(404).json({ error: 'File not found on disk' });
   }
 
+  // Disk preflight. A live transcode emits into memory (no output file)
+  // but ffmpeg still needs scratch space for its input buffers, and a
+  // full disk has a way of wedging every open fd at once. Refuse early
+  // with a real HTTP error so the client can show a meaningful message
+  // instead of waiting out the 90s stall timer on a doomed request.
+  const diskCheck = await library.hasLiveTranscodeDiskSpace();
+  if (!diskCheck.ok) {
+    return res.status(507).set('Retry-After', '300').json({
+      error: 'Insufficient disk space',
+      reason: diskCheck.reason,
+    });
+  }
+
   const safeFilename = path.basename(filePath)
     .replace(/[^\w\s.\-()[\]]/g, '_')
     .replace(/\.(mkv|avi|wmv|mp4|mov|m4v|flv|webm|ts|mpg|mpeg)$/i, '.mp4')
@@ -3944,6 +3963,18 @@ app.get('/api/library/:id/stream/transcode', rateLimit, transcodeGate, async (re
     'pipe:1',
   ]);
 
+  // Claim a live-transcode slot so any background local-libx264 job
+  // defers instead of racing us for the Orin's 6 cores. Must be released
+  // exactly once regardless of which exit path we take (first-byte vs
+  // early-death vs client abort), so a flag + guarded release on 'close'.
+  library.incrementLiveTranscodes();
+  let liveSlotReleased = false;
+  const releaseLiveSlot = () => {
+    if (liveSlotReleased) return;
+    liveSlotReleased = true;
+    library.decrementLiveTranscodes();
+  };
+
   // Defer flushing the HTTP response headers until ffmpeg actually writes
   // its first output byte. If ffmpeg dies early (bad hwaccel arg, codec
   // missing, input parse error, file truncation caught by the decoder) we
@@ -3989,6 +4020,7 @@ app.get('/api/library/:id/stream/transcode', rateLimit, transcodeGate, async (re
   });
 
   ffmpeg.on('close', (code) => {
+    releaseLiveSlot();
     if (code && code !== 0 && code !== 255) {
       console.warn(`[Library] FFmpeg transcode exited with code ${code}`);
     }
@@ -4065,6 +4097,15 @@ app.get('/api/library/:id/stream/hls/playlist.m3u8', rateLimit, async (req, res)
         error: 'Background conversion in progress',
         convertKind: convState.kind,
         convertProgress: convState.progress,
+      });
+    }
+    // Disk preflight. HLS writes .ts segments to a per-session dir and
+    // a full disk lets ffmpeg hang silently on ENOSPC. Fail fast.
+    const diskCheck = await library.hasLiveTranscodeDiskSpace();
+    if (!diskCheck.ok) {
+      return res.status(507).set('Retry-After', '300').json({
+        error: 'Insufficient disk space',
+        reason: diskCheck.reason,
       });
     }
     try {

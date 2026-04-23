@@ -176,6 +176,13 @@ class LibraryManager {
     this._maxConcurrentRemoteConversions = typeof opts.maxConcurrentRemoteConversions === 'number'
       ? Math.max(1, opts.maxConcurrentRemoteConversions)
       : 3;
+    // Count of live transcode / HLS sessions currently running libx264
+    // on the Orin CPU. Live playback is user-visible; background jobs are
+    // not; so when this is >0 we defer starting new LOCAL transcodes to
+    // keep the live session fluid. Remote (NVENC) conversions don't touch
+    // the Orin CPU and are unaffected. Maintained by server.js via
+    // incrementLiveTranscodes / decrementLiveTranscodes.
+    this._liveTranscodeCount = 0;
     // Free-space reserve kept below the library's current usage. New
     // downloads / conversions are refused when they would eat into this
     // headroom. 1 GB is enough for metadata.json churn, ffmpeg temp
@@ -3164,6 +3171,44 @@ class LibraryManager {
   }
 
   /**
+   * Signal that a live transcode / HLS session has started.  Background
+   * local libx264 conversions will defer themselves until the count goes
+   * back to zero, so live playback gets the whole CPU budget. Remote
+   * (NVENC) conversions are unaffected — they don't touch the Orin CPU.
+   * Paired with decrementLiveTranscodes(); the two MUST balance.
+   */
+  incrementLiveTranscodes() {
+    this._liveTranscodeCount = (this._liveTranscodeCount || 0) + 1;
+  }
+
+  /**
+   * Signal the end of a live transcode / HLS session. When the count
+   * drops to zero, kick the conversion queue so anything deferred by
+   * the live-transcode gate can start.
+   */
+  decrementLiveTranscodes() {
+    this._liveTranscodeCount = Math.max(0, (this._liveTranscodeCount || 0) - 1);
+    if (this._liveTranscodeCount === 0) {
+      // Resume any background conversions that were deferred while live
+      // playback was running. Fire-and-forget; the queue processes
+      // eligible items itself.
+      this._processConversionQueue().catch(() => { /* swallow */ });
+    }
+  }
+
+  /**
+   * Return true if the disk has enough free space, above the configured
+   * reserve, to accept another live-transcode / HLS spawn. Cheaper than
+   * _checkFreeSpace (no requiredBytes estimate) — ffmpeg's live outputs
+   * are small and short-lived, but a fully-full disk still hangs ffmpeg.
+   * Server uses this to bail early with a real HTTP error instead of
+   * letting ffmpeg wedge on ENOSPC. Returns { ok, freeBytes, reason? }.
+   */
+  async hasLiveTranscodeDiskSpace() {
+    return this._checkFreeSpace(0, 'live transcode');
+  }
+
+  /**
    * Lifetime conversion success/failure counters since process start.
    * Resets on restart. Exposed so operators can see systemic issues
    * (consistently-failing worker, every HEVC source erroring, etc.).
@@ -5060,6 +5105,23 @@ class LibraryManager {
       this._workerHealth &&
       !item._workerFailed;
 
+    // CPU starvation guard: a local libx264 transcode pegs every core on
+    // the Orin, so if any live /stream/transcode or HLS session is going
+    // the background job would slow live playback to a crawl. Defer the
+    // job; decrementLiveTranscodes() kicks _processConversionQueue when
+    // the last live session ends. Only gates LOCAL transcodes — remote
+    // NVENC runs on a different machine so there's no contention, and
+    // remux is a stream-copy that barely touches the CPU.
+    if (!useRemote && kind === 'transcode' && this._liveTranscodeCount > 0) {
+      console.log(
+        `[Library] Deferring local transcode of "${item.name}" — ` +
+        `${this._liveTranscodeCount} live session(s) active`
+      );
+      item._pendingConversion = true;
+      item._pendingConvertKind = kind;
+      return;
+    }
+
     if (useRemote) {
       this._startRemoteConversion(id);
     } else {
@@ -5421,7 +5483,17 @@ class LibraryManager {
 
       const pending = [...this._items.values()].find(i => {
         if (!i._pendingConversion) return false;
-        return this._pendingItemWouldUseRemote(i) ? !remoteFull : !localFull;
+        const wouldUseRemote = this._pendingItemWouldUseRemote(i);
+        // Live-transcode gate mirrored from _startConversion: a local
+        // libx264 job would compete with any in-flight live session, so
+        // don't even claim the pending item here — otherwise the queue
+        // picks it, bumps status='converting', _startConversion re-defers
+        // it, and we loop forever. Remote and remux jobs are unaffected.
+        const kind = i._pendingConvertKind === 'transcode' ? 'transcode' : 'remux';
+        if (!wouldUseRemote && kind === 'transcode' && this._liveTranscodeCount > 0) {
+          return false;
+        }
+        return wouldUseRemote ? !remoteFull : !localFull;
       });
       if (!pending) return;
 

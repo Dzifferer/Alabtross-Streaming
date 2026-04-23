@@ -3184,6 +3184,13 @@
     }
   }
 
+  // In-memory cache of /api/collections/enrich results. Keyed by the
+  // sorted IMDb id set so a stable library hits the same entry across
+  // tab switches; 5-min expiry so new/removed items re-fetch fresh
+  // grouping eventually. _collectionInflight dedupes parallel misses.
+  let _collectionCache = null;
+  let _collectionInflight = false;
+
   async function loadLibrary() {
     hideLibraryGroupOverlay();
     dom.libraryContent.innerHTML = '';
@@ -3286,17 +3293,35 @@
         }
       }
 
-      // Enrich movies with collection data, then render
+      // Enrich movies with collection data. Previously this awaited the
+      // /api/collections/enrich request in-line, which blocked the whole
+      // library render for 2-15s every time the tab opened (the endpoint
+      // chunks into 200-id requests with 300ms gaps, and TMDB lookups on
+      // the server can stall). Now we cache the result in-memory and
+      // treat a cache miss as fire-and-forget: render immediately with
+      // movies ungrouped, fetch in the background, re-run loadLibrary
+      // once the data arrives (which hits the cache on the second pass).
       let movieCollectionData = { collections: {} };
       if (movies.length > 0) {
         const movieImdbIds = movies.map(m => m.imdbId || '');
         const movieNames = movies.map(m => m.name || '');
         const validIds = movieImdbIds.filter(id => id && /^tt\d+$/.test(id));
         if (validIds.length > 0) {
-          try {
-            movieCollectionData = await api.enrichWithCollections(movieImdbIds, movieNames);
-          } catch (e) {
-            console.warn('[Library] Collection enrichment failed:', e.message);
+          const cacheKey = validIds.slice().sort().join(',');
+          const now = Date.now();
+          if (_collectionCache && _collectionCache.key === cacheKey && now < _collectionCache.expiresAt) {
+            movieCollectionData = _collectionCache.data;
+          } else if (!_collectionInflight) {
+            _collectionInflight = true;
+            api.enrichWithCollections(movieImdbIds, movieNames)
+              .then((data) => {
+                _collectionCache = { key: cacheKey, data, expiresAt: Date.now() + 5 * 60 * 1000 };
+                // Re-render to pick up the grouping. The next call hits
+                // the cache branch above so it's cheap.
+                loadLibrary();
+              })
+              .catch((e) => { console.warn('[Library] Collection enrichment failed:', e.message); })
+              .finally(() => { _collectionInflight = false; });
           }
         }
       }
@@ -3507,7 +3532,7 @@
       return `
         <button class="review-candidate" data-id="${escapeHTML(item.id)}" data-imdb-id="${escapeHTML(imdb)}" data-name="${escapeHTML(c.name || '')}" data-poster="${escapeHTML(c.poster || '')}" data-year="${escapeHTML(c.year || '')}" data-type="${escapeHTML(c.type || item.type || 'movie')}" title="${escapeHTML((c.name || '') + (c.year ? ' (' + c.year + ')' : ''))}" ${imdb ? '' : 'disabled'}>
           <div class="review-candidate-poster">
-            ${poster ? `<img src="${poster}" alt="${escapeHTML(c.name || '')}">` : `<div class="review-candidate-no-poster">${escapeHTML((c.name || '?').slice(0, 2).toUpperCase())}</div>`}
+            ${poster ? `<img src="${poster}" alt="${escapeHTML(c.name || '')}" loading="lazy">` : `<div class="review-candidate-no-poster">${escapeHTML((c.name || '?').slice(0, 2).toUpperCase())}</div>`}
           </div>
           <div class="review-candidate-meta">
             <div class="review-candidate-title">${escapeHTML(c.name || 'Unknown')}</div>
@@ -3624,7 +3649,7 @@
     return `
       <div class="card" data-id="${escapeHTML(item.id)}" data-imdb-id="${escapeHTML(item.imdbId || '')}" data-item-name="${escapeHTML(item.name || '')}" data-status="${item.status}">
         <div class="card-poster">
-          ${poster ? `<img src="${poster}" alt="${title}">` : ''}
+          ${poster ? `<img src="${poster}" alt="${title}" loading="lazy">` : ''}
           ${!poster ? `<div class="poster-placeholder">${title}</div>` : ''}
           ${matchBadge}
           ${overlayHtml}

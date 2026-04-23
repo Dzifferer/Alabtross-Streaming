@@ -217,10 +217,26 @@ function _stopHlsSession(itemId, reason) {
   // was deferred by this HLS session can resume when we hit zero.
   try { library.decrementLiveTranscodes(); } catch { /* library not ready */ }
   try { sess.ffmpeg.kill('SIGTERM'); } catch { /* already dead */ }
-  // Give ffmpeg a beat to release file handles before we rm the dir.
-  setTimeout(() => {
-    try { fs.rmSync(sess.dir, { recursive: true, force: true }); } catch { /* ignore */ }
-  }, 500);
+  // Give ffmpeg a beat to release file handles, then rm with a short
+  // retry schedule. Under load on eMMC / SD, Windows-via-Samba mounts,
+  // or a busy Jetson, 500ms isn't always enough for the OS to actually
+  // release the handles — the rm then fails silently and we'd leak a
+  // session dir until the startup wipe cleans it up. Three tries at
+  // 500ms / 2s / 5s covers every slow-disk case we've seen without
+  // delaying the common case.
+  const retryDelays = [500, 2000, 5000];
+  const attempt = (i) => {
+    try {
+      fs.rmSync(sess.dir, { recursive: true, force: true });
+    } catch (err) {
+      if (i + 1 < retryDelays.length) {
+        setTimeout(() => attempt(i + 1), retryDelays[i + 1]);
+      } else {
+        console.warn(`[HLS] Failed to remove ${sess.dir} after ${retryDelays.length} attempts: ${err.message} (startup wipe will clean it up)`);
+      }
+    }
+  };
+  setTimeout(() => attempt(0), retryDelays[0]);
   console.log(`[HLS] Session ended for ${itemId}: ${reason}`);
 }
 

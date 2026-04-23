@@ -13,6 +13,7 @@
     "compression": "^1.8.1",
     "express": "^4.21.0",
     "http-proxy-middleware": "^3.0.0",
+    "nat-upnp": "^1.1.1",
     "torrent-stream": "^1.2.1"
   },
   "optionalDependencies": {

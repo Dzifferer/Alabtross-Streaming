@@ -20,6 +20,7 @@ const crypto = require('crypto');
 const { VIDEO_EXTENSIONS, TRACKERS, isFileNameSafe, getMimeType } = require('./file-safety');
 const { PeerManager } = require('./peer-manager');
 const { PeerReputation } = require('./peer-reputation');
+const { NatPortMap } = require('./nat-portmap');
 const { WorkerClient } = require('./worker-client');
 
 const DEFAULT_MAX_CONCURRENT_DOWNLOADS = 5;
@@ -189,6 +190,19 @@ class LibraryManager {
     // path so it survives restarts.
     this._peerReputation = new PeerReputation({ cacheDir: this._torrentCachePath });
     this._peerReputation.startPersistTimer();
+    // UPnP port mapping so outside peers can reach our incoming BT
+    // listener. Without this, peers can only be reached by us dialing
+    // out, which caps effective swarm participation to roughly 50
+    // slots per engine (connections opt). With UPnP + an open router,
+    // incoming handshakes add on top of that for "free". Silently
+    // degrades to no-op if the router doesn't speak UPnP or the
+    // UPNP_ENABLED env is 0. Mapping is async; engine.listen()
+    // callbacks kick it off per engine.
+    this._natPortMap = new NatPortMap();
+    // Track which ports we've mapped per engine so _destroyEngine can
+    // unmap cleanly without racing against other engines that happen
+    // to have ended up on the same OS-assigned port.
+    this._engineMappedPort = new WeakMap();
     // Per-pack stall recycle count. Keyed by packId, not by engine, so
     // recycling (which destroys the old engine and creates a new one)
     // doesn't reset the counter. Bounded retry stops the worst case of
@@ -3360,6 +3374,12 @@ class LibraryManager {
     // Use the immediate write path — we can't count on the debounce timer
     // firing before the process exits.
     this._writeMetadataNow();
+    // Release every UPnP port we've mapped so we don't leak forwards on
+    // the router across restarts. Fire-and-forget — if the router is
+    // slow to respond, shutdown's forceExit timer will override.
+    try {
+      if (this._natPortMap) this._natPortMap.unmapAll().catch(() => { /* logged internally */ });
+    } catch { /* ignore */ }
     console.log('[Library] State saved — downloads and conversions will resume on next start');
   }
 
@@ -3778,6 +3798,16 @@ class LibraryManager {
           return;
         }
         console.log(`[Library] ${label}: listening for incoming peers on :${engine.port}`);
+        // Fire-and-forget UPnP port mapping so external peers can reach
+        // this listener. Remember the mapped port on the engine so
+        // _destroyEngine can release it cleanly. No-op on networks
+        // without UPnP; we don't await, so a slow router never blocks
+        // the download from starting.
+        const port = engine.port;
+        if (port && this._natPortMap && this._natPortMap.enabled()) {
+          this._engineMappedPort.set(engine, port);
+          this._natPortMap.mapPort(port).catch(() => { /* already logged */ });
+        }
       });
     } catch (err) {
       console.warn(`[Library] ${label}: engine.listen threw: ${err.message}`);
@@ -3912,6 +3942,17 @@ class LibraryManager {
     try {
       const infoHash = this._engineInfoHash && this._engineInfoHash.get(engine);
       if (infoHash) this._flushPeerCache(infoHash);
+    } catch { /* best-effort */ }
+    // Release the UPnP port forward we installed for this engine's
+    // incoming listener. Other active engines on different ports are
+    // unaffected; a shared default (6881) grabbed by the first engine
+    // is typically held as long as that engine lives.
+    try {
+      const mappedPort = this._engineMappedPort && this._engineMappedPort.get(engine);
+      if (mappedPort && this._natPortMap) {
+        this._engineMappedPort.delete(engine);
+        this._natPortMap.unmapPort(mappedPort).catch(() => { /* already logged */ });
+      }
     } catch { /* best-effort */ }
     const mgr = this._peerMgrByEngine.get(engine);
     if (mgr) {
@@ -4086,8 +4127,16 @@ class LibraryManager {
    */
   _baseTorrentOpts(downloadPath) {
     // See torrent-engine.js for rationale on connections/uploads values.
+    // connections was 50; bumped to 100 to roughly double the number of
+    // swarms we're participating in simultaneously. Since BT peers run
+    // optimistic-unchoke rotation independently per connection, being in
+    // more swarms raises the floor on our download rate when we're not
+    // in anyone's top reciprocation slot — helps the "speed drops to 0
+    // during the choke cycle" pattern without requiring us to seed more.
+    // CPU cost scales roughly linearly with slot count but is still
+    // negligible next to piece verify / libx264 on a Jetson.
     return {
-      connections: 50,
+      connections: 100,
       uploads: 4,
       dht: true,
       verify: true,

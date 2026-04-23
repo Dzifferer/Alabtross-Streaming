@@ -3574,15 +3574,6 @@ app.get('/api/library/:id/stream/remux', rateLimit, remuxGate, async (req, res) 
 
   const safeFilename = path.basename(filePath).replace(/[^\w\s.\-()[\]]/g, '_').replace(/\.(mkv|avi|wmv|mp4)$/i, '.mp4').substring(0, 200);
 
-  res.status(200);
-  res.set({
-    'Content-Type': 'video/mp4',
-    'X-Content-Type-Options': 'nosniff',
-    'Content-Disposition': `inline; filename="${safeFilename}"`,
-    'Cache-Control': 'no-store',
-    'Transfer-Encoding': 'chunked',
-  });
-
   // Read the file directly (not via stdin pipe) so ffmpeg can seek within
   // it. MP4 sources that aren't faststart keep the moov atom at the END
   // of the file; a stdin-fed ffmpeg cannot rewind to fetch it and the
@@ -3604,23 +3595,57 @@ app.get('/api/library/:id/stream/remux', rateLimit, remuxGate, async (req, res) 
     'pipe:1',
   ]);
 
-  ffmpeg.stdout.pipe(res);
+  // Same deferred-headers pattern as /stream/transcode: only commit to an
+  // HTTP 200 + video/mp4 response once ffmpeg writes its first byte. If it
+  // dies before emitting anything (input parse error, missing audio codec,
+  // seek failure on a truncated moov) the client gets a real 5xx JSON
+  // error instead of a zero-byte 200 that presents as MediaError code 4.
+  let firstByteSent = false;
+  let lastStderrLine = '';
+
+  ffmpeg.stdout.once('data', (firstChunk) => {
+    firstByteSent = true;
+    res.status(200);
+    res.set({
+      'Content-Type': 'video/mp4',
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Disposition': `inline; filename="${safeFilename}"`,
+      'Cache-Control': 'no-store',
+      'Transfer-Encoding': 'chunked',
+    });
+    res.write(firstChunk);
+    ffmpeg.stdout.pipe(res);
+  });
 
   ffmpeg.stderr.on('data', (data) => {
-    const msg = data.toString().trim();
-    if (msg) console.log(`[FFmpeg/Library] ${msg}`);
+    const msg = data.toString();
+    const trimmed = msg.trim();
+    if (trimmed) {
+      console.log(`[FFmpeg/Library] ${trimmed}`);
+      const last = trimmed.split('\n').pop();
+      if (last) lastStderrLine = last;
+    }
   });
 
   ffmpeg.on('error', (err) => {
     console.error(`[Library] FFmpeg spawn error: ${err.message}`);
-    if (!res.headersSent) {
+    if (!firstByteSent && !res.headersSent) {
       res.status(500).json({ error: 'Remux failed — FFmpeg not available' });
+    } else {
+      try { res.end(); } catch { /* ignore */ }
     }
   });
 
   ffmpeg.on('close', (code) => {
     if (code && code !== 0 && code !== 255) {
       console.warn(`[Library] FFmpeg exited with code ${code}`);
+    }
+    if (!firstByteSent && !res.headersSent) {
+      res.status(502).json({
+        error: 'Remux failed',
+        reason: lastStderrLine || `ffmpeg exited with code ${code ?? 'unknown'}`,
+      });
+      return;
     }
     try { res.end(); } catch { /* ignore */ }
   });
@@ -3693,15 +3718,6 @@ app.get('/api/library/:id/stream/transcode', rateLimit, transcodeGate, async (re
     .replace(/\.(mkv|avi|wmv|mp4|mov|m4v|flv|webm|ts|mpg|mpeg)$/i, '.mp4')
     .substring(0, 200);
 
-  res.status(200);
-  res.set({
-    'Content-Type': 'video/mp4',
-    'X-Content-Type-Options': 'nosniff',
-    'Content-Disposition': `inline; filename="${safeFilename}"`,
-    'Cache-Control': 'no-store',
-    'Transfer-Encoding': 'chunked',
-  });
-
   // Read the source file directly (not via stdin). For a full transcode we
   // read the whole file anyway so there's no benefit to the sequential
   // pipe trick the remux endpoint uses, and letting ffmpeg open the file
@@ -3764,16 +3780,44 @@ app.get('/api/library/:id/stream/transcode', rateLimit, transcodeGate, async (re
     'pipe:1',
   ]);
 
-  ffmpeg.stdout.pipe(res);
+  // Defer flushing the HTTP response headers until ffmpeg actually writes
+  // its first output byte. If ffmpeg dies early (bad hwaccel arg, codec
+  // missing, input parse error, file truncation caught by the decoder) we
+  // can still send a proper 5xx JSON error — instead of a 200 + video/mp4
+  // with a zero-byte body, which every browser's <video> element surfaces
+  // as MEDIA_ERR_SRC_NOT_SUPPORTED (code 4) with no usable diagnostics.
+  let firstByteSent = false;
+  let lastStderrLine = '';
+
+  const flushHeadersAndWrite = (firstChunk) => {
+    firstByteSent = true;
+    res.status(200);
+    res.set({
+      'Content-Type': 'video/mp4',
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Disposition': `inline; filename="${safeFilename}"`,
+      'Cache-Control': 'no-store',
+      'Transfer-Encoding': 'chunked',
+    });
+    res.write(firstChunk);
+    ffmpeg.stdout.pipe(res);
+  };
+
+  ffmpeg.stdout.once('data', flushHeadersAndWrite);
 
   ffmpeg.stderr.on('data', (data) => {
-    const msg = data.toString().trim();
-    if (msg) console.log(`[FFmpeg/Transcode] ${msg}`);
+    const msg = data.toString();
+    const trimmed = msg.trim();
+    if (trimmed) {
+      console.log(`[FFmpeg/Transcode] ${trimmed}`);
+      const last = trimmed.split('\n').pop();
+      if (last) lastStderrLine = last;
+    }
   });
 
   ffmpeg.on('error', (err) => {
     console.error(`[Library] FFmpeg transcode spawn error: ${err.message}`);
-    if (!res.headersSent) {
+    if (!firstByteSent && !res.headersSent) {
       res.status(500).json({ error: 'Transcode failed — FFmpeg not available' });
     } else {
       try { res.end(); } catch { /* ignore */ }
@@ -3783,6 +3827,17 @@ app.get('/api/library/:id/stream/transcode', rateLimit, transcodeGate, async (re
   ffmpeg.on('close', (code) => {
     if (code && code !== 0 && code !== 255) {
       console.warn(`[Library] FFmpeg transcode exited with code ${code}`);
+    }
+    if (!firstByteSent && !res.headersSent) {
+      // Dead on arrival — no bytes ever made it to `res`, so we still own
+      // the status line. Send a real HTTP error with the ffmpeg stderr
+      // tail so the client can log / display something actionable instead
+      // of the opaque MediaError code 4.
+      res.status(502).json({
+        error: 'Transcode failed',
+        reason: lastStderrLine || `ffmpeg exited with code ${code ?? 'unknown'}`,
+      });
+      return;
     }
     try { res.end(); } catch { /* ignore */ }
   });

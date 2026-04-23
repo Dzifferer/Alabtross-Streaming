@@ -37,7 +37,7 @@ const {
 const TorrentEngine = require('./lib/torrent-engine');
 const LibraryManager = require('./lib/library-manager');
 const {
-  mbSearchRelease, mbSearchArtist, mbGetRelease, mbGetArtist, mbGetReleaseForGroup,
+  mbSearchRelease, mbSearchArtist, mbSearchRecording, mbGetRelease, mbGetArtist, mbGetReleaseForGroup,
 } = require('./lib/metadata-musicbrainz');
 const { getSystemDiag } = require('./lib/system-diag');
 const { discoverDevices, getLocalIP } = require('./lib/local-discovery');
@@ -287,44 +287,81 @@ app.get('/api/search', rateLimit, async (req, res) => {
   const results = [];
 
   // Music types dispatch to MusicBrainz; no TMDB key required.
-  if (type === 'album' || type === 'artist' || type === 'music') {
+  // Results are returned tagged by `type` ('artist' | 'album' | 'song') so the
+  // client can render them as separate sections. Each type gets its own bucket
+  // with its own limit so high-scoring album hits can't crowd out the artist
+  // the user was actually searching for (and vice versa).
+  if (type === 'album' || type === 'artist' || type === 'song' || type === 'music') {
     try {
-      const tasks = [];
-      if (type === 'album' || type === 'music') {
-        tasks.push(mbSearchRelease(query).then(rs => rs.map(r => ({
-          id: `mbr:${r.mbid}`,
-          mbid: r.mbid,
-          artistMbid: r.artistMbid,
-          type: 'album',
-          name: r.title,
-          artist: r.artist,
-          year: r.year,
-          poster: r.coverUrl,
-          overview: '',
-          vote_average: 0,
-          popularity: r.score || 0,
-        })).filter(r => r.name && r.artist)));
-      }
-      if (type === 'artist' || type === 'music') {
-        tasks.push(mbSearchArtist(query).then(rs => rs.map(r => ({
-          id: `mba:${r.mbid}`,
-          mbid: r.mbid,
-          type: 'artist',
-          name: r.name,
-          year: r.country || '',
-          poster: null,
-          overview: r.disambiguation || '',
-          vote_average: 0,
-          popularity: r.score || 0,
-        }))));
-      }
-      const [albums, artists] = await Promise.all(tasks.length === 2 ? tasks : [tasks[0], Promise.resolve([])]);
-      const combined = [...(albums || []), ...(artists || [])];
-      combined.sort((a, b) => b.popularity - a.popularity);
-      return res.json({ results: combined.slice(0, 30) });
+      const wantArtists = type === 'artist' || type === 'music';
+      const wantAlbums = type === 'album' || type === 'music';
+      const wantSongs = type === 'song' || type === 'music';
+
+      const artistTask = wantArtists
+        ? mbSearchArtist(query).then(rs => rs.map(r => ({
+            id: `mba:${r.mbid}`,
+            mbid: r.mbid,
+            type: 'artist',
+            name: r.name,
+            artist: r.disambiguation || r.country || '',
+            year: r.country || '',
+            poster: null,
+            overview: r.disambiguation || '',
+            vote_average: 0,
+            popularity: r.score || 0,
+          }))).catch(() => [])
+        : Promise.resolve([]);
+
+      const albumTask = wantAlbums
+        ? mbSearchRelease(query).then(rs => rs.map(r => ({
+            id: `mbr:${r.mbid}`,
+            mbid: r.mbid,
+            artistMbid: r.artistMbid,
+            type: 'album',
+            name: r.title,
+            artist: r.artist,
+            year: r.year,
+            poster: r.coverUrl,
+            overview: '',
+            vote_average: 0,
+            popularity: r.score || 0,
+          })).filter(r => r.name && r.artist)).catch(() => [])
+        : Promise.resolve([]);
+
+      const songTask = wantSongs
+        ? mbSearchRecording(query).then(rs => rs.map(r => ({
+            id: `mbrec:${r.mbid}`,
+            mbid: r.mbid,
+            artistMbid: r.artistMbid,
+            releaseMbid: r.releaseMbid,
+            type: 'song',
+            name: r.title,
+            artist: r.artist,
+            album: r.releaseTitle,
+            duration: r.duration,
+            year: r.year,
+            poster: r.coverUrl,
+            overview: r.releaseTitle || '',
+            vote_average: 0,
+            popularity: r.score || 0,
+          })).filter(r => r.name && r.artist)).catch(() => [])
+        : Promise.resolve([]);
+
+      const [artists, albums, songs] = await Promise.all([artistTask, albumTask, songTask]);
+      const sortByScore = (a, b) => b.popularity - a.popularity;
+      artists.sort(sortByScore);
+      albums.sort(sortByScore);
+      songs.sort(sortByScore);
+
+      // Flat `results` preserves the existing API shape; `groups` lets the
+      // client render typed sections without re-bucketing.
+      return res.json({
+        results: [...artists, ...albums, ...songs],
+        groups: { artists, albums, songs },
+      });
     } catch (err) {
       console.error('[MB] Search error:', err.message);
-      return res.json({ results: [], error: 'Music search failed' });
+      return res.json({ results: [], groups: { artists: [], albums: [], songs: [] }, error: 'Music search failed' });
     }
   }
 

@@ -39,6 +39,21 @@
     return results;
   }
 
+  // Grouped variant — returns { artists, albums, songs } for the Music search
+  // UI that renders each type as its own section.
+  async function searchMusicGrouped(query) {
+    const q = (query || '').trim();
+    const empty = { artists: [], albums: [], songs: [] };
+    if (!q) return empty;
+    const key = `searchg:music:${q.toLowerCase()}`;
+    const cached = cacheGet(key);
+    if (cached) return cached;
+    const data = await json(`/api/search?q=${encodeURIComponent(q)}&type=music`);
+    const groups = data.groups || empty;
+    cacheSet(key, groups);
+    return groups;
+  }
+
   async function getReleaseMeta(mbid) {
     const key = `rel:${mbid}`;
     const cached = cacheGet(key);
@@ -171,6 +186,7 @@
 
   window.MusicAPI = {
     searchMusic,
+    searchMusicGrouped,
     getReleaseMeta,
     getArtistMeta,
     getReleaseForGroup,

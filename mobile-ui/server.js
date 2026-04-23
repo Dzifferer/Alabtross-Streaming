@@ -199,8 +199,12 @@ const hlsSessions = new Map(); // itemId -> { dir, ffmpeg, playlistPath, lastAcc
 function _hlsSessionDirFor(itemId) {
   // Sanitize the id into a filesystem-safe directory name. The id usually
   // comes from torrent infoHash (hex) or "disk_" + path fragment, but we
-  // don't trust it — replace anything outside [A-Za-z0-9._-] with '_'.
-  const safe = itemId.replace(/[^\w.-]/g, '_').substring(0, 120);
+  // don't trust it — replace anything outside [A-Za-z0-9_-] with '_'. We
+  // intentionally DROP dots from the allowed set: an id of `..` would
+  // otherwise pass through and path.join(cacheDir, '..') would escape.
+  // library.getItem() blocks malformed ids upstream, but a route-level
+  // mistake shouldn't be able to cascade into a cache-dir escape.
+  const safe = itemId.replace(/[^\w-]/g, '_').substring(0, 120) || '_';
   return path.join(HLS_CACHE_PATH, safe);
 }
 
@@ -4011,6 +4015,12 @@ app.get('/api/library/:id/stream/transcode', rateLimit, transcodeGate, async (re
   });
 
   ffmpeg.on('error', (err) => {
+    // Node normally also fires 'close' after a failed spawn, but this
+    // is belt-and-suspenders: release the slot here too, guarded by
+    // the liveSlotReleased flag so the real 'close' still sees it as
+    // already-released and no-ops. Cheaper than reasoning about the
+    // exact Node edge cases where only 'error' fires.
+    releaseLiveSlot();
     console.error(`[Library] FFmpeg transcode spawn error: ${err.message}`);
     if (!firstByteSent && !res.headersSent) {
       res.status(500).json({ error: 'Transcode failed — FFmpeg not available' });

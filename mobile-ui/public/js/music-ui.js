@@ -42,6 +42,32 @@
 
   let currentTab = 'home';
 
+  // Kick off a bulk discography download for an artist. Shared across the
+  // search cards, artists tab, artist detail page, and album detail pages.
+  async function startDiscographyDownload(artistMbid, artistName) {
+    if (!artistMbid) {
+      alert('This artist has no MusicBrainz ID — discography download is unavailable.');
+      return { ok: false };
+    }
+    const label = artistName ? `all albums by ${artistName}` : 'this entire discography';
+    if (!confirm(`Queue ${label}? This may take a while and consume significant bandwidth and storage.`)) {
+      return { ok: false, cancelled: true };
+    }
+    try {
+      const r = await window.MusicAPI.addDiscographyToLibrary(artistMbid);
+      const n = r && r.total != null ? r.total : 0;
+      if (!n) {
+        musicToast('No releases found for this artist.');
+        return r || { ok: true, total: 0 };
+      }
+      musicToast(`Queued ${n} album${n === 1 ? '' : 's'} — check Library for progress.`);
+      return r;
+    } catch (err) {
+      musicToast('Failed to start discography download: ' + err.message);
+      return { ok: false, error: err.message };
+    }
+  }
+
   // ─── Music tab landing ─────────────────
 
   async function renderMusicHome() {
@@ -111,6 +137,20 @@
     const card = el('div', { class: 'music-card', 'data-id': item.id || '' });
     const cover = el('div', { class: 'music-card__cover' });
     if (item.poster) cover.style.backgroundImage = `url(${item.poster})`;
+    // Artist cards get a small overlay button to queue the full discography
+    // without navigating into the detail view.
+    if (item.type === 'artist' && item.mbid) {
+      const dlBtn = el('button', {
+        class: 'music-card__dl',
+        type: 'button',
+        title: `Download discography — ${item.name || ''}`.trim(),
+      }, '⬇');
+      dlBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        startDiscographyDownload(item.mbid, item.name);
+      });
+      cover.appendChild(dlBtn);
+    }
     card.appendChild(cover);
     card.appendChild(el('div', { class: 'music-card__title' }, item.name || ''));
     if (item.artist) card.appendChild(el('div', { class: 'music-card__subtitle' }, item.artist));
@@ -297,6 +337,29 @@
       addBtn.addEventListener('click', () => renderRemoteStreams(container, meta));
       actions.appendChild(addBtn);
     }
+    // If we know the artist's MBID, expose a shortcut to bulk-download
+    // their entire discography from any album page.
+    if (meta.artistMbid) {
+      const discogBtn = el('button', { class: 'btn-block' }, `Download ${artist || 'artist'} discography`);
+      discogBtn.addEventListener('click', async () => {
+        discogBtn.disabled = true;
+        const original = discogBtn.textContent;
+        discogBtn.textContent = 'Starting…';
+        const r = await startDiscographyDownload(meta.artistMbid, artist || meta.artist);
+        if (r && r.ok !== false && !r.cancelled) {
+          discogBtn.textContent = 'Queued ✓';
+        } else {
+          discogBtn.disabled = false;
+          discogBtn.textContent = original;
+        }
+      });
+      actions.appendChild(discogBtn);
+      if (meta.artistMbid && artist) {
+        const openArtistBtn = el('button', { class: 'btn-block' }, `View ${artist}`);
+        openArtistBtn.addEventListener('click', () => openArtistDetail(meta.artistMbid));
+        actions.appendChild(openArtistBtn);
+      }
+    }
     container.appendChild(actions);
 
     // Tracklist
@@ -350,6 +413,79 @@
         }
         row.appendChild(actions);
         row.addEventListener('click', () => playRemoteAlbumStream(meta, s));
+        list.appendChild(row);
+      }
+      streamsHost.appendChild(list);
+    } catch (e) {
+      streamsHost.innerHTML = `<p>Error: ${escapeHTML(e.message)}</p>`;
+    }
+  }
+
+  // Render torrent results for a bundled artist-discography pack. These
+  // are typically large FLAC/MP3 archives containing every album. The user
+  // picks one and it's added to the library as a single item.
+  async function renderArtistPackStreams(container, artistMbid, artistName) {
+    let streamsHost = container.querySelector('.album-streams.discography-pack');
+    if (streamsHost) streamsHost.remove();
+    streamsHost = el('div', { class: 'album-streams discography-pack' });
+    streamsHost.appendChild(el('h3', {}, 'Discography packs'));
+    streamsHost.appendChild(el('p', { class: 'loading-inline' }, 'Searching providers...'));
+    container.appendChild(streamsHost);
+    try {
+      const streams = await window.MusicAPI.getArtistStreams(artistMbid, artistName);
+      streamsHost.innerHTML = '';
+      streamsHost.appendChild(el('h3', {}, `Discography packs (${streams.length})`));
+      if (!streams.length) {
+        streamsHost.appendChild(el('p', {}, 'No packs found — try the per-album "Download discography" option instead.'));
+        return;
+      }
+      const list = el('div', { class: 'stream-list' });
+      for (const s of streams) {
+        const row = el('div', { class: 'stream-row' });
+        const lines = (s.title || '').split('\n');
+        row.appendChild(el('div', { class: 'stream-row__title' }, lines[0] || ''));
+        const tags = [];
+        if (s.format) tags.push(s.format);
+        if (s.bitrate) tags.push(`${s.bitrate}kbps`);
+        if (s.seeds) tags.push(`${s.seeds} seeds`);
+        if (s.size) tags.push(s.size);
+        if (s.source) tags.push(s.source);
+        row.appendChild(el('div', { class: 'stream-row__tags' }, tags.join(' · ')));
+        const rowActions = el('div', { class: 'stream-row__actions' });
+        if (s.infoHash && s.magnetUri) {
+          const addBtn = el('button', { class: 'btn-sm' }, 'Add pack');
+          addBtn.addEventListener('click', async (ev) => {
+            ev.stopPropagation();
+            addBtn.disabled = true;
+            addBtn.textContent = 'Adding…';
+            try {
+              const res = await fetch('/api/music-library/add', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  infoHash: s.infoHash,
+                  magnetUri: s.magnetUri,
+                  artistMbid,
+                  title: `${artistName} — Discography`,
+                  artist: artistName,
+                  year: '',
+                  coverUrl: '',
+                  genres: [],
+                }),
+              });
+              const data = await res.json();
+              if (!res.ok) throw new Error(data.error || 'Add failed');
+              musicToast(`Added pack — ${data.status || 'started'}`);
+              addBtn.textContent = 'Added ✓';
+            } catch (err) {
+              musicToast('Failed to add pack: ' + err.message);
+              addBtn.disabled = false;
+              addBtn.textContent = 'Add pack';
+            }
+          });
+          rowActions.appendChild(addBtn);
+        }
+        row.appendChild(rowActions);
         list.appendChild(row);
       }
       streamsHost.appendChild(list);
@@ -459,21 +595,25 @@
         const actions = el('div', { class: 'album-actions' });
         const dlAllBtn = el('button', { class: 'btn-primary' }, `Download discography (${releaseGroups.length})`);
         dlAllBtn.addEventListener('click', async () => {
-          if (!confirm(`Queue ${releaseGroups.length} albums by ${meta.name} for download? This may take a while and consume significant bandwidth and storage.`)) return;
           dlAllBtn.disabled = true;
           const originalText = dlAllBtn.textContent;
           dlAllBtn.textContent = 'Starting…';
-          try {
-            const r = await window.MusicAPI.addDiscographyToLibrary(mbid);
-            musicToast(`Queued ${r.total || releaseGroups.length} albums — check Library for progress.`);
+          const r = await startDiscographyDownload(mbid, meta.name);
+          if (r && r.ok !== false && !r.cancelled) {
             dlAllBtn.textContent = 'Queued ✓';
-          } catch (err) {
-            musicToast('Failed to start discography download: ' + err.message);
+          } else {
             dlAllBtn.disabled = false;
             dlAllBtn.textContent = originalText;
           }
         });
         actions.appendChild(dlAllBtn);
+
+        // Alternative: one-shot "pack" torrents that bundle many albums.
+        // Often faster than per-album resolution when a well-seeded pack exists.
+        const packBtn = el('button', { class: 'btn-block' }, 'Find discography pack');
+        packBtn.addEventListener('click', () => renderArtistPackStreams(container, mbid, meta.name));
+        actions.appendChild(packBtn);
+
         container.appendChild(actions);
       }
 

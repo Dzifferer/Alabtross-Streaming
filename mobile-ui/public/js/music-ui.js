@@ -582,20 +582,53 @@
     if (!q) { switchMusicTab(currentTab); return; }
     content.innerHTML = '<div class="loading-state"><div class="spinner"></div><p>Searching MusicBrainz...</p></div>';
     try {
-      const results = await window.MusicAPI.searchMusic(q, 'music');
+      const groups = await window.MusicAPI.searchMusicGrouped(q);
+      const { artists = [], albums = [], songs = [] } = groups || {};
       content.innerHTML = '';
-      if (!results.length) {
+      if (!artists.length && !albums.length && !songs.length) {
         content.innerHTML = '<div class="empty-state"><p>No results.</p></div>';
         return;
       }
-      const grid = el('div', { class: 'music-grid' });
-      for (const r of results) {
-        grid.appendChild(renderCard(r, 'remote'));
-      }
-      content.appendChild(grid);
+      if (artists.length) content.appendChild(renderSearchSection('Artists', artists, 'grid'));
+      if (albums.length) content.appendChild(renderSearchSection('Albums', albums, 'grid'));
+      if (songs.length) content.appendChild(renderSearchSection('Songs', songs, 'list'));
     } catch (e) {
       content.innerHTML = `<div class="empty-state"><p>Search failed: ${escapeHTML(e.message)}</p></div>`;
     }
+  }
+
+  function renderSearchSection(title, items, layout) {
+    const section = el('div', { class: 'music-search-section' });
+    section.appendChild(el('h3', { class: 'music-search-section__title' }, `${title} (${items.length})`));
+    if (layout === 'list') {
+      const list = el('div', { class: 'music-song-list' });
+      for (const it of items) list.appendChild(renderSongRow(it));
+      section.appendChild(list);
+    } else {
+      const grid = el('div', { class: 'music-grid' });
+      for (const it of items) grid.appendChild(renderCard(it, 'remote'));
+      section.appendChild(grid);
+    }
+    return section;
+  }
+
+  function renderSongRow(item) {
+    const row = el('div', { class: 'music-song-row', 'data-id': item.id || '' });
+    const cover = el('div', { class: 'music-song-row__cover' });
+    if (item.poster) cover.style.backgroundImage = `url(${item.poster})`;
+    row.appendChild(cover);
+    const meta = el('div', { class: 'music-song-row__meta' });
+    meta.appendChild(el('div', { class: 'music-song-row__title' }, item.name || ''));
+    const sub = [item.artist, item.album].filter(Boolean).join(' — ');
+    if (sub) meta.appendChild(el('div', { class: 'music-song-row__subtitle' }, sub));
+    row.appendChild(meta);
+    if (item.duration) row.appendChild(el('div', { class: 'music-song-row__time' }, fmtTime(item.duration)));
+    row.addEventListener('click', () => {
+      // Clicking a song opens the album detail it appears on; users can then
+      // play the full album or jump to the track from there.
+      if (item.releaseMbid) openAlbumDetail(item.releaseMbid);
+    });
+    return row;
   }
 
   // ─── Tab switching ─────────────────────

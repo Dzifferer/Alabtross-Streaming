@@ -109,8 +109,14 @@ function normalizeTags(tags) {
     .slice(0, 6);
 }
 
-async function mbSearchRelease(query, limit = 15) {
-  const data = await mbFetch('/release', { query, limit: String(limit) });
+// MusicBrainz' default query parser requires Lucene syntax and is unforgiving
+// of real-world inputs (e.g. "the beatles" underweights the noise word "the"
+// and can bury the canonical artist beneath compilations). `dismax=true`
+// switches to the DisMax parser which is designed for end-user free-text
+// queries and matches better across name/alias fields — this is what actually
+// surfaces major artists when users type a plain name.
+async function mbSearchRelease(query, limit = 25) {
+  const data = await mbFetch('/release', { query, limit: String(limit), dismax: 'true' });
   if (!data || !Array.isArray(data.releases)) return [];
   return data.releases.map(r => ({
     mbid: r.id,
@@ -125,8 +131,8 @@ async function mbSearchRelease(query, limit = 15) {
   }));
 }
 
-async function mbSearchArtist(query, limit = 10) {
-  const data = await mbFetch('/artist', { query, limit: String(limit) });
+async function mbSearchArtist(query, limit = 25) {
+  const data = await mbFetch('/artist', { query, limit: String(limit), dismax: 'true' });
   if (!data || !Array.isArray(data.artists)) return [];
   return data.artists.map(a => ({
     mbid: a.id,
@@ -138,6 +144,27 @@ async function mbSearchArtist(query, limit = 10) {
     tags: normalizeTags(a.tags),
     score: a.score || 0,
   }));
+}
+
+async function mbSearchRecording(query, limit = 25) {
+  const data = await mbFetch('/recording', { query, limit: String(limit), dismax: 'true' });
+  if (!data || !Array.isArray(data.recordings)) return [];
+  return data.recordings.map(r => {
+    const releases = Array.isArray(r.releases) ? r.releases : [];
+    const firstRelease = releases[0] || null;
+    return {
+      mbid: r.id,
+      title: r.title,
+      artist: (r['artist-credit'] || []).map(a => a.name).join(', '),
+      artistMbid: (r['artist-credit'] && r['artist-credit'][0] && r['artist-credit'][0].artist && r['artist-credit'][0].artist.id) || null,
+      duration: r.length ? Math.round(r.length / 1000) : null,
+      releaseMbid: firstRelease ? firstRelease.id : null,
+      releaseTitle: firstRelease ? firstRelease.title : '',
+      year: firstRelease && firstRelease.date ? firstRelease.date.slice(0, 4) : '',
+      score: r.score || 0,
+      coverUrl: firstRelease ? coverProxyUrl(firstRelease.id, 500) : null,
+    };
+  });
 }
 
 async function mbGetRelease(mbid) {
@@ -233,6 +260,7 @@ function mbGetCoverArt(releaseMbid, size = 500) {
 module.exports = {
   mbSearchRelease,
   mbSearchArtist,
+  mbSearchRecording,
   mbGetRelease,
   mbGetArtist,
   mbGetReleaseForGroup,

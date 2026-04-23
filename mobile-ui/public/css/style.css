@@ -4345,6 +4345,65 @@ select.manual-import-input {
   text-overflow: ellipsis;
 }
 
+/* Search result sections — grouped Artists / Albums / Songs */
+.music-search-section { margin: 14px 0 6px; }
+.music-search-section + .music-search-section { margin-top: 22px; }
+.music-search-section__title {
+  font-size: 14px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.85);
+  margin: 0 0 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.music-song-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.music-song-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 6px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.music-song-row:hover { background: rgba(255, 255, 255, 0.05); }
+.music-song-row__cover {
+  flex: 0 0 44px;
+  width: 44px;
+  height: 44px;
+  border-radius: 6px;
+  background: #1a1a24 center/cover no-repeat;
+  background-color: rgba(255, 255, 255, 0.06);
+}
+.music-song-row__meta {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.music-song-row__title {
+  font-size: 14px;
+  color: var(--text, #fff);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.music-song-row__subtitle {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.6);
+  margin-top: 2px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.music-song-row__time {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.6);
+  font-variant-numeric: tabular-nums;
+}
+
 /* Playlists */
 .playlists-header { margin-bottom: 12px; }
 .playlists-list { display: flex; flex-direction: column; gap: 8px; }

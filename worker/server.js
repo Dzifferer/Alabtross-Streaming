@@ -72,6 +72,16 @@ function doubleRate(rateStr) {
 }
 const MAX_WIDTH     = parseInt(process.env.MAX_WIDTH || '1920', 10);
 const AUDIO_BITRATE = process.env.AUDIO_BITRATE || '192k';
+// Cap on request body size. Tailscale-authenticated traffic is the only
+// thing that reaches this process, but an authenticated bug on the Orin
+// or a compromised tailnet node still shouldn't be able to wedge the
+// worker by streaming 1 TB of garbage at its temp disk. Default is
+// 100 GB — more than enough for any realistic movie source including
+// UHD remuxes. Override with MAX_INPUT_SIZE (bytes).
+const MAX_INPUT_SIZE = (() => {
+  const n = parseInt(process.env.MAX_INPUT_SIZE, 10);
+  return Number.isFinite(n) && n > 0 ? n : 100 * 1024 * 1024 * 1024;
+})();
 
 fs.mkdirSync(TEMP_DIR, { recursive: true });
 
@@ -282,6 +292,21 @@ function handleTranscode(req, res) {
     return jsonResponse(res, 401, { error: 'unauthorized' });
   }
 
+  // Reject oversized uploads up front via Content-Length. Also enforce
+  // a live byte counter below in case the header is missing or lies —
+  // Node won't auto-cap the request stream, so we abort once the cap
+  // is crossed. Both checks are needed: the header check avoids opening
+  // a tempfile we're going to throw away, and the live counter catches
+  // the malicious / buggy "no Content-Length" case.
+  const declaredLen = parseInt(req.headers['content-length'], 10);
+  if (Number.isFinite(declaredLen) && declaredLen > MAX_INPUT_SIZE) {
+    return jsonResponse(res, 413, {
+      error: 'input too large',
+      limit: MAX_INPUT_SIZE,
+      declared: declaredLen,
+    });
+  }
+
   // Parse hints from headers — all optional.
   let sourceFilename = 'source.bin';
   try { sourceFilename = decodeURIComponent(req.headers['x-source-filename'] || 'source.bin'); }
@@ -306,7 +331,22 @@ function handleTranscode(req, res) {
   let aborted = false;
   let ff = null;
 
-  req.on('data', (chunk) => { bytesIn += chunk.length; });
+  req.on('data', (chunk) => {
+    bytesIn += chunk.length;
+    // Runtime cap: some HTTP clients omit Content-Length (e.g., chunked
+    // transfer). Abort as soon as we cross the limit so we don't fill
+    // the worker's temp disk.
+    if (bytesIn > MAX_INPUT_SIZE && !aborted) {
+      aborted = true;
+      try { req.destroy(new Error('input too large')); } catch { /* ignore */ }
+      try { ws.destroy(); } catch { /* ignore */ }
+      cleanupJob(job);
+      if (!res.headersSent) {
+        jsonResponse(res, 413, { error: 'input too large', limit: MAX_INPUT_SIZE });
+      }
+      console.log(`${tag} input exceeded ${(MAX_INPUT_SIZE / 1e9).toFixed(1)} GB cap; aborted`);
+    }
+  });
   req.pipe(ws);
 
   req.on('aborted', () => {
@@ -441,7 +481,7 @@ server.requestTimeout   = 0;
 
 server.listen(PORT, HOST, () => {
   console.log(`[worker] albatross GPU worker listening on http://${HOST}:${PORT}`);
-  console.log(`[worker] preset=${NVENC_PRESET} cq=${NVENC_CQ} maxWidth=${MAX_WIDTH} secret=${SECRET ? 'set' : 'none'}`);
+  console.log(`[worker] preset=${NVENC_PRESET} cq=${NVENC_CQ} maxWidth=${MAX_WIDTH} maxInput=${(MAX_INPUT_SIZE / 1e9).toFixed(0)}GB secret=${SECRET ? 'set' : 'none'}`);
   console.log(`[worker] temp=${TEMP_DIR}`);
 });
 

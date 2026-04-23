@@ -68,6 +68,19 @@ function _probeCacheSet(key, value) {
   }
   _probeCache.set(key, value);
 }
+// Drop every cache entry whose key starts with `${filePath}\u0000` — used
+// when we know the file is about to be (or has just been) rewritten, so
+// subsequent probes go back to ffprobe instead of seeing the pre-write
+// codecs. The mtime+size component of the cache key also self-invalidates
+// on a rewrite, but explicit eviction is defensive: it closes the window
+// where a consumer hits the cache between the write completing and the
+// filesystem metadata update becoming visible.
+function _probeCacheDeleteByPath(filePath) {
+  const prefix = `${filePath}\u0000`;
+  for (const key of _probeCache.keys()) {
+    if (key.startsWith(prefix)) _probeCache.delete(key);
+  }
+}
 
 // Per-file completion cache for computeFileProgress. WeakMap so the entry
 // is collected automatically when the torrent-stream engine drops the file
@@ -176,6 +189,13 @@ class LibraryManager {
     this._maxConcurrentRemoteConversions = typeof opts.maxConcurrentRemoteConversions === 'number'
       ? Math.max(1, opts.maxConcurrentRemoteConversions)
       : 3;
+    // Count of live transcode / HLS sessions currently running libx264
+    // on the Orin CPU. Live playback is user-visible; background jobs are
+    // not; so when this is >0 we defer starting new LOCAL transcodes to
+    // keep the live session fluid. Remote (NVENC) conversions don't touch
+    // the Orin CPU and are unaffected. Maintained by server.js via
+    // incrementLiveTranscodes / decrementLiveTranscodes.
+    this._liveTranscodeCount = 0;
     // Free-space reserve kept below the library's current usage. New
     // downloads / conversions are refused when they would eat into this
     // headroom. 1 GB is enough for metadata.json churn, ffmpeg temp
@@ -3164,6 +3184,44 @@ class LibraryManager {
   }
 
   /**
+   * Signal that a live transcode / HLS session has started.  Background
+   * local libx264 conversions will defer themselves until the count goes
+   * back to zero, so live playback gets the whole CPU budget. Remote
+   * (NVENC) conversions are unaffected — they don't touch the Orin CPU.
+   * Paired with decrementLiveTranscodes(); the two MUST balance.
+   */
+  incrementLiveTranscodes() {
+    this._liveTranscodeCount = (this._liveTranscodeCount || 0) + 1;
+  }
+
+  /**
+   * Signal the end of a live transcode / HLS session. When the count
+   * drops to zero, kick the conversion queue so anything deferred by
+   * the live-transcode gate can start.
+   */
+  decrementLiveTranscodes() {
+    this._liveTranscodeCount = Math.max(0, (this._liveTranscodeCount || 0) - 1);
+    if (this._liveTranscodeCount === 0) {
+      // Resume any background conversions that were deferred while live
+      // playback was running. Fire-and-forget; the queue processes
+      // eligible items itself.
+      this._processConversionQueue().catch(() => { /* swallow */ });
+    }
+  }
+
+  /**
+   * Return true if the disk has enough free space, above the configured
+   * reserve, to accept another live-transcode / HLS spawn. Cheaper than
+   * _checkFreeSpace (no requiredBytes estimate) — ffmpeg's live outputs
+   * are small and short-lived, but a fully-full disk still hangs ffmpeg.
+   * Server uses this to bail early with a real HTTP error instead of
+   * letting ffmpeg wedge on ENOSPC. Returns { ok, freeBytes, reason? }.
+   */
+  async hasLiveTranscodeDiskSpace() {
+    return this._checkFreeSpace(0, 'live transcode');
+  }
+
+  /**
    * Lifetime conversion success/failure counters since process start.
    * Resets on restart. Exposed so operators can see systemic issues
    * (consistently-failing worker, every HEVC source erroring, etc.).
@@ -5034,6 +5092,18 @@ class LibraryManager {
     const item = this._items.get(id);
     if (!item || !item.filePath) return;
 
+    // Drop any probe cache entries for the source and the future output
+    // path now — the file is about to change. The mtime+size key would
+    // eventually self-invalidate, but explicit eviction closes the
+    // window where a consumer probes between the write completing and
+    // the filesystem stat becoming visible.
+    try {
+      const srcAbs = path.join(this._libraryPath, item.filePath);
+      _probeCacheDeleteByPath(srcAbs);
+      const outAbs = this._getConvertOutputPath(srcAbs);
+      if (outAbs !== srcAbs) _probeCacheDeleteByPath(outAbs);
+    } catch { /* best-effort; cache miss on next probe is harmless */ }
+
     // Disk-space preflight: the output MP4 is written to a temp file
     // alongside the source until finalization, so we briefly need up to
     // ~2× source size on disk. Use source size as a conservative proxy
@@ -5059,6 +5129,23 @@ class LibraryManager {
       this._workerClient.enabled() &&
       this._workerHealth &&
       !item._workerFailed;
+
+    // CPU starvation guard: a local libx264 transcode pegs every core on
+    // the Orin, so if any live /stream/transcode or HLS session is going
+    // the background job would slow live playback to a crawl. Defer the
+    // job; decrementLiveTranscodes() kicks _processConversionQueue when
+    // the last live session ends. Only gates LOCAL transcodes — remote
+    // NVENC runs on a different machine so there's no contention, and
+    // remux is a stream-copy that barely touches the CPU.
+    if (!useRemote && kind === 'transcode' && this._liveTranscodeCount > 0) {
+      console.log(
+        `[Library] Deferring local transcode of "${item.name}" — ` +
+        `${this._liveTranscodeCount} live session(s) active`
+      );
+      item._pendingConversion = true;
+      item._pendingConvertKind = kind;
+      return;
+    }
 
     if (useRemote) {
       this._startRemoteConversion(id);
@@ -5187,6 +5274,11 @@ class LibraryManager {
 
     console.log(`[Library] Starting REMOTE transcode: "${item.name}" (${(totalIn / 1e9).toFixed(2)} GB, codec=${item._probeVideoCodec || '?'}, audio=${item._probeAudioCodec || '?'}${audioCopy ? ' COPY' : ''})`);
 
+    // Captured across every onProgress call so the encode-phase ramp
+    // below has a stable reference point — worker-client fires ticks
+    // every 5s during encode so the UI bar keeps moving.
+    let encodeStartMs = null;
+
     this._workerClient.transcode(inputPath, tempOutputPath, {
       filename:    path.basename(inputPath),
       sourceCodec: item._probeVideoCodec || undefined,
@@ -5195,13 +5287,19 @@ class LibraryManager {
       onProgress: ({ phase, bytesUp, bytesDown, totalUp }) => {
         // Map (upload → encode → download) phases onto the 0-99% scale
         // the UI uses. We don't have per-frame progress on the remote
-        // path, so the bands are coarse but they're enough for the
-        // converting indicator to look like it's moving.
+        // path, so the bands are coarse, but a time-based ramp during
+        // encode is better than pinning the bar at 40% for 15 minutes.
         let p;
         if (phase === 'upload') {
           p = totalUp > 0 ? Math.round((bytesUp / totalUp) * 33) : 0;
         } else if (phase === 'encode') {
-          p = 40;
+          if (encodeStartMs === null) encodeStartMs = Date.now();
+          // Ramp 40 → 59 over ~15 min, approximately the p90 encode
+          // wall-clock for typical movie-length sources on RTX-tier
+          // NVENC. We never hit 60 via time alone, so the bar visibly
+          // steps forward when the download phase actually starts.
+          const elapsedMin = (Date.now() - encodeStartMs) / 60000;
+          p = 40 + Math.min(19, Math.round((elapsedMin / 15) * 19));
         } else {
           // download phase — we don't know the output size up front, so
           // crawl from 60 → 99 based on bytes received vs the input size
@@ -5284,6 +5382,14 @@ class LibraryManager {
       if (inputPath !== finalOutputPath && fs.existsSync(inputPath)) {
         fs.unlinkSync(inputPath);
       }
+
+      // Invalidate probe cache entries tied to the old source AND the
+      // new output path. Mtime+size keying normally self-invalidates,
+      // but the finalize sequence above can briefly present stale
+      // filesystem metadata; drop the entries explicitly so the next
+      // probe goes back to ffprobe.
+      _probeCacheDeleteByPath(inputPath);
+      if (inputPath !== finalOutputPath) _probeCacheDeleteByPath(finalOutputPath);
 
       // Update item metadata
       const newRelPath = path.relative(this._libraryPath, finalOutputPath);
@@ -5408,6 +5514,31 @@ class LibraryManager {
    * single tick without burning any Jetson CPU.
    */
   async _processConversionQueue() {
+    // Re-entrancy guard. The function is async and awaits _startConversion
+    // inside its loop, which means another caller (a completing download,
+    // a live-transcode session ending, a worker health-probe tick) can
+    // re-enter during the await. Both instances would _countActiveConversions
+    // BEFORE either _startConversion has registered to _convertProcesses,
+    // and both would think a slot is free — temporarily starting more jobs
+    // than the cap allows. Serialize queue processing via _queueProcessing;
+    // reentrant callers set _queueDirty so we don't drop their signal and
+    // re-run the inner loop once the in-flight pass finishes.
+    if (this._queueProcessing) {
+      this._queueDirty = true;
+      return;
+    }
+    this._queueProcessing = true;
+    try {
+      do {
+        this._queueDirty = false;
+        await this._processConversionQueueInner();
+      } while (this._queueDirty);
+    } finally {
+      this._queueProcessing = false;
+    }
+  }
+
+  async _processConversionQueueInner() {
     // _canStartConversionNow() returns true when downloads are idle OR
     // when the remote GPU worker is online (since remote conversions
     // don't compete with downloads on the Orin).
@@ -5421,7 +5552,17 @@ class LibraryManager {
 
       const pending = [...this._items.values()].find(i => {
         if (!i._pendingConversion) return false;
-        return this._pendingItemWouldUseRemote(i) ? !remoteFull : !localFull;
+        const wouldUseRemote = this._pendingItemWouldUseRemote(i);
+        // Live-transcode gate mirrored from _startConversion: a local
+        // libx264 job would compete with any in-flight live session, so
+        // don't even claim the pending item here — otherwise the queue
+        // picks it, bumps status='converting', _startConversion re-defers
+        // it, and we loop forever. Remote and remux jobs are unaffected.
+        const kind = i._pendingConvertKind === 'transcode' ? 'transcode' : 'remux';
+        if (!wouldUseRemote && kind === 'transcode' && this._liveTranscodeCount > 0) {
+          return false;
+        }
+        return wouldUseRemote ? !remoteFull : !localFull;
       });
       if (!pending) return;
 

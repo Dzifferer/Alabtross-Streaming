@@ -24,6 +24,12 @@ const HEALTH_TIMEOUT_MS = 5000;
 // is generous because real encodes legitimately go silent on the wire for
 // minutes between the upload finishing and the download starting.
 const DEFAULT_STALL_MS = parseInt(process.env.WORKER_STALL_MS || '120000', 10);
+// Hard ceiling on the encode phase. req.setTimeout(0) disables Node's
+// socket idle timeout, so a half-open TCP connection (worker crashed,
+// OS hasn't noticed yet) would otherwise wedge us forever. 60 minutes
+// covers a 4K HEVC remux on weaker GPUs; override with
+// WORKER_ENCODE_MAX_MS for environments with slower hardware.
+const DEFAULT_ENCODE_MAX_MS = parseInt(process.env.WORKER_ENCODE_MAX_MS || '3600000', 10);
 
 class WorkerClient {
   /**
@@ -33,9 +39,10 @@ class WorkerClient {
    * @param {number} [opts.stallMs]  abort if no progress for this many ms
    */
   constructor(opts = {}) {
-    this.workerUrl = opts.workerUrl || '';
-    this.secret    = opts.secret || '';
-    this.stallMs   = opts.stallMs || DEFAULT_STALL_MS;
+    this.workerUrl    = opts.workerUrl || '';
+    this.secret       = opts.secret || '';
+    this.stallMs      = opts.stallMs || DEFAULT_STALL_MS;
+    this.encodeMaxMs  = opts.encodeMaxMs || DEFAULT_ENCODE_MAX_MS;
   }
 
   enabled() {
@@ -138,6 +145,7 @@ class WorkerClient {
       let cleaned = false;
       let killed  = false;
       let lastProgressAt = Date.now();
+      let encodeStartedAt = 0;   // set when phase transitions to 'encode'
       let bytesUp   = 0;
       let bytesDown = 0;
       let phase     = 'upload';
@@ -180,6 +188,7 @@ class WorkerClient {
       // because legitimate encodes can sit silent for many minutes between
       // the upload finishing and the response body starting.
       const stallMs = this.stallMs;
+      const encodeMaxMs = this.encodeMaxMs;
       stallTimer = setInterval(() => {
         if (cleaned || killed) return;
         const idleFor = Date.now() - lastProgressAt;
@@ -191,6 +200,22 @@ class WorkerClient {
         }
         if (phase === 'download' && idleFor > stallMs) {
           fail(new Error(`download stalled for ${(idleFor / 1000).toFixed(0)}s`));
+        }
+        // Hard cap on the encode phase. The stall watchdog above is
+        // deliberately disabled during encode (zero bytes is legitimate),
+        // but without any cap a half-open TCP connection to a crashed
+        // worker would hang this request forever. An hour covers the
+        // p99 4K HEVC job on GPUs we've seen; tune with WORKER_ENCODE_MAX_MS.
+        if (phase === 'encode' && encodeStartedAt && (Date.now() - encodeStartedAt) > encodeMaxMs) {
+          fail(new Error(`encode exceeded ${(encodeMaxMs / 60000).toFixed(0)}min cap`));
+        }
+        // Fire an onProgress tick during encode so consumers that want
+        // to advance a UI progress bar by elapsed time have something
+        // to hook into — the encode phase otherwise sees zero callback
+        // invocations because no bytes flow on either direction.
+        if (phase === 'encode' && opts.onProgress) {
+          try { opts.onProgress({ phase, bytesUp, bytesDown, totalUp: inputStat.size }); }
+          catch {}
         }
       }, 5000);
 
@@ -261,8 +286,10 @@ class WorkerClient {
       rs.on('error', (err) => fail(new Error(`input read failed: ${err.message}`)));
       rs.on('end', () => {
         // Upload complete — switch phase. The watchdog stops enforcing
-        // the stall timeout until the response body starts arriving.
+        // the stall timeout until the response body starts arriving,
+        // but the encode-max cap kicks in starting now.
         phase = 'encode';
+        encodeStartedAt = Date.now();
         lastProgressAt = Date.now();
       });
       rs.pipe(req);

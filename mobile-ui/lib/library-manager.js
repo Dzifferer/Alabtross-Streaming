@@ -4648,7 +4648,32 @@ class LibraryManager {
     };
 
     if (!probe || !probe.probeOk) {
-      result.reason = (probe && probe.reason) || 'probe failed';
+      const reason = (probe && probe.reason) || 'probe failed';
+      // Recovery transcode: ffmpeg's decoder is meaningfully more tolerant
+      // than ffprobe's demuxer (with -err_detect ignore_err / +discardcorrupt
+      // it recovers truncated moov atoms, NAL size mismatches, mid-stream
+      // CRC errors, and YIFY-style atom padding that ffprobe rejects
+      // outright). Route to /stream/transcode instead of dead-ending on
+      // 'unplayable' — if transcode also fails the client still surfaces
+      // a "Playback failed" error, so genuinely broken files look the
+      // same to the user while recoverable ones now play.
+      //
+      // Two cases we DO NOT route to transcode:
+      //   - 'ffprobe not available' — ffmpeg ships with ffprobe, so if
+      //     ffprobe is missing ffmpeg is too; transcode can't succeed.
+      //   - 'no video stream ...' — either the file is still downloading
+      //     (live transcode would emit a truncated output) or it's
+      //     audio-only (our transcode maps 0:v:0 and will fail). Surface
+      //     the original reason so the UI shows "still downloading".
+      const recoverable =
+        reason !== 'ffprobe not available' &&
+        !reason.startsWith('no video stream');
+      if (recoverable) {
+        result.action = 'transcode';
+        result.reason = `probe failed (${reason}) — attempting transcode recovery`;
+      } else {
+        result.reason = reason;
+      }
       return result;
     }
 

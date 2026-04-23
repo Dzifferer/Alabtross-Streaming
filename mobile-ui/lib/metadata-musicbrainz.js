@@ -42,7 +42,7 @@ function schedule(fn) {
   return _chain;
 }
 
-function httpGetJSON(url, timeoutMs = 10000) {
+function httpGetJSON(url, timeoutMs = 10000, redirectsLeft = 5) {
   return new Promise((resolve, reject) => {
     const deadline = setTimeout(() => {
       if (req) req.destroy();
@@ -58,7 +58,11 @@ function httpGetJSON(url, timeoutMs = 10000) {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         clearTimeout(deadline);
         res.resume();
-        httpGetJSON(res.headers.location, timeoutMs).then(resolve, reject);
+        if (redirectsLeft <= 0) {
+          reject(new Error('Too many redirects'));
+          return;
+        }
+        httpGetJSON(res.headers.location, timeoutMs, redirectsLeft - 1).then(resolve, reject);
         return;
       }
       if (res.statusCode !== 200) {

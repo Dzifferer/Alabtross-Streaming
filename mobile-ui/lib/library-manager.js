@@ -876,7 +876,7 @@ class LibraryManager {
   /**
    * Add a movie/episode to the library and start downloading.
    */
-  addItem(opts) {
+  addItem(opts, { deferSave = false } = {}) {
     const {
       imdbId, type, name, poster, year, magnetUri, infoHash, quality, size, season, episode,
       // Music-only fields (ignored for movies/series):
@@ -956,7 +956,7 @@ class LibraryManager {
     };
 
     this._items.set(id, item);
-    this._saveMetadata();
+    if (!deferSave) this._saveMetadata();
 
     if (shouldQueue) {
       console.log(`[Library] Queued: "${item.name}" — ${activeDownloads}/${this._maxConcurrentDownloads} slots in use`);
@@ -966,6 +966,10 @@ class LibraryManager {
     this._startDownload(id);
     return { id, status: 'started' };
   }
+
+  // Public flush for callers that performed bulk addItem(..., { deferSave: true })
+  // operations and want a single durable save at the end.
+  flushMetadata() { this._saveMetadata(); }
 
   /**
    * Add an entire season pack to the library. Downloads ALL video files

@@ -863,23 +863,25 @@ app.post('/api/music-library/add-discography', rateLimit, express.json(), async 
 
   (async () => {
     console.log(`[Discography] Starting bulk download for "${artistMeta.name}" (${releaseGroups.length} releases)`);
-    let added = 0, skipped = 0, errors = 0;
+    let added = 0, queued = 0, duplicates = 0, noStream = 0, errors = 0;
     for (const rg of releaseGroups) {
       try {
+        // Only mbGetReleaseForGroup is strictly necessary — it returns the
+        // release MBID the library item is keyed on. Skipping the heavier
+        // mbGetRelease (which pulls recordings + artist-credits) halves
+        // the MB serial-queue blocking per album.
         const releaseMbid = await mbGetReleaseForGroup(rg.releaseGroupMbid);
-        if (!releaseMbid) { skipped++; continue; }
-        const release = await mbGetRelease(releaseMbid);
-        if (!release) { skipped++; continue; }
+        if (!releaseMbid) { noStream++; continue; }
 
         const streams = await getAlbumStreams(releaseMbid, artistMeta.name, rg.title);
-        const best = (streams || []).find(s => s.infoHash && s.magnetUri);
+        const best = (streams || []).find(s => s.infoHash && s.magnetUri && /^[0-9a-f]{40}$/i.test(s.infoHash));
         if (!best) {
           console.log(`[Discography] No torrent stream for "${rg.title}" — skipping`);
-          skipped++;
+          noStream++;
           continue;
         }
 
-        musicLibrary.addItem({
+        const result = musicLibrary.addItem({
           type: 'album',
           infoHash: best.infoHash.toLowerCase(),
           magnetUri: best.magnetUri,
@@ -889,16 +891,25 @@ app.post('/api/music-library/add-discography', rateLimit, express.json(), async 
           title: rg.title,
           artist: artistMeta.name,
           year: rg.year || '',
-          coverUrl: release.coverUrl || '',
-          genres: release.genres || [],
-        });
-        added++;
+          // The library manager proxies cover art through /api/cover so we
+          // can derive the URL from the release MBID without another MB hit.
+          coverUrl: `/api/cover/release/${releaseMbid}?size=500`,
+          genres: [],
+        }, { deferSave: true });
+
+        if (result.status === 'started') added++;
+        else if (result.status === 'queued') queued++;
+        else duplicates++;
       } catch (err) {
         console.error(`[Discography] Error on "${rg.title}":`, err.message);
         errors++;
       }
     }
-    console.log(`[Discography] Done for "${artistMeta.name}": added=${added}, skipped=${skipped}, errors=${errors}`);
+    // Single durable write after the whole loop, instead of one fsync per album.
+    try { musicLibrary.flushMetadata(); } catch (err) {
+      console.error('[Discography] Metadata flush failed:', err.message);
+    }
+    console.log(`[Discography] Done for "${artistMeta.name}": added=${added}, queued=${queued}, duplicates=${duplicates}, noStream=${noStream}, errors=${errors}`);
   })().catch(err => console.error('[Discography] Background task crashed:', err.message));
 });
 

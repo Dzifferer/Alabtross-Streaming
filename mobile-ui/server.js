@@ -2105,6 +2105,28 @@ app.get('/api/streams/diagnose', rateLimit, async (req, res) => {
   }
 });
 
+// POST /api/library/diagnose — probe a magnet URI for BitTorrent
+// connectivity. Used to debug "download keeps failing / timing out"
+// without having to grep logs: returns peer-discovery counts,
+// handshake counts, and a plain-English reason for each failure mode.
+// Body: { magnet: "magnet:?xt=..." [, durationMs: number] }
+app.post('/api/library/diagnose', rateLimit, express.json({ limit: '4kb' }), async (req, res) => {
+  const magnet = req.body && typeof req.body.magnet === 'string' ? req.body.magnet : '';
+  if (!/^magnet:\?/i.test(magnet)) {
+    return res.status(400).json({ error: 'Missing or invalid magnet URI' });
+  }
+  const durationMs = Number(req.body.durationMs) || 60000;
+  try {
+    console.log(`[API] Running torrent diagnostic for ${magnet.slice(0, 60)}...`);
+    const result = await library.diagnoseTorrent(magnet, { durationMs });
+    console.log(`[API] Torrent diagnostic done: ok=${result.ok} peers=${result.finalPeers} wires=${result.finalWires}`);
+    res.json(result);
+  } catch (err) {
+    console.error(`[API] Torrent diagnostic error: ${err.message}`);
+    res.status(400).json({ error: err.message || 'Diagnostic failed' });
+  }
+});
+
 // GET /api/play/youtube/:videoId — pipe yt-dlp audio to the response
 // Spawns yt-dlp with -f bestaudio and streams the extracted audio bytes directly.
 app.get('/api/play/youtube/:videoId', rateLimit, (req, res) => {

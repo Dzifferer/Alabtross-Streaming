@@ -124,6 +124,11 @@ class PeerManager {
     this._engine = engine;
     this._label = opts.label || 'peer-mgr';
     this._verbose = opts.verbose !== false;
+    // Optional cross-torrent reputation store (PeerReputation instance).
+    // When set, every wire-close with positive delta-down feeds into
+    // `recordDelivery`, and every fail/ban feeds into `recordStrike`, so
+    // peers that misbehave on this torrent get pre-blocked on the next.
+    this._reputation = opts.reputation || null;
 
     // addr ("ip:port") → { firstSeen: number, fails: number }
     // Persists across disappearance/re-appearance cycles so re-announced
@@ -248,8 +253,11 @@ class PeerManager {
       const delta = (typeof wire.downloaded === 'number' ? wire.downloaded : 0) - info.initialDown;
 
       if (delta > 0) {
-        // Successful exchange — reset any accumulated strikes.
+        // Successful exchange — reset any accumulated strikes on this
+        // engine, and credit the peer in the global reputation store so
+        // future engines (on unrelated torrents) prioritize them.
         this._state.delete(addr);
+        if (this._reputation) this._reputation.recordDelivery(addr, delta);
         return;
       }
 
@@ -453,6 +461,11 @@ class PeerManager {
     const entry = this._state.get(addr) || { firstSeen: Date.now(), fails: 0 };
     entry.fails += 1;
     this._state.set(addr, entry);
+    // Feed the global reputation store so a peer's strikes accumulate
+    // across engines — PeerManager's own ban list resets per-engine, but
+    // reputation persists so serial offenders get pre-blocked before
+    // they can waste another connection slot.
+    if (this._reputation) this._reputation.recordStrike(addr, reason);
 
     // Hard signals ban on first strike; soft signals need two.
     // 'stale' used to be classified as hard here, but that was wrong: the

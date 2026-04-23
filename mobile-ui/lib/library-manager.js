@@ -15,8 +15,11 @@ const torrentStream = require('torrent-stream');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
+const crypto = require('crypto');
 const { VIDEO_EXTENSIONS, TRACKERS, isFileNameSafe, getMimeType } = require('./file-safety');
 const { PeerManager } = require('./peer-manager');
+const { PeerReputation } = require('./peer-reputation');
 const { WorkerClient } = require('./worker-client');
 
 const DEFAULT_MAX_CONCURRENT_DOWNLOADS = 5;
@@ -170,6 +173,13 @@ class LibraryManager {
     // library volume so resume becomes instant.
     this._torrentCacheName = '_torrent-cache';
     this._torrentCachePath = path.join(this._libraryPath, this._torrentCacheName);
+    // Cross-torrent peer reputation. Shared by every PeerManager we
+    // instantiate so a bad peer on torrent A is pre-blocked when we
+    // later start torrent B, and a peer that reliably delivered bytes
+    // gets re-added to the swarm first. Persisted at the torrent-cache
+    // path so it survives restarts.
+    this._peerReputation = new PeerReputation({ cacheDir: this._torrentCachePath });
+    this._peerReputation.startPersistTimer();
     this._maxConcurrentDownloads = opts.maxConcurrentDownloads || DEFAULT_MAX_CONCURRENT_DOWNLOADS;
     this._items = new Map();       // id -> library item
     this._engines = new Map();     // id -> torrent engine (active downloads only)
@@ -287,6 +297,10 @@ class LibraryManager {
       await this._resumeInterruptedConversions();
       // Auto-repair season metadata for packs.
       this.repairPackMetadata();
+      // Auto-retry daemon: failed downloads whose error looks transient
+      // (metadata timeout, network, tracker) get re-tried on an exponential
+      // backoff so the user doesn't have to click retry on every item.
+      this._startAutoRetryDaemon();
       // Sweep the library for files that should be pre-transcoded to
       // universal H.264/AAC/MP4 so live transcoding never has to run.
       // Fire-and-forget: the sweep yields between probes and queues
@@ -1030,6 +1044,9 @@ class LibraryManager {
       this._pauseRunningConversionsForDownloads();
       this._attachPeerManager(engine, `pack ${infoHash.slice(0, 8)}`);
       this._startIncomingListener(engine, `pack ${infoHash.slice(0, 8)}`);
+      this._attachPeerCacheRecorder(engine, infoHash);
+      this._primeSwarmFromPeerCache(engine, infoHash, `pack ${infoHash.slice(0, 8)}`);
+      this._primeEngineFromReputation(engine, `pack ${infoHash.slice(0, 8)}`);
       if (cacheHit) {
         console.log(`[Library] pack ${infoHash.slice(0, 8)}: using cached torrent metadata (skipping BEP-9)`);
       }
@@ -1219,6 +1236,9 @@ class LibraryManager {
       const engine = torrentStream(magnetUri, this._baseTorrentOpts(scanDir));
       this._pauseRunningConversionsForDownloads();
       this._attachPeerManager(engine, `scan ${infoHash.slice(0, 8)}`);
+      this._attachPeerCacheRecorder(engine, infoHash);
+      this._primeSwarmFromPeerCache(engine, infoHash, `scan ${infoHash.slice(0, 8)}`);
+      this._primeEngineFromReputation(engine, `scan ${infoHash.slice(0, 8)}`);
       this._startIncomingListener(engine, `scan ${infoHash.slice(0, 8)}`);
       if (cacheHit) {
         console.log(`[Library] scan ${infoHash.slice(0, 8)}: using cached torrent metadata (skipping BEP-9)`);
@@ -1905,6 +1925,9 @@ class LibraryManager {
     const engine = torrentStream(first.magnetUri, this._baseTorrentOpts(packDir));
     this._pauseRunningConversionsForDownloads();
     this._attachPeerManager(engine, `resume ${first.infoHash.slice(0, 8)}`);
+    this._attachPeerCacheRecorder(engine, first.infoHash);
+    this._primeSwarmFromPeerCache(engine, first.infoHash, `resume ${first.infoHash.slice(0, 8)}`);
+    this._primeEngineFromReputation(engine, `resume ${first.infoHash.slice(0, 8)}`);
     this._startIncomingListener(engine, `resume ${first.infoHash.slice(0, 8)}`);
 
     // Store engine immediately to prevent retryItem from creating duplicates
@@ -3260,6 +3283,11 @@ class LibraryManager {
       clearInterval(this._metadataSaveTimer);
       this._metadataSaveTimer = null;
     }
+    this._stopAutoRetryDaemon();
+    // Flush cross-torrent peer reputation before we destroy engines
+    // (engine destruction triggers peer-cache writes which may create
+    // more reputation updates via their wire-close paths).
+    try { if (this._peerReputation) this._peerReputation.stop(); } catch { /* ignore */ }
     for (const id of [...this._engines.keys()]) {
       this._stopDownload(id);
     }
@@ -3344,6 +3372,9 @@ class LibraryManager {
     const cacheHit = this._hasCachedTorrentMetadata(item.infoHash);
     const engine = torrentStream(item.magnetUri, this._baseTorrentOpts(itemDir));
     this._pauseRunningConversionsForDownloads();
+    this._attachPeerCacheRecorder(engine, item.infoHash);
+    this._primeSwarmFromPeerCache(engine, item.infoHash, `dl ${item.infoHash.slice(0, 8)}`);
+    this._primeEngineFromReputation(engine, `dl ${item.infoHash.slice(0, 8)}`);
     this._attachPeerManager(engine, `dl ${item.infoHash.slice(0, 8)}`);
     this._startIncomingListener(engine, `dl ${item.infoHash.slice(0, 8)}`);
     if (cacheHit) {
@@ -3454,6 +3485,26 @@ class LibraryManager {
 
           // Check if conversion to browser-compatible MP4 is needed
           this._checkAndConvert(id);
+          return;
+        }
+
+        // Stall watchdog: wires are up but no bytes moving for 10+ min
+        // — recycle the engine up to a per-item cap. Clears internal
+        // torrent-stream state that sometimes wedges after peer churn.
+        const stall = this._checkEngineStall(engine, `dl ${item.infoHash.slice(0, 8)}`);
+        if (stall.stalled) {
+          if (this._shouldRecycleOnStall(item)) {
+            console.log(`[Library] Recycling engine for "${item.name}" (stall recycle #${item._stallRecycles})`);
+            clearInterval(progressTimer);
+            this._stopDownload(id);
+            setTimeout(() => { if (item.status === 'downloading') this._startDownload(id); }, 1000);
+          } else {
+            console.warn(`[Library] Giving up on "${item.name}" — too many stall recycles`);
+            clearInterval(progressTimer);
+            this._stopDownload(id);
+            this._saveMetadata();
+            this._processQueue();
+          }
         }
       }, PROGRESS_POLL_INTERVAL);
 
@@ -3609,9 +3660,36 @@ class LibraryManager {
    * See lib/peer-manager.js for the full rationale.
    */
   _attachPeerManager(engine, label) {
-    const mgr = new PeerManager(engine, { label });
+    const mgr = new PeerManager(engine, { label, reputation: this._peerReputation });
     this._peerMgrByEngine.set(engine, mgr);
     return mgr;
+  }
+
+  // Prime a freshly-created engine from the cross-torrent reputation
+  // store: pre-block every known-bad IP so peer-wire-swarm won't even
+  // attempt a connection, then swarm.add() the top good addresses so
+  // they jump to the front of the connect queue. Both steps are safe
+  // no-ops on empty reputation (first run, or freshly-loaded empty map).
+  _primeEngineFromReputation(engine, label) {
+    if (!engine || !this._peerReputation) return;
+    try {
+      const bad = this._peerReputation.knownBadIps();
+      if (bad.size > 0 && typeof engine.block === 'function') {
+        for (const ip of bad) {
+          try { engine.block(ip); } catch { /* ignore — block is idempotent */ }
+        }
+        console.log(`[Library] ${label}: pre-blocked ${bad.size} IP(s) with bad reputation`);
+      }
+      const good = this._peerReputation.topGoodAddrs(20);
+      if (good.length > 0 && engine.swarm && typeof engine.swarm.add === 'function') {
+        for (const addr of good) {
+          try { engine.swarm.add(addr); } catch { /* ignore */ }
+        }
+        console.log(`[Library] ${label}: primed swarm with ${good.length} high-reputation peer(s)`);
+      }
+    } catch (err) {
+      console.warn(`[Library] ${label}: reputation prime failed: ${err.message}`);
+    }
   }
 
   /**
@@ -3767,6 +3845,14 @@ class LibraryManager {
    */
   _destroyEngine(engine) {
     if (!engine) return;
+    // Flush the peer cache before we tear down the engine so a restart
+    // can re-inject these addresses and avoid the post-restart handshake
+    // stall. Lookup is O(1) via the engine→infoHash WeakMap populated at
+    // creation time.
+    try {
+      const infoHash = this._engineInfoHash && this._engineInfoHash.get(engine);
+      if (infoHash) this._flushPeerCache(infoHash);
+    } catch { /* best-effort */ }
     const mgr = this._peerMgrByEngine.get(engine);
     if (mgr) {
       this._peerMgrByEngine.delete(engine);
@@ -3797,6 +3883,111 @@ class LibraryManager {
       // going through the 500ms debounce would just add latency.
       this._writeMetadataNow();
     }, METADATA_SAVE_INTERVAL);
+  }
+
+  // ─── Auto-retry daemon ────────────────────────────────────────────────
+  // Transient download failures (metadata timeouts, tracker unreachability,
+  // peers that can't handshake after a restart, DHT bootstrap hiccups)
+  // recover on their own if you just try again. Requiring the user to
+  // manually click retry on every failed item turns a rare hiccup into a
+  // UX papercut.
+  //
+  // Strategy:
+  //   * Scan failed items every AUTO_RETRY_SCAN_INTERVAL_MS (30s)
+  //   * For each item, decide if the failure is `retryable` (see below)
+  //   * If yes and enough time has passed since the last attempt, call
+  //     retryItem() — existing concurrency caps still apply
+  //   * Track attempts per item in _autoRetryState (in-memory only; a
+  //     restart resets the backoff which is the behavior we want)
+  //
+  // Backoff schedule: 2m, 5m, 15m, 30m, 1h, 1h, 1h, ... (capped). Each
+  // failure advances the schedule; a successful retry clears it.
+  //
+  // Not auto-retried:
+  //   * Failures with no error string (unclear what went wrong)
+  //   * Disk errors ('Insufficient disk space', 'File not found on disk')
+  //   * Clearly permanent failures ('Torrent not found', DNS rejection)
+  //   * Items with > AUTO_RETRY_MAX_ATTEMPTS tries already
+  _startAutoRetryDaemon() {
+    if (this._autoRetryTimer) return;
+    this._autoRetryState = new Map(); // id -> { attempts, nextAtMs }
+    this._autoRetryTimer = setInterval(() => {
+      this._autoRetryTick();
+    }, 30 * 1000);
+    this._autoRetryTimer.unref();
+  }
+
+  _stopAutoRetryDaemon() {
+    if (this._autoRetryTimer) {
+      clearInterval(this._autoRetryTimer);
+      this._autoRetryTimer = null;
+    }
+  }
+
+  _autoRetryTick() {
+    const now = Date.now();
+    const BACKOFF_SCHEDULE_MS = [
+      2 * 60 * 1000,       // 2 min
+      5 * 60 * 1000,       // 5 min
+      15 * 60 * 1000,      // 15 min
+      30 * 60 * 1000,      // 30 min
+      60 * 60 * 1000,      // 1 hour
+    ];
+    const MAX_ATTEMPTS = 8; // ≈ 7 retries spanning ~4 hours before we give up
+    for (const item of this._items.values()) {
+      if (item.status !== 'failed') {
+        // Not failed anymore — clear any tracked state.
+        if (this._autoRetryState.has(item.id)) this._autoRetryState.delete(item.id);
+        continue;
+      }
+      if (!this._isAutoRetryableError(item.error)) continue;
+
+      let state = this._autoRetryState.get(item.id);
+      if (!state) {
+        state = { attempts: 0, nextAtMs: now + BACKOFF_SCHEDULE_MS[0] };
+        this._autoRetryState.set(item.id, state);
+        continue;
+      }
+      if (now < state.nextAtMs) continue;
+      if (state.attempts >= MAX_ATTEMPTS) continue;
+
+      // Schedule the next backoff now, before retryItem flips status to
+      // 'downloading' and we'd otherwise clear state — if retry ends up
+      // failing again we want the NEXT nextAtMs already computed.
+      state.attempts += 1;
+      const slot = Math.min(state.attempts, BACKOFF_SCHEDULE_MS.length - 1);
+      state.nextAtMs = now + BACKOFF_SCHEDULE_MS[slot];
+
+      console.log(`[Library] Auto-retry attempt ${state.attempts}/${MAX_ATTEMPTS}: "${item.name}" (${item.error || 'no reason'})`);
+      try { this.retryItem(item.id); } catch (e) {
+        console.warn(`[Library] Auto-retry threw for "${item.name}": ${e.message}`);
+      }
+    }
+  }
+
+  // Classify an item's error string as safe-to-auto-retry. Deliberately
+  // conservative — any error we haven't explicitly recognized as transient
+  // is left for the user to look at manually.
+  _isAutoRetryableError(errStr) {
+    if (typeof errStr !== 'string' || errStr.length === 0) return false;
+    const s = errStr.toLowerCase();
+    // Permanent / user-actionable — never auto-retry.
+    if (s.includes('insufficient disk space')) return false;
+    if (s.includes('file not found on disk')) return false;
+    if (s.includes('disallowed')) return false;
+    if (s.includes('not a safe file')) return false;
+    if (s.includes('invalid magnet')) return false;
+    // Transient — safe to retry.
+    if (s.includes('metadata timeout')) return true;
+    if (s.includes('tracker')) return true;
+    if (s.includes('dht')) return true;
+    if (s.includes('timeout')) return true;
+    if (s.includes('network')) return true;
+    if (s.includes('econn')) return true;  // ECONNREFUSED / ECONNRESET
+    if (s.includes('handshake')) return true;
+    if (s.includes('no peers')) return true;
+    // Unknown — skip, let the user decide.
+    return false;
   }
 
   _stopPeriodicSave() {
@@ -3843,6 +4034,249 @@ class LibraryManager {
       return fs.existsSync(path.join(this._torrentCachePath, `${infoHash}.torrent`));
     } catch {
       return false;
+    }
+  }
+
+  // ─── Persistent peer cache ─────────────────────
+  // Saves the addresses of peers that completed a BT handshake this
+  // session so they can be re-injected on restart. Short-circuits the
+  // "wait 30 min for the first tracker re-announce to produce a new
+  // peer batch" delay that bit the user after shutdown. Cache file per
+  // infoHash in the same _torrent-cache directory, expires after 24h.
+  _peerCachePath(infoHash) {
+    return path.join(this._torrentCachePath, `${infoHash}.peers.json`);
+  }
+
+  _recordGoodPeer(infoHash, addr) {
+    if (!infoHash || !addr) return;
+    if (!this._goodPeers) this._goodPeers = new Map();
+    let set = this._goodPeers.get(infoHash);
+    if (!set) { set = new Set(); this._goodPeers.set(infoHash, set); }
+    set.add(addr);
+    // Cap — peer-wire-swarm uses 50 connection slots; more than that
+    // in the cache is just stale-address noise on the next restart.
+    if (set.size > 50) {
+      const oldest = set.values().next().value;
+      set.delete(oldest);
+    }
+  }
+
+  _loadPeerCache(infoHash) {
+    try {
+      const p = this._peerCachePath(infoHash);
+      if (!fs.existsSync(p)) return [];
+      const raw = fs.readFileSync(p, 'utf8');
+      const data = JSON.parse(raw);
+      if (!data || !Array.isArray(data.peers)) return [];
+      // Peer addresses are volatile — IP reassignment, DHCP churn, NAT
+      // state. Anything older than a day is more likely noise than
+      // signal, and we'd rather fetch fresh addresses from trackers.
+      const ageMs = Date.now() - (data.savedAt || 0);
+      if (ageMs > 24 * 60 * 60 * 1000) return [];
+      // Basic shape validation to keep a corrupt file from crashing us.
+      return data.peers.filter(a => typeof a === 'string' && /^[\d.]+:\d+$|^\[[^\]]+\]:\d+$/.test(a));
+    } catch { return []; }
+  }
+
+  _flushPeerCache(infoHash) {
+    if (!this._goodPeers) return;
+    const set = this._goodPeers.get(infoHash);
+    // Skip if we don't have enough to be useful — a single-peer cache
+    // file costs more I/O than it saves on startup.
+    if (!set || set.size < 3) return;
+    try {
+      const p = this._peerCachePath(infoHash);
+      const data = { infoHash, peers: [...set], savedAt: Date.now() };
+      fs.writeFileSync(p, JSON.stringify(data));
+    } catch (err) {
+      console.warn(`[Library] Failed to save peer cache for ${infoHash.slice(0, 8)}: ${err.message}`);
+    }
+  }
+
+  _primeSwarmFromPeerCache(engine, infoHash, label) {
+    if (!engine || !infoHash) return;
+    const cached = this._loadPeerCache(infoHash);
+    if (cached.length === 0) return;
+    try {
+      for (const addr of cached) {
+        if (engine.swarm && typeof engine.swarm.add === 'function') {
+          engine.swarm.add(addr);
+        }
+      }
+      console.log(`[Library] ${label}: primed swarm with ${cached.length} cached peer(s)`);
+    } catch (err) {
+      console.warn(`[Library] ${label}: peer cache prime failed: ${err.message}`);
+    }
+  }
+
+  _attachPeerCacheRecorder(engine, infoHash) {
+    if (!engine || !infoHash) return;
+    if (!this._engineInfoHash) this._engineInfoHash = new WeakMap();
+    this._engineInfoHash.set(engine, infoHash);
+    engine.on('wire', (wire, addr) => {
+      if (addr) this._recordGoodPeer(infoHash, addr);
+    });
+  }
+
+  // ─── Stall detection ──────────────────────────
+  // The metadata deadline handles PRE-ready stalls; this handles the
+  // POST-ready case where we have handshook peers (wires > 0) but
+  // they're not actually transferring blocks. Typical causes: peers
+  // are all seeders going to sleep, firewall-induced TCP half-closes
+  // that peer-wire doesn't notice, or torrent-stream's internal
+  // piece-picker falling into a state where it keeps asking dead peers
+  // for the same piece. Recycling the engine clears whatever internal
+  // state got wedged and usually recovers without user intervention.
+  //
+  // State is kept on a WeakMap keyed by engine so it goes away with
+  // the engine. `_recordBytesProgress` is called from each progress
+  // timer tick with the current downloaded-byte count; when no advance
+  // is seen for STALL_THRESHOLD_MS while wires > 0, the helper returns
+  // { stalled: true } and the caller is expected to restart the engine.
+  _stallState(engine) {
+    if (!this._engineStallState) this._engineStallState = new WeakMap();
+    let st = this._engineStallState.get(engine);
+    if (!st) {
+      st = { lastBytes: 0, lastAdvanceAt: Date.now() };
+      this._engineStallState.set(engine, st);
+    }
+    return st;
+  }
+
+  _checkEngineStall(engine, label) {
+    if (!engine || !engine.swarm) return { stalled: false };
+    const STALL_THRESHOLD_MS = 10 * 60 * 1000; // 10 min
+    const wires = engine.swarm.wires ? engine.swarm.wires.length : 0;
+    const bytesDown = engine.swarm.downloaded || 0;
+    const st = this._stallState(engine);
+    if (bytesDown > st.lastBytes) {
+      st.lastBytes = bytesDown;
+      st.lastAdvanceAt = Date.now();
+      return { stalled: false };
+    }
+    // No advance — only call it a stall if handshakes ARE active
+    // (otherwise _startMetadataTimeout / normal peer cycling owns it).
+    if (wires === 0) return { stalled: false };
+    const idleMs = Date.now() - st.lastAdvanceAt;
+    if (idleMs < STALL_THRESHOLD_MS) return { stalled: false };
+    console.warn(`[Library] ${label}: no byte progress for ${Math.round(idleMs / 60000)}min with ${wires} wire(s) — considering stalled`);
+    return { stalled: true, idleMs, wires };
+  }
+
+  // Mark an item as stall-recycled and return whether we're still under
+  // the per-item retry cap. Kept here (not inline in the progress timer)
+  // so both pack and single paths share the cap accounting.
+  _shouldRecycleOnStall(item) {
+    const MAX_STALL_RECYCLES = 3;
+    const n = item._stallRecycles || 0;
+    if (n >= MAX_STALL_RECYCLES) {
+      item.status = 'failed';
+      item.error = `Download stalled after ${MAX_STALL_RECYCLES} engine recycles`;
+      return false;
+    }
+    item._stallRecycles = n + 1;
+    return true;
+  }
+
+  /**
+   * Run a short probe against a magnet URI and report connectivity
+   * stats. Useful when a user hits "Retry" on a failed download and
+   * wants to know WHICH part of the stack is failing — trackers, DHT,
+   * peer discovery, handshake. Spawns a throwaway torrent-stream
+   * engine in an os.tmpdir() scratch dir, samples swarm state every
+   * ~3 s, and destroys the engine after `durationMs` OR on 'ready',
+   * whichever comes first.
+   *
+   * Returns:
+   *   {
+   *     ok:              bool  (metadata was retrieved within duration)
+   *     elapsedMs:       number
+   *     metadataMs:      number | null  (time to 'ready', if reached)
+   *     finalWires:      number
+   *     finalPeers:      number
+   *     reason?:         string
+   *     samples:         [{ t, wires, peers, downloadedBytes }, ...]
+   *   }
+   */
+  async diagnoseTorrent(magnetUri, opts = {}) {
+    const durationMs = Math.min(Math.max(Number(opts.durationMs) || 60000, 5000), 120000);
+    const sampleIntervalMs = 3000;
+    if (typeof magnetUri !== 'string' || !/^magnet:\?/i.test(magnetUri)) {
+      throw new Error('invalid magnet URI');
+    }
+    const tag = crypto.randomBytes(4).toString('hex');
+    const tmpBase = os.tmpdir();
+    const scratchPath = path.join(tmpBase, `bt-diag-${tag}`);
+    const scratchCacheName = `.bt-diag-cache-${tag}`;
+    fs.mkdirSync(scratchPath, { recursive: true });
+
+    const startedAt = Date.now();
+    let engine = null;
+    let ready = false;
+    let metadataAt = 0;
+    const samples = [];
+
+    try {
+      engine = torrentStream(magnetUri, {
+        connections: 50,
+        uploads: 0,       // we don't want to seed during a diagnostic
+        dht: true,
+        verify: false,
+        path: scratchPath,
+        trackers: TRACKERS,
+        tmp: tmpBase,     // route torrent-stream's .torrent cache away from our real cache
+        name: scratchCacheName,
+      });
+      this._attachPeerManager(engine, `diag ${tag}`);
+      // We can't attach the incoming listener easily from here (multiple
+      // engines racing over port 6881 produce noisy warnings), and for
+      // a 60s diag it doesn't move the needle.
+
+      const readyP = new Promise((resolve) => {
+        engine.on('ready', () => { ready = true; metadataAt = Date.now(); resolve(); });
+      });
+
+      const deadline = Date.now() + durationMs;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, sampleIntervalMs));
+        const sw = engine && engine.swarm;
+        const wires = sw && sw.wires ? sw.wires.length : 0;
+        const mgr = this._peerMgrByEngine.get(engine);
+        const stats = mgr ? mgr.stats() : { watching: 0 };
+        samples.push({
+          t: Date.now() - startedAt,
+          wires,
+          peers: stats.watching || 0,
+          downloadedBytes: sw ? (sw.downloaded || 0) : 0,
+        });
+        if (ready) break;
+      }
+      // Give readyP a last tick to settle if the loop exited on time.
+      await Promise.race([readyP, new Promise((r) => setTimeout(r, 100))]);
+
+      const finalSample = samples[samples.length - 1] || { wires: 0, peers: 0 };
+      const result = {
+        ok: ready,
+        elapsedMs: Date.now() - startedAt,
+        metadataMs: ready ? metadataAt - startedAt : null,
+        finalWires: finalSample.wires,
+        finalPeers: finalSample.peers,
+        samples,
+      };
+      if (!ready) {
+        if (finalSample.peers === 0 && finalSample.wires === 0) {
+          result.reason = 'no peers discovered — trackers and DHT produced nothing in the sample window';
+        } else if (finalSample.wires === 0) {
+          result.reason = `${finalSample.peers} peers discovered but none completed BT handshake — likely outbound BT firewall or MSE/PE mismatch`;
+        } else {
+          result.reason = `${finalSample.wires} wire(s) connected but info-dict never fully transferred in the sample window`;
+        }
+      }
+      return result;
+    } finally {
+      try { if (engine) this._destroyEngine(engine); } catch { /* ignore */ }
+      try { fs.rmSync(scratchPath, { recursive: true, force: true }); } catch { /* ignore */ }
+      try { fs.rmSync(path.join(tmpBase, scratchCacheName), { recursive: true, force: true }); } catch { /* ignore */ }
     }
   }
 

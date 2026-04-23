@@ -3687,11 +3687,16 @@ class LibraryManager {
    * dominant cause of "failed" packs: the diag showed wires>0 the entire
    * time, i.e. peers were talking to us, we just weren't patient enough.
    *
-   * Strategy: after `initialMs` with no 'ready' event, check swarm state.
-   *   - If there are zero wires, fail immediately (nothing is going to
-   *     change — the swarm is dead or unreachable).
-   *   - If wires > 0, grant another `extensionMs` and re-check, up to a
-   *     hard cap of `maxMs` from the original start.
+   * Strategy: after `initialMs` with no 'ready' event, check swarm state
+   * and decide whether to extend or fail.
+   *   - wires > 0: info-dict transfer in flight, extend.
+   *   - watching >= MIN_PEERS_FOR_EXTEND but wires == 0: peers are being
+   *     discovered but none have handshook yet. This is the post-restart
+   *     pattern — the first cohort of peers is often in TCP limbo from
+   *     the previous process (CLOSE_WAIT sockets, stale cached addresses)
+   *     and fresh peers from tracker re-announces take a minute or two
+   *     to cycle in and complete a handshake. Extend.
+   *   - watching == 0 && wires == 0: genuinely dead swarm. Bail.
    *
    * Returns a handle with `clear()` so the caller cancels the deadline on
    * 'ready' / 'error'. `onTimeout` is fired with `{ diag, reason, totalMs }`
@@ -3700,7 +3705,12 @@ class LibraryManager {
   _startMetadataTimeout(engine, label, onTimeout, opts = {}) {
     const initialMs = opts.initialMs != null ? opts.initialMs : 90000;
     const extensionMs = opts.extensionMs != null ? opts.extensionMs : 60000;
-    const maxMs = opts.maxMs != null ? opts.maxMs : 300000;
+    const maxMs = opts.maxMs != null ? opts.maxMs : 600000;
+    // Treat a swarm as "alive enough to wait on" if it's produced this
+    // many peer discoveries — chosen so a single stray DHT reply can't
+    // keep a truly dead torrent alive forever, but normal post-restart
+    // swarm churn (dozens to hundreds of peers watching) always extends.
+    const MIN_PEERS_FOR_EXTEND = 10;
     const startedAt = Date.now();
     let timer = null;
     let cleared = false;
@@ -3711,15 +3721,23 @@ class LibraryManager {
       const sw = engine && engine.swarm;
       const wires = sw && sw.wires ? sw.wires.length : 0;
       const { diag, reason } = this._metadataTimeoutDiag(engine);
+      const mgr = this._peerMgrByEngine.get(engine);
+      const watching = mgr ? mgr.stats().watching : 0;
 
-      // Wires > 0 means peers have completed the BT handshake and we're
-      // inside the "metadata is plausibly in flight" regime — extend the
-      // deadline up to the hard cap rather than killing a download that's
-      // probably making real progress. Wires == 0 is a dead swarm; no
-      // amount of waiting will produce metadata, so bail immediately.
-      if (wires > 0 && elapsed + extensionMs <= maxMs) {
+      // Handshakes active — info-dict is plausibly in flight.
+      const handshakesActive = wires > 0;
+      // Peers are being discovered but not yet handshaking. Common after
+      // a server restart: the previous process's TCP state blocks the
+      // first wave of reconnects, and tracker re-announces only every
+      // ~30 min, so the swarm takes a while to cycle in peers that can
+      // reach us. Packs with hundreds of episodes also benefit here —
+      // their info-dict handshake can legitimately take 3+ minutes.
+      const discoveryActive = wires === 0 && watching >= MIN_PEERS_FOR_EXTEND;
+
+      if ((handshakesActive || discoveryActive) && elapsed + extensionMs <= maxMs) {
+        const note = handshakesActive ? 'handshakes active' : 'peers discovering';
         console.log(
-          `[Library] ${label}: metadata still pending after ${(elapsed / 1000) | 0}s — ${diag} — extending +${(extensionMs / 1000) | 0}s (handshakes active)`
+          `[Library] ${label}: metadata still pending after ${(elapsed / 1000) | 0}s — ${diag} — extending +${(extensionMs / 1000) | 0}s (${note})`
         );
         timer = setTimeout(tick, extensionMs);
         return;

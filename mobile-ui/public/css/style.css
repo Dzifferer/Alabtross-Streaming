@@ -4857,7 +4857,30 @@ body.music-player-open .music-player-bar { display: none; }
   font-size: 11px;
   color: var(--accent, #636efa);
   margin-top: 2px;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  word-break: break-word;
 }
+.music-lib-card[data-status="failed"] .music-lib-card__status,
+.music-lib-card .music-lib-card__status--failed {
+  color: #ff6b6b;
+}
+
+.music-lib-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.music-lib-card__remove {
+  background: rgba(255, 80, 80, 0.14);
+}
+@media (hover: hover) {
+  .music-lib-card__remove:hover { background: rgba(255, 80, 80, 0.24); }
+}
+.music-lib-card__remove:active { background: rgba(255, 80, 80, 0.24); }
 
 .stream-row__actions {
   display: flex;

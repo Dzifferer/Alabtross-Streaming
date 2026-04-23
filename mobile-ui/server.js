@@ -3566,9 +3566,8 @@ app.get('/api/library/:id/stream/remux', rateLimit, remuxGate, async (req, res) 
   const filePath = library.getFilePath(req.params.id);
   if (!filePath) return res.status(404).json({ error: 'File not found' });
 
-  let stat;
   try {
-    stat = await fs.promises.stat(filePath);
+    await fs.promises.stat(filePath);
   } catch {
     return res.status(404).json({ error: 'File not found on disk' });
   }
@@ -3584,12 +3583,16 @@ app.get('/api/library/:id/stream/remux', rateLimit, remuxGate, async (req, res) 
     'Transfer-Encoding': 'chunked',
   });
 
-  // Pipe file through stdin (like the working torrent stream remux) so ffmpeg
-  // processes sequentially instead of seeking around the file on disk.
+  // Read the file directly (not via stdin pipe) so ffmpeg can seek within
+  // it. MP4 sources that aren't faststart keep the moov atom at the END
+  // of the file; a stdin-fed ffmpeg cannot rewind to fetch it and the
+  // remux hangs until the client timeout. `-i filePath` lets ffmpeg seek,
+  // which works for every mp4 regardless of moov position and is just as
+  // fast (the kernel page cache hides the seeks).
   const ffmpeg = spawn('ffmpeg', [
     '-probesize', '5000000',
     '-analyzeduration', '5000000',
-    '-i', 'pipe:0',
+    '-i', filePath,
     '-map', '0:v:0',
     '-map', '0:a:0?',
     '-c:v', 'copy',
@@ -3601,19 +3604,7 @@ app.get('/api/library/:id/stream/remux', rateLimit, remuxGate, async (req, res) 
     'pipe:1',
   ]);
 
-  const source = fs.createReadStream(filePath);
-  source.pipe(ffmpeg.stdin);
-
   ffmpeg.stdout.pipe(res);
-
-  source.on('error', (err) => {
-    console.error(`[Library] Source stream error during remux: ${err.message}`);
-    ffmpeg.kill('SIGTERM');
-  });
-
-  ffmpeg.stdin.on('error', () => {
-    // FFmpeg closed stdin early (e.g., client disconnected) — not a real error
-  });
 
   ffmpeg.stderr.on('data', (data) => {
     const msg = data.toString().trim();
@@ -3631,13 +3622,11 @@ app.get('/api/library/:id/stream/remux', rateLimit, remuxGate, async (req, res) 
     if (code && code !== 0 && code !== 255) {
       console.warn(`[Library] FFmpeg exited with code ${code}`);
     }
-    source.destroy();
-    res.end();
+    try { res.end(); } catch { /* ignore */ }
   });
 
   res.on('close', () => {
-    source.destroy();
-    ffmpeg.kill('SIGTERM');
+    try { ffmpeg.kill('SIGTERM'); } catch { /* ignore */ }
   });
 });
 

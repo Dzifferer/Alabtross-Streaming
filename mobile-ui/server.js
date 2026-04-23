@@ -157,6 +157,170 @@ function concurrencyGate(label, maxGlobal, maxPerIp) {
 const transcodeGate = concurrencyGate('transcode', MAX_CONCURRENT_TRANSCODE, MAX_CONCURRENT_TRANSCODE_PER_IP);
 const remuxGate = concurrencyGate('remux', MAX_CONCURRENT_REMUX, MAX_CONCURRENT_REMUX_PER_IP);
 
+// ─── HLS Session Manager ──────────────────────────────────────────────
+// HLS exists for clients (iOS Safari chief among them) where the fMP4
+// transcode path doesn't work reliably: empty_moov + chunked transfer
+// isn't trusted by the iOS <video> pipeline, so we instead hand Safari a
+// plain .m3u8 playlist pointing at per-segment .ts URLs. ffmpeg writes
+// segments to a session directory; we serve them right off disk.
+//
+// Sessions are keyed by library item id so two clients watching the same
+// movie share a single ffmpeg. We DON'T key on client IP or session id —
+// that would spawn redundant ffmpegs and defeat the point of this path.
+//
+// Session lifecycle:
+//   * first /hls/playlist.m3u8 request creates the dir + spawns ffmpeg
+//   * subsequent requests (playlist polls, segment fetches) bump lastAccessMs
+//   * idle cleanup runs every 30s; sessions with >HLS_IDLE_TIMEOUT_MS of
+//     inactivity get their ffmpeg SIGTERMed and their dir removed
+//   * server shutdown kills every active session
+const HLS_CACHE_PATH = path.join(TORRENT_CACHE_PATH, 'hls-cache');
+const HLS_IDLE_TIMEOUT_MS = 120 * 1000;  // keep session alive 2 min after last request (survives tab backgrounding)
+const HLS_CLEANUP_INTERVAL_MS = 30 * 1000;
+const HLS_FIRST_SEGMENT_WAIT_MS = 20 * 1000;  // max time to wait on /playlist.m3u8 for ffmpeg's first segment
+const HLS_SEGMENT_WAIT_MS = 15 * 1000;        // max time a /segment request waits if the segment isn't yet written
+const HLS_SEGMENT_DURATION = 4;               // seconds per segment
+const MAX_CONCURRENT_HLS_SESSIONS = MAX_CONCURRENT_TRANSCODE;
+
+try { fs.mkdirSync(HLS_CACHE_PATH, { recursive: true }); } catch (e) {
+  console.warn(`[HLS] Could not create cache dir ${HLS_CACHE_PATH}: ${e.message}`);
+}
+
+// Clean any leftover session directories from a previous server run —
+// they're worthless without the ffmpeg process that was writing them.
+try {
+  for (const name of fs.readdirSync(HLS_CACHE_PATH)) {
+    try { fs.rmSync(path.join(HLS_CACHE_PATH, name), { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+} catch { /* dir might not exist on very first boot */ }
+
+const hlsSessions = new Map(); // itemId -> { dir, ffmpeg, playlistPath, lastAccessMs, startedAt, firstSegmentPromise, ended }
+
+function _hlsSessionDirFor(itemId) {
+  // Sanitize the id into a filesystem-safe directory name. The id usually
+  // comes from torrent infoHash (hex) or "disk_" + path fragment, but we
+  // don't trust it — replace anything outside [A-Za-z0-9._-] with '_'.
+  const safe = itemId.replace(/[^\w.-]/g, '_').substring(0, 120);
+  return path.join(HLS_CACHE_PATH, safe);
+}
+
+function _stopHlsSession(itemId, reason) {
+  const sess = hlsSessions.get(itemId);
+  if (!sess) return;
+  hlsSessions.delete(itemId);
+  sess.ended = true;
+  try { sess.ffmpeg.kill('SIGTERM'); } catch { /* already dead */ }
+  // Give ffmpeg a beat to release file handles before we rm the dir.
+  setTimeout(() => {
+    try { fs.rmSync(sess.dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }, 500);
+  console.log(`[HLS] Session ended for ${itemId}: ${reason}`);
+}
+
+function _startHlsSession(itemId, filePath) {
+  const dir = _hlsSessionDirFor(itemId);
+  // Wipe any stale contents from a previous run of the same id.
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  fs.mkdirSync(dir, { recursive: true });
+  const playlistPath = path.join(dir, 'playlist.m3u8');
+
+  // HLS args. Differences from /stream/transcode:
+  //   * -f hls (instead of fragmented mp4)
+  //   * GOP sized to the segment duration so every segment starts on an
+  //     IDR — required for HLS seek-to-segment to work
+  //   * -hls_playlist_type event so the playlist grows as segments land
+  //     and the client can detect EOF via #EXT-X-ENDLIST
+  //   * independent_segments so each .ts can be decoded on its own
+  //   * temp_file so partially-written segments don't get served
+  const gop = HLS_SEGMENT_DURATION * 24; // safe for 24/30fps sources
+  const ffmpeg = spawn('ffmpeg', [
+    '-hide_banner',
+    '-fflags', '+genpts',
+    ...FFMPEG_HWACCEL_ARGS,
+    '-probesize', '1000000',
+    '-analyzeduration', '1000000',
+    '-i', filePath,
+    '-map', '0:v:0',
+    '-map', '0:a:0?',
+    '-sn',
+    '-dn',
+    '-c:v', 'libx264',
+    '-preset', 'ultrafast',
+    '-tune', 'zerolatency',
+    '-profile:v', 'main',
+    '-level', '4.1',
+    '-pix_fmt', 'yuv420p',
+    '-crf', '23',
+    '-vf', "scale='min(1280,iw)':'-2'",
+    '-g', String(gop),
+    '-keyint_min', String(gop),
+    '-sc_threshold', '0',
+    '-force_key_frames', `expr:gte(t,n_forced*${HLS_SEGMENT_DURATION})`,
+    '-c:a', 'aac',
+    '-b:a', '192k',
+    '-ac', '2',
+    '-ar', '48000',
+    '-f', 'hls',
+    '-hls_time', String(HLS_SEGMENT_DURATION),
+    '-hls_list_size', '0',
+    '-hls_playlist_type', 'event',
+    '-hls_segment_type', 'mpegts',
+    '-hls_flags', 'independent_segments+temp_file',
+    '-hls_segment_filename', path.join(dir, 'segment_%d.ts'),
+    '-loglevel', 'warning',
+    playlistPath,
+  ]);
+
+  const session = {
+    dir,
+    ffmpeg,
+    playlistPath,
+    lastAccessMs: Date.now(),
+    startedAt: Date.now(),
+    stderrTail: '',
+    ended: false,
+  };
+
+  ffmpeg.stderr.on('data', (data) => {
+    const msg = data.toString().trim();
+    if (!msg) return;
+    console.log(`[FFmpeg/HLS ${itemId}] ${msg}`);
+    const last = msg.split('\n').pop();
+    if (last) session.stderrTail = last;
+  });
+
+  ffmpeg.on('error', (err) => {
+    console.error(`[HLS] FFmpeg spawn error for ${itemId}: ${err.message}`);
+    session.stderrTail = err.message;
+    _stopHlsSession(itemId, 'ffmpeg spawn error');
+  });
+
+  ffmpeg.on('close', (code) => {
+    // Normal end-of-file exit: ffmpeg wrote #EXT-X-ENDLIST to the playlist
+    // and we can leave the segments on disk until the idle timer reaps the
+    // session. Abnormal exit: nuke the session so the client doesn't keep
+    // polling a dead playlist.
+    if (code !== 0 && code !== 255 && !session.ended) {
+      console.warn(`[HLS] FFmpeg exited abnormally for ${itemId}: code ${code}`);
+      _stopHlsSession(itemId, `ffmpeg exit ${code}`);
+    }
+  });
+
+  hlsSessions.set(itemId, session);
+  console.log(`[HLS] Session started for ${itemId} → ${dir}`);
+  return session;
+}
+
+const hlsCleanupTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [id, sess] of hlsSessions) {
+    if (now - sess.lastAccessMs > HLS_IDLE_TIMEOUT_MS) {
+      _stopHlsSession(id, `idle for ${Math.round((now - sess.lastAccessMs) / 1000)}s`);
+    }
+  }
+}, HLS_CLEANUP_INTERVAL_MS);
+hlsCleanupTimer.unref();
+
 // ─── Torrent Engine (lazy-initialized on first custom-mode request) ───
 let engine = null;
 function getEngine() {
@@ -3849,6 +4013,155 @@ app.get('/api/library/:id/stream/transcode', rateLimit, transcodeGate, async (re
   });
 });
 
+// GET /api/library/:id/stream/hls/playlist.m3u8
+// HLS-based transcode path, used in preference to /stream/transcode by
+// clients whose browsers natively speak HLS (all Safari variants, iOS
+// in particular — the fMP4 transcode path's chunked + empty_moov combo
+// isn't reliably playable there). Spawns one ffmpeg per library item,
+// blocks until the first .ts segment is on disk, then serves the m3u8
+// playlist so the browser can start pulling segments. The playlist uses
+// relative URLs so /segment requests resolve under this same path.
+app.get('/api/library/:id/stream/hls/playlist.m3u8', rateLimit, async (req, res) => {
+  const item = library.getItem(req.params.id);
+  if (!item) return res.status(404).json({ error: 'Item not found' });
+  if (item.status !== 'complete' && item.status !== 'converting') {
+    return res.status(400).json({ error: 'Download not complete' });
+  }
+
+  const filePath = library.getFilePath(req.params.id);
+  if (!filePath) return res.status(404).json({ error: 'File not found' });
+
+  try {
+    await fs.promises.stat(filePath);
+  } catch {
+    return res.status(404).json({ error: 'File not found on disk' });
+  }
+
+  // Look up the session AFTER the awaits above — if we looked earlier
+  // two simultaneous playlist requests for the same item could both race
+  // past `if (!session)` during the fs.stat await and both spawn ffmpeg.
+  // All checks from here down are synchronous, so the second caller of a
+  // pair sees the session the first created and skips the spawn.
+  let session = hlsSessions.get(req.params.id);
+  if (!session) {
+    // Own the cpu-bound session count independently from the fMP4
+    // transcodeGate. An HLS session runs ffmpeg for the full movie
+    // duration, so it's fundamentally different from per-request gating.
+    if (hlsSessions.size >= MAX_CONCURRENT_HLS_SESSIONS) {
+      return res.status(429).set('Retry-After', '30').json({
+        error: 'Server busy — too many concurrent HLS sessions. Try again shortly.',
+      });
+    }
+    // Don't spin up HLS while a background conversion is already producing
+    // a direct-playable mp4 — two parallel libx264 processes starve the
+    // Jetson of CPU and both finish slower than one.
+    const convState = library.getConversionState(req.params.id);
+    if (convState && convState.active) {
+      return res.status(503).set({
+        'X-Conversion-Kind': convState.kind || 'unknown',
+        'X-Conversion-Progress': String(convState.progress || 0),
+        'Retry-After': '60',
+      }).json({
+        error: 'Background conversion in progress',
+        convertKind: convState.kind,
+        convertProgress: convState.progress,
+      });
+    }
+    try {
+      session = _startHlsSession(req.params.id, filePath);
+    } catch (err) {
+      console.error(`[HLS] Could not start session for ${req.params.id}: ${err.message}`);
+      return res.status(500).json({ error: 'Could not start HLS transcode', reason: err.message });
+    }
+  }
+
+  session.lastAccessMs = Date.now();
+
+  // Block until ffmpeg has produced at least one segment and written the
+  // playlist file. Poll every 200ms up to HLS_FIRST_SEGMENT_WAIT_MS. We
+  // also exit the wait early if the session gets killed (ffmpeg crashed).
+  const waitStart = Date.now();
+  while (Date.now() - waitStart < HLS_FIRST_SEGMENT_WAIT_MS) {
+    if (session.ended) break;
+    try {
+      const content = await fs.promises.readFile(session.playlistPath, 'utf8');
+      // A usable playlist has at least one #EXTINF + segment_N.ts pair.
+      if (content.includes('#EXTINF:') && /segment_\d+\.ts/.test(content)) {
+        session.lastAccessMs = Date.now();
+        res.set({
+          'Content-Type': 'application/vnd.apple.mpegurl',
+          'Cache-Control': 'no-store',
+        });
+        return res.send(content);
+      }
+    } catch { /* playlist not yet written */ }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+
+  // Didn't get a first segment in time — surface ffmpeg's last stderr
+  // line so we can diagnose from `docker logs`.
+  const reason = session.ended
+    ? (session.stderrTail || 'ffmpeg exited before first segment')
+    : 'timeout waiting for first segment';
+  _stopHlsSession(req.params.id, reason);
+  return res.status(502).json({ error: 'HLS transcode failed', reason });
+});
+
+// GET /api/library/:id/stream/hls/:segment
+// Serves .ts segments that ffmpeg is writing to the session directory.
+// If a segment hasn't been written yet (client is asking ahead of the
+// transcoder), block briefly for it to appear. Segment requests keep the
+// session alive so the idle cleanup doesn't kill ffmpeg mid-watch.
+app.get('/api/library/:id/stream/hls/:segment', rateLimit, async (req, res) => {
+  // Pin the segment name to the exact pattern ffmpeg writes so a client
+  // can't use this endpoint to read arbitrary files under the cache dir.
+  const name = req.params.segment;
+  if (!/^segment_\d+\.ts$/.test(name)) {
+    return res.status(400).json({ error: 'Invalid segment name' });
+  }
+
+  const session = hlsSessions.get(req.params.id);
+  if (!session) return res.status(404).json({ error: 'HLS session not found — start by requesting playlist.m3u8' });
+
+  session.lastAccessMs = Date.now();
+  const segmentPath = path.join(session.dir, name);
+
+  // The segment may not exist yet if the client is asking ahead of the
+  // transcoder. Poll for up to HLS_SEGMENT_WAIT_MS before giving up.
+  const waitStart = Date.now();
+  while (Date.now() - waitStart < HLS_SEGMENT_WAIT_MS) {
+    if (session.ended) break;
+    try {
+      const st = await fs.promises.stat(segmentPath);
+      if (st.size > 0) break;
+    } catch { /* not there yet */ }
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+
+  if (session.ended && !fs.existsSync(segmentPath)) {
+    return res.status(502).json({ error: 'HLS session ended before segment was produced', reason: session.stderrTail });
+  }
+  if (!fs.existsSync(segmentPath)) {
+    return res.status(404).json({ error: 'Segment not available yet' });
+  }
+
+  session.lastAccessMs = Date.now();
+  res.set({
+    'Content-Type': 'video/mp2t',
+    // Segments don't change once written — let the browser cache them
+    // within the tab for smooth seeking back. no-store would force a
+    // re-fetch every time the user scrubs back a few seconds.
+    'Cache-Control': 'public, max-age=3600, immutable',
+  });
+
+  const stream = fs.createReadStream(segmentPath);
+  stream.on('error', (err) => {
+    console.warn(`[HLS] Segment stream error for ${req.params.id}/${name}: ${err.message}`);
+    try { res.end(); } catch { /* ignore */ }
+  });
+  stream.pipe(res);
+});
+
 // ─── Library Probe Helpers ───────────────────────────────────────────
 // Parse the `caps` query param the client sends to /probe and /transcode.
 // Format: comma-separated feature tokens — "h264,hevc,aac,mp3". Any token
@@ -4427,6 +4740,12 @@ function shutdown() {
   forceExit.unref();
 
   clearInterval(rateLimitCleanupTimer);
+  clearInterval(hlsCleanupTimer);
+  // Kill every active HLS ffmpeg so we don't leak child processes or hold
+  // open file handles into the HLS cache that block the rm below.
+  for (const id of [...hlsSessions.keys()]) {
+    _stopHlsSession(id, 'server shutdown');
+  }
   try { library.destroy(); } catch (err) {
     console.error(`[Server] Library shutdown error: ${err.message}`);
   }

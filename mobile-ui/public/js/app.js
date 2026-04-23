@@ -4510,6 +4510,14 @@
     if (_clientCaps) return _clientCaps;
     const v = document.createElement('video');
     const probably = (type) => v.canPlayType(type) === 'probably';
+    // For HLS, accept 'maybe' too — Safari (including iOS) historically
+    // answers 'maybe' for application/vnd.apple.mpegurl even though it's
+    // the ONLY browser family that plays HLS natively. 'probably' is too
+    // strict and misses the exact clients we want to route to HLS.
+    const canPlayHls = (() => {
+      const r = v.canPlayType('application/vnd.apple.mpegurl');
+      return r === 'probably' || r === 'maybe';
+    })();
     _clientCaps = {
       h264: probably('video/mp4; codecs="avc1.42E01E, mp4a.40.2"'),
       // Both hvc1 and hev1 fourccs are valid HEVC containers; some browsers
@@ -4518,6 +4526,7 @@
          || probably('video/mp4; codecs="hev1.1.6.L93.90, mp4a.40.2"'),
       aac:  probably('audio/mp4; codecs="mp4a.40.2"'),
       mp3:  probably('audio/mpeg'),
+      hls:  canPlayHls,
     };
     console.log('[Client] Media capabilities:', _clientCaps);
     return _clientCaps;
@@ -4525,7 +4534,22 @@
 
   function clientCapsQuery() {
     const c = getClientCaps();
-    return Object.entries(c).filter(([, v]) => v).map(([k]) => k).join(',');
+    // Only the codec caps go to the server's /probe endpoint — `hls` is
+    // a purely client-side routing hint and isn't in parseClientCaps().
+    const tokens = ['h264', 'hevc', 'aac', 'mp3'].filter((k) => c[k]);
+    return tokens.join(',');
+  }
+
+  // Pick the live-transcode endpoint the browser can actually play. iOS
+  // Safari (and desktop Safari) route through HLS because their <video>
+  // element doesn't reliably handle our fMP4 transcode output. Everyone
+  // else (Chrome/Firefox/Edge desktop) gets the fMP4 transcode which they
+  // consume without issue.
+  function pickTranscodeEndpoint(encodedId, capsQuery) {
+    if (getClientCaps().hls) {
+      return `/api/library/${encodedId}/stream/hls/playlist.m3u8`;
+    }
+    return `/api/library/${encodedId}/stream/transcode?caps=${capsQuery}`;
   }
 
   // Set video src, wait for a playable signal (with timeout), then play().
@@ -4826,12 +4850,20 @@
     // then transcode as a universal fallback if we weren't already
     // transcoding. This handles the corner case where the client's
     // canPlayType() lied ("probably" but actually can't decode).
-    const attempts = [{ action: probe.action, endpoint: probe.endpoint }];
+    //
+    // For clients that speak HLS natively (Safari — desktop and iOS),
+    // "transcode" routes to the HLS playlist endpoint instead of the
+    // fMP4 transcode endpoint. The fMP4 variant's empty_moov + chunked
+    // transfer combo isn't reliably playable by iOS Safari's <video>,
+    // which was surfacing as Media error (code 4) with no diagnostic.
+    const transcodeEndpoint = pickTranscodeEndpoint(encodedId, caps);
+    // If the server said 'transcode', swap in our client-picked endpoint
+    // (the server's suggestion is always the fMP4 URL; it doesn't know
+    // about the HLS option). Any other action keeps the server's URL.
+    const primaryEndpoint = probe.action === 'transcode' ? transcodeEndpoint : probe.endpoint;
+    const attempts = [{ action: probe.action, endpoint: primaryEndpoint }];
     if (probe.action !== 'transcode') {
-      attempts.push({
-        action: 'transcode',
-        endpoint: `/api/library/${encodedId}/stream/transcode?caps=${caps}`,
-      });
+      attempts.push({ action: 'transcode', endpoint: transcodeEndpoint });
     }
 
     const statusText = {

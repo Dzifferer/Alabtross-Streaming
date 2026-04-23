@@ -5356,16 +5356,73 @@
     }
 
     renderDownloads();
+    refreshDownloadsDiag();
 
-    // Auto-refresh while on settings view
+    // Auto-refresh while on settings view. Downloads list is cheap
+    // (just /api/library), diag involves a 1s CPU sample server-side
+    // so we run it less frequently — every 9 s, skipping when nothing
+    // is actively downloading.
+    let diagTick = 0;
     _downloadsTimer = setInterval(() => {
-      if (state.currentView === 'settings') {
-        renderDownloads();
-      } else {
+      if (state.currentView !== 'settings') {
         clearInterval(_downloadsTimer);
         _downloadsTimer = null;
+        return;
       }
+      renderDownloads();
+      diagTick = (diagTick + 1) % 3;
+      if (diagTick === 0) refreshDownloadsDiag();
     }, 3000);
+  }
+
+  // Fetch /api/diagnostics/system and render a compact bar above the
+  // downloads list showing aggregate torrent throughput, host CPU / RAM
+  // / net / disk, and a bottleneck hint. Hidden when no torrent is
+  // active or the endpoint is unreachable, so we never display stale
+  // numbers.
+  async function refreshDownloadsDiag() {
+    const el = document.getElementById('downloads-diag');
+    if (!el) return;
+    try {
+      const resp = await fetch('/api/diagnostics/system?ms=500');
+      if (!resp.ok) throw new Error('diag fetch failed');
+      const d = await resp.json();
+      if (!d || !d.torrents || d.torrents.active === 0) {
+        el.classList.add('hidden');
+        el.innerHTML = '';
+        return;
+      }
+      const fmtMBps = (bps) => (bps / 1e6).toFixed(bps < 1e6 ? 2 : 1) + ' MB/s';
+      const cpuPct  = d.host.cpu.usagePct;
+      const memPct  = d.host.memory.usedPct;
+      const hotClass = (pct, warn = 75, hot = 90) =>
+        pct >= hot ? 'hot' : pct >= warn ? 'warn' : '';
+      const down = fmtMBps(d.torrents.totalDownloadBps);
+      const up   = fmtMBps(d.torrents.totalUploadBps);
+      const hostRx = fmtMBps(d.host.totalNetRxBps);
+      const diskW  = fmtMBps(d.host.totalDiskWriteBps);
+      const torrents = d.torrents.active;
+      const peers = d.torrents.totalPeers;
+      el.classList.remove('hidden');
+      el.innerHTML =
+        '<div class="downloads-diag-row">' +
+          `<span class="downloads-diag-stat">↓ <strong>${escapeHTML(down)}</strong></span>` +
+          `<span class="downloads-diag-stat">↑ <strong>${escapeHTML(up)}</strong></span>` +
+          `<span class="downloads-diag-stat"><strong>${torrents}</strong> torrent${torrents === 1 ? '' : 's'}</span>` +
+          `<span class="downloads-diag-stat"><strong>${peers}</strong> peers</span>` +
+        '</div>' +
+        '<div class="downloads-diag-row" style="margin-top:4px">' +
+          `<span class="downloads-diag-stat ${hotClass(cpuPct)}">CPU <strong>${cpuPct}%</strong></span>` +
+          `<span class="downloads-diag-stat ${hotClass(memPct, 85, 95)}">RAM <strong>${memPct}%</strong></span>` +
+          `<span class="downloads-diag-stat">net rx <strong>${escapeHTML(hostRx)}</strong></span>` +
+          `<span class="downloads-diag-stat">disk w <strong>${escapeHTML(diskW)}</strong></span>` +
+        '</div>' +
+        (d.hint ? `<div class="downloads-diag-hint">💡 <strong>${escapeHTML(d.hint)}</strong></div>` : '');
+    } catch {
+      // Leave previous render in place on transient error; only hide if
+      // we've never rendered anything.
+      if (!el.innerHTML.trim()) el.classList.add('hidden');
+    }
   }
 
   // Group items by packId — pack items become a single aggregate row

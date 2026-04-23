@@ -3706,6 +3706,36 @@ select.manual-import-input {
   border-radius: var(--radius-sm);
 }
 
+/* System-diagnostic bar above the downloads list. Shown when at least
+   one download is active. Three stacked lines: aggregate torrent
+   throughput, host utilization, and a plain-English bottleneck hint
+   so the user can tell at a glance whether the limit is their ISP,
+   the Jetson's CPU/eMMC, or the BT swarm. */
+.downloads-diag {
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  background: var(--bg-card);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.downloads-diag.hidden { display: none; }
+.downloads-diag-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.downloads-diag-stat { color: var(--text-secondary); white-space: nowrap; }
+.downloads-diag-stat strong { color: var(--text-primary); font-weight: 600; }
+.downloads-diag-stat.warn strong { color: #f6b93b; }
+.downloads-diag-stat.hot strong   { color: #e55353; }
+.downloads-diag-hint {
+  margin-top: 6px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.downloads-diag-hint strong { color: var(--text-primary); font-weight: 600; }
+
 .download-item {
   display: flex;
   align-items: center;

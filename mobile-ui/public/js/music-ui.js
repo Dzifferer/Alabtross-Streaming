@@ -846,7 +846,7 @@
     // Newest-first.
     items.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
     for (const item of items) {
-      const card = el('div', { class: 'music-card music-lib-card', 'data-id': item.id });
+      const card = el('div', { class: 'music-card music-lib-card', 'data-id': item.id, 'data-status': item.status || '' });
       const cover = el('div', { class: 'music-card__cover' });
       if (item.coverUrl) cover.style.backgroundImage = `url(${item.coverUrl})`;
       card.appendChild(cover);
@@ -854,14 +854,84 @@
       if (item.artist) card.appendChild(el('div', { class: 'music-card__subtitle' }, item.artist));
       if (item.status && item.status !== 'complete') {
         const pct = Math.max(0, Math.min(100, Math.round(item.progress || 0)));
-        card.appendChild(el('div', { class: 'music-lib-card__status' }, `${item.status} · ${pct}%`));
+        const label = item.status === 'failed'
+          ? (item.error ? `failed — ${item.error}` : 'failed')
+          : `${item.status} · ${pct}%`;
+        card.appendChild(el('div', { class: 'music-lib-card__status' }, label));
+        card.appendChild(renderMusicLibActions(item));
       }
       card.addEventListener('click', () => {
         if (item.status === 'complete') playMusicLibraryAlbum(item);
-        else alert(`${item.status === 'downloading' ? 'Still downloading' : 'Not playable yet'} — ${Math.round(item.progress || 0)}%`);
       });
       host.appendChild(card);
     }
+  }
+
+  function renderMusicLibActions(item) {
+    const row = el('div', { class: 'music-lib-card__actions' });
+    const stop = (fn) => (e) => { e.stopPropagation(); fn(); };
+
+    if (item.status === 'failed') {
+      row.appendChild(el('button', {
+        class: 'btn-sm', type: 'button', title: 'Retry download',
+        onclick: stop(() => musicLibAction(item.id, 'retry')),
+      }, 'Retry'));
+    } else if (item.status === 'downloading') {
+      row.appendChild(el('button', {
+        class: 'btn-sm', type: 'button', title: 'Pause download',
+        onclick: stop(() => musicLibAction(item.id, 'pause')),
+      }, 'Pause'));
+    } else if (item.status === 'paused') {
+      row.appendChild(el('button', {
+        class: 'btn-sm', type: 'button', title: 'Resume download',
+        onclick: stop(() => musicLibAction(item.id, 'resume')),
+      }, 'Resume'));
+    }
+
+    row.appendChild(el('button', {
+      class: 'btn-sm music-lib-card__remove', type: 'button', title: 'Remove from library',
+      onclick: stop(() => musicLibRemove(item)),
+    }, 'Remove'));
+
+    return row;
+  }
+
+  async function musicLibAction(id, action) {
+    try {
+      const res = await fetch(`/api/music-library/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) throw new Error(data.error || `${action} failed`);
+      musicToast(action === 'retry' ? 'Retrying download…' : action === 'pause' ? 'Paused' : 'Resumed');
+    } catch (err) {
+      musicToast(`Failed to ${action}: ${err.message}`);
+    }
+    renderMusicLibrary();
+  }
+
+  async function musicLibRemove(item) {
+    const label = [item.artist, item.title].filter(Boolean).join(' — ') || item.name || 'this album';
+    if (!confirm(`Remove "${label}" from the music library? Downloaded files will be deleted.`)) return;
+    try {
+      const res = await fetch(`/api/music-library/${encodeURIComponent(item.id)}`, { method: 'DELETE' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Remove failed');
+      musicToast('Removed');
+    } catch (err) {
+      musicToast('Failed to remove: ' + err.message);
+    }
+    renderMusicLibrary();
+  }
+
+  function musicToast(message) {
+    let toast = document.querySelector('.toast');
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.className = 'toast';
+      document.body.appendChild(toast);
+    }
+    toast.textContent = message;
+    toast.classList.add('show');
+    setTimeout(() => toast.classList.remove('show'), 3000);
   }
 
   async function playMusicLibraryAlbum(item, startIndex = 0) {

@@ -1972,7 +1972,15 @@ class LibraryManager {
   getAll() {
     const tracked = [...this._items.values()];
     const now = Date.now();
-    if (!this._discoveryCache || now - this._discoveryCacheTs > 10000) {
+    // Every mutation path (add/remove/convert/music/manual) already sets
+    // _discoveryCache = null explicitly, so the TTL is just a backstop
+    // for files that appear under the library path without going through
+    // LibraryManager (e.g. a drag-drop into the mount or a rename by the
+    // user). A recursive fs walk over a large library on eMMC costs
+    // several seconds — bumping the TTL from 10s to 60s eliminates the
+    // "every tab-switch triggers a re-walk" penalty without changing
+    // the invariants.
+    if (!this._discoveryCache || now - this._discoveryCacheTs > 60000) {
       this._discoveryCache = this._discoverUntrackedFiles();
       this._discoveryCacheTs = now;
     }

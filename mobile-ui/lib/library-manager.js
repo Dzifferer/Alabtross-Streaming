@@ -1783,6 +1783,22 @@ class LibraryManager {
     if (!engine || !engine.files) return null;
     for (const f of engine.files) f.deselect();
 
+    // Re-select any "near-complete stragglers": items still in 'downloading'
+    // whose rounded progress reads 100 but isComplete=false because a piece
+    // (usually a file-boundary one) is still missing from the bitfield.
+    // Without this, advancing to the next file deselects the straggler and
+    // the engine never refetches the missing piece — the pack sits forever
+    // at "100% / N-1 of N episodes". The cost is bounded: each straggler
+    // has at most ~0.5% of its bytes left, so this barely competes with
+    // the active file for bandwidth.
+    for (const item of this._items.values()) {
+      if (item.packId !== packId) continue;
+      if (item.status !== 'downloading') continue;
+      if ((item.progress || 0) < 99) continue;
+      const stragglerFile = engine.files.find(f => path.basename(f.name) === item.fileName);
+      if (stragglerFile) stragglerFile.select();
+    }
+
     // Loop in case the next-picked item turns out to have a missing file —
     // mark it failed and try again.
     while (true) {
@@ -1859,12 +1875,30 @@ class LibraryManager {
           item.status = 'complete';
           item.completedAt = Date.now();
           item.downloadSpeed = 0;
+          delete item._nearCompleteSince;
           anyJustCompleted = true;
           console.log(`[Library] Pack episode complete: "${item.fileName}"`);
           this._checkAndConvert(itemId);
           if (itemId === activeId) advanceToNext = true;
         } else {
           allComplete = false;
+          // Boundary-piece straggler: bytes are essentially all there but the
+          // bitfield is missing one or two pieces. Re-select the file each
+          // tick so the piece picker keeps requesting them — torrent-stream's
+          // select() is idempotent, so calling it from here is safe even
+          // when the file is already selected.
+          if (progressPct >= 99) {
+            file.select();
+            if (!item._nearCompleteSince) {
+              item._nearCompleteSince = Date.now();
+              console.log(`[Library] Pack episode near-complete-stuck: "${item.fileName}" — bitfield missing pieces, keeping file selected`);
+            }
+          } else if (item._nearCompleteSince) {
+            // Progress regressed below 99% (rare — e.g., engine recycle reset
+            // bitfield). Clear the marker so we re-arm cleanly when it climbs
+            // back up.
+            delete item._nearCompleteSince;
+          }
         }
       }
 
@@ -1898,7 +1932,20 @@ class LibraryManager {
       // genuinely stuck, recycling is the right call even though it
       // affects every episode sharing the engine — the alternative is
       // staying stuck until the user intervenes.
-      const stall = this._checkEngineStall(engine, `pack ${packId}`, { thresholdMs: 15 * 60 * 1000 });
+      //
+      // EXCEPT: when every remaining 'downloading' item is a near-complete
+      // straggler (bytes are there, but a piece or two is missing from the
+      // bitfield), 15 minutes is unjustifiable — the user already sees
+      // "100%" and is waiting on what looks like a finished download. Use
+      // a 2-min threshold in that case so we recycle aggressively to find
+      // peers that have the missing pieces.
+      const remaining = [...this._items.values()].filter(
+        (i) => i.packId === packId && i.status === 'downloading'
+      );
+      const allRemainingNearComplete = remaining.length > 0
+        && remaining.every((i) => (i.progress || 0) >= 99);
+      const stallThresholdMs = allRemainingNearComplete ? 2 * 60 * 1000 : 15 * 60 * 1000;
+      const stall = this._checkEngineStall(engine, `pack ${packId}`, { thresholdMs: stallThresholdMs });
       if (stall.stalled) {
         const recycles = this._packStallRecycles.get(packId) || 0;
         const MAX_PACK_RECYCLES = 3;
@@ -4763,6 +4810,7 @@ class LibraryManager {
           _probeAudioSampleRate,
           _probeHasAudio,
           _workerFailed,
+          _nearCompleteSince,
           ...clean
         } = item;
         return clean;
@@ -4819,6 +4867,19 @@ class LibraryManager {
         .map(i => path.normalize(i.filePath))
     );
 
+    // Episode-coordinate dedup: a discovered file inside a known pack folder
+    // can collide with a tracked item when the file misparses to the same
+    // (season, episode) as a real episode (e.g. a featurette named
+    // "The Boys.mkv" sharing the dir with the actual S02E07 file). Without
+    // this set the UI ends up rendering both — the real episode AND a
+    // titleless phantom row at the same E-label.
+    const trackedEpisodeKeys = new Set();
+    for (const i of this._items.values()) {
+      if (i.imdbId && i.season != null && i.episode != null) {
+        trackedEpisodeKeys.add(`${i.imdbId}|${i.season}|${i.episode}`);
+      }
+    }
+
     // Files smaller than this are almost always samples/trailers/featurettes
     // shipped alongside the real content. Skipping them stops the review
     // queue from being drowned in noise on the first scan of a big library.
@@ -4858,6 +4919,15 @@ class LibraryManager {
       // magnetUri — so "Find missing" can reopen the source torrent and any
       // future rebuild of the metadata file doesn't lose track of the pack.
       const packEntry = this._findPackCatalogEntryForRelPath(relPath);
+
+      // Drop disk-discovered files that collide with a tracked episode at
+      // the same (imdbId, season, episode). Otherwise an extras file in the
+      // pack folder that misparses to a real episode number renders as a
+      // duplicate row alongside the actual episode.
+      if (packEntry?.imdbId && parsed.season != null && parsed.episode != null) {
+        const key = `${packEntry.imdbId}|${parsed.season}|${parsed.episode}`;
+        if (trackedEpisodeKeys.has(key)) return null;
+      }
 
       return {
         id: 'disk_' + relPath,
@@ -4928,7 +4998,8 @@ class LibraryManager {
         catch { continue; }
         if (stat.size < MIN_VIDEO_SIZE) continue;
 
-        discovered.push(buildItem(relPath, stat));
+        const built = buildItem(relPath, stat);
+        if (built) discovered.push(built);
       }
     };
 

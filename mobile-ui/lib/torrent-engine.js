@@ -412,6 +412,15 @@ class TorrentEngine {
       return;
     }
 
+    // ffmpeg can't demux MP4/WebM from a non-seekable pipe when `moov` lives
+    // at the end of the file (the common non-faststart layout for torrents),
+    // and these containers play natively with byte ranges anyway. Fall through
+    // to the direct stream path so the browser gets a seekable response.
+    if (/\.(mp4|m4v|webm)$/i.test(file.name)) {
+      console.log(`[TorrentEngine] ${file.name} is browser-native — serving direct instead of remuxing`);
+      return this.serveStream(req, res, magnetOrHash, fileIdx, 'video');
+    }
+
     // Re-check the in-flight map now that we know the actual file (the
     // initial check happened before getTorrent resolved, so a race could
     // have let two requests through).

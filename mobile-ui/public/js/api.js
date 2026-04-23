@@ -504,11 +504,16 @@ class StremioAPI {
   // ─── Playback URL Resolution ─────────────────────
 
   getPlaybackUrl(stream) {
-    // All infoHash streams use local remux endpoint for browser-compatible audio.
-    // FFmpeg copies video (-c:v copy) and transcodes audio to AAC — lightweight.
     if (stream.infoHash) {
       if (!/^[0-9a-f]{40}$/i.test(stream.infoHash)) return null;
-      let url = `/api/play/${stream.infoHash}/remux`;
+      // MP4/WebM with browser-native audio can be served directly with byte
+      // ranges — routing them through ffmpeg's pipe input fails whenever the
+      // MP4 has `moov` at the end of the file (the common non-faststart case)
+      // because a pipe isn't seekable. Only use /remux when we actually need
+      // to transcode (MKV, HEVC, AC-3/DTS/etc).
+      const base = stream.browserPlayable
+        ? `/api/play/${stream.infoHash}`
+        : `/api/play/${stream.infoHash}/remux`;
       const params = new URLSearchParams();
       if (stream.fileIdx !== undefined) {
         params.set('fileIdx', stream.fileIdx);
@@ -517,7 +522,7 @@ class StremioAPI {
         params.set('magnet', stream.magnetUri);
       }
       const qs = params.toString();
-      return qs ? url + '?' + qs : url;
+      return qs ? base + '?' + qs : base;
     }
 
     if (stream.url) {

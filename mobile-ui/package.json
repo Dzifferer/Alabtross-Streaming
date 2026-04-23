@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "cheerio": "^1.0.0",
+    "compression": "^1.8.1",
     "express": "^4.21.0",
     "http-proxy-middleware": "^3.0.0",
     "torrent-stream": "^1.2.1"

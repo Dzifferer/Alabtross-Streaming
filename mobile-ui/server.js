@@ -43,7 +43,18 @@ const { getSystemDiag } = require('./lib/system-diag');
 const { discoverDevices, getLocalIP } = require('./lib/local-discovery');
 const castManager = require('./lib/cast-manager');
 
+const compression = require('compression');
+
 const app = express();
+// Gzip JSON / text responses. /api/library alone can ship 50-200 KB
+// of metadata for a mid-sized library; gzip compresses that down to
+// ~10-30 KB and noticeably cuts first-byte-to-rendered latency on
+// cellular. Video / audio stream responses are intentionally skipped
+// because the range-request ffmpeg-pipe paths have their own Content-
+// Type we don't want to double-compress. The default filter already
+// skips responses with `Cache-Control: no-transform` and binary MIME
+// types, so this is safe to apply globally.
+app.use(compression());
 const PORT = process.env.PORT || 8080;
 const TORRENT_CACHE_PATH = process.env.TORRENT_CACHE || path.join(__dirname, '.torrent-cache');
 const LIBRARY_PATH = process.env.LIBRARY_PATH || path.join(TORRENT_CACHE_PATH, 'library');
@@ -415,10 +426,49 @@ app.use((req, res, next) => {
 const TMDB_API_KEY = process.env.TMDB_API_KEY || '';
 const TMDB_BASE = 'https://api.themoviedb.org/3';
 
+// In-memory cache of TMDB responses. TMDB metadata changes slowly — we
+// can safely serve a 30-min-old /movie/123 detail payload while
+// drastically cutting API hits (the same id is queried for search
+// hits, detail view, poster refresh, season enrichment, and
+// auto-match all in one session). Negative entries (404 / non-200)
+// are remembered for 1 hour so a mistyped id doesn't retry on every
+// page load and chew into the 40-req/10s rate limit. Process-local
+// Map; clears on restart. Size cap keeps memory bounded.
+const TMDB_CACHE_MAX        = 2048;
+const TMDB_CACHE_TTL_OK_MS  = 30 * 60 * 1000;
+const TMDB_CACHE_TTL_ERR_MS = 60 * 60 * 1000;
+const _tmdbCache = new Map();   // url -> { ok, value, expiresAt }
+function _tmdbCacheGet(url) {
+  const hit = _tmdbCache.get(url);
+  if (!hit) return null;
+  if (Date.now() >= hit.expiresAt) {
+    _tmdbCache.delete(url);
+    return null;
+  }
+  // Touch for LRU
+  _tmdbCache.delete(url);
+  _tmdbCache.set(url, hit);
+  return hit;
+}
+function _tmdbCacheSet(url, ok, value, ttlMs) {
+  if (_tmdbCache.size >= TMDB_CACHE_MAX) {
+    const oldest = _tmdbCache.keys().next().value;
+    if (oldest !== undefined) _tmdbCache.delete(oldest);
+  }
+  _tmdbCache.set(url, { ok, value, expiresAt: Date.now() + ttlMs });
+}
+
 function tmdbFetch(endpoint, params = {}) {
   if (!TMDB_API_KEY) return Promise.reject(new Error('No TMDB API key'));
   const qs = new URLSearchParams({ api_key: TMDB_API_KEY, ...params });
   const url = `${TMDB_BASE}${endpoint}?${qs}`;
+
+  const cached = _tmdbCacheGet(url);
+  if (cached) {
+    if (cached.ok) return Promise.resolve(cached.value);
+    return Promise.reject(cached.value);
+  }
+
   return new Promise((resolve, reject) => {
     const deadline = setTimeout(() => {
       if (req) req.destroy();
@@ -428,12 +478,26 @@ function tmdbFetch(endpoint, params = {}) {
     // calls (search, details, season metadata) skip the TLS handshake on
     // the Orin's CPU after the first one.
     const req = https.get(url, { timeout: 10000, family: 4, agent: providersHttpsAgent }, (res) => {
-      if (res.statusCode !== 200) { clearTimeout(deadline); res.resume(); return reject(new Error(`TMDB HTTP ${res.statusCode}`)); }
+      if (res.statusCode !== 200) {
+        clearTimeout(deadline);
+        res.resume();
+        const err = new Error(`TMDB HTTP ${res.statusCode}`);
+        // Remember non-200s so we don't hammer TMDB on broken ids /
+        // transient server errors. Rate-limit replies (429) get the
+        // same cache; the 1-hr miss window is shorter than a TMDB
+        // cool-off anyway.
+        _tmdbCacheSet(url, false, err, TMDB_CACHE_TTL_ERR_MS);
+        return reject(err);
+      }
       let body = '';
       res.on('data', chunk => body += chunk);
       res.on('end', () => {
         clearTimeout(deadline);
-        try { resolve(JSON.parse(body)); }
+        try {
+          const value = JSON.parse(body);
+          _tmdbCacheSet(url, true, value, TMDB_CACHE_TTL_OK_MS);
+          resolve(value);
+        }
         catch (e) { reject(e); }
       });
     });
@@ -4320,6 +4384,16 @@ app.get('/api/library/:id/probe', async (req, res) => {
 // ─── Stremio Addon Proxy ──────────────────────────────────────────────
 // Proxy JSON requests to Stremio addons to avoid CORS issues.
 const ADDON_JSON_PATH_RE = /^\/(manifest\.json|catalog\/|meta\/|stream\/)/;
+// In-memory cache of Stremio addon-proxy responses. Every home/catalog
+// browse resolves the same handful of addon manifests and catalogs, so
+// a short TTL here eliminates the repeat upstream fetch while still
+// picking up addon changes within a few minutes. Size-capped LRU so
+// a long-running server doesn't grow the map forever. Failures are
+// NOT cached — addon downtime should retry on the next request.
+const ADDON_PROXY_CACHE_MAX    = 256;
+const ADDON_PROXY_CACHE_TTL_MS = 5 * 60 * 1000;
+const _addonProxyCache = new Map(); // url -> { value, expiresAt }
+
 app.get('/api/addon-proxy', rateLimit, async (req, res) => {
   const targetUrl = req.query.url;
   if (!targetUrl) return res.status(400).json({ error: 'Missing url parameter' });
@@ -4339,10 +4413,23 @@ app.get('/api/addon-proxy', rateLimit, async (req, res) => {
     return res.status(400).json({ error: 'Disallowed path' });
   }
 
+  const cached = _addonProxyCache.get(targetUrl);
+  if (cached && Date.now() < cached.expiresAt) {
+    // LRU touch
+    _addonProxyCache.delete(targetUrl);
+    _addonProxyCache.set(targetUrl, cached);
+    return res.json(cached.value);
+  }
+
   try {
     await validateUrlNotSSRF(targetUrl);
     const body = await fetchUrl(targetUrl);
     const data = JSON.parse(body);
+    if (_addonProxyCache.size >= ADDON_PROXY_CACHE_MAX) {
+      const oldest = _addonProxyCache.keys().next().value;
+      if (oldest !== undefined) _addonProxyCache.delete(oldest);
+    }
+    _addonProxyCache.set(targetUrl, { value: data, expiresAt: Date.now() + ADDON_PROXY_CACHE_TTL_MS });
     res.json(data);
   } catch (err) {
     console.error(`[AddonProxy] Error fetching ${targetUrl}: ${err.message}`);
@@ -4760,11 +4847,18 @@ app.get('/api/cast/sessions', (req, res) => {
   res.json({ sessions: castManager.getAllSessions() });
 });
 
-// Serve static files (no caching for JS/CSS to avoid stale code)
+// Serve static files. HTML/JS/CSS use `no-cache` (NOT `no-store`) so
+// the browser may keep a copy but must revalidate on every load —
+// express.static emits an ETag by default, so revalidation typically
+// returns 304 Not Modified and skips the full transfer. Previous
+// `no-store` forced a full download on every page load, including
+// several hundred KB of app.js on cellular.
 app.use(express.static(path.join(__dirname, 'public'), {
+  etag: true,
+  lastModified: true,
   setHeaders: (res, filePath) => {
     if (filePath.endsWith('.js') || filePath.endsWith('.css') || filePath.endsWith('.html')) {
-      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Cache-Control', 'no-cache');
     }
   },
 }));

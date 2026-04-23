@@ -214,6 +214,14 @@ class LibraryManager {
       failRemote:    0,
     };
     this._metadataSaveTimer = null;
+    // Trailing-debounce handle for _saveMetadata. Every state transition
+    // (download complete, progress tick, conversion done, manual edit)
+    // used to synchronously JSON.stringify the whole library, write a
+    // temp file, fsync, rename, and copy a backup. Over 50 call sites
+    // run that back-to-back during a busy download-then-convert flow,
+    // visibly stalling the event loop on eMMC. The public _saveMetadata
+    // is now a scheduler; _writeMetadataNow does the actual write.
+    this._metadataSaveDebounce = null;
     this._discoveryCache = null;      // cached result of _discoverUntrackedFiles
     this._discoveryCacheTs = 0;       // timestamp of last discovery scan
 
@@ -3260,8 +3268,10 @@ class LibraryManager {
       try { proc.kill('SIGTERM'); } catch { /* ignore */ }
     }
     this._convertProcesses.clear();
-    // Downloads keep status='downloading' so they auto-resume on next startup
-    this._saveMetadata();
+    // Downloads keep status='downloading' so they auto-resume on next startup.
+    // Use the immediate write path — we can't count on the debounce timer
+    // firing before the process exits.
+    this._writeMetadataNow();
     console.log('[Library] State saved — downloads and conversions will resume on next start');
   }
 
@@ -3764,7 +3774,10 @@ class LibraryManager {
   _startPeriodicSave() {
     if (this._metadataSaveTimer) return;
     this._metadataSaveTimer = setInterval(() => {
-      this._saveMetadata();
+      // Force an immediate write rather than scheduling another debounce
+      // tick — the periodic save is itself the durability guarantee, so
+      // going through the 500ms debounce would just add latency.
+      this._writeMetadataNow();
     }, METADATA_SAVE_INTERVAL);
   }
 
@@ -4183,7 +4196,31 @@ class LibraryManager {
     }
   }
 
+  /**
+   * Public entrypoint used by 50+ state-transition call sites. Coalesces
+   * rapid calls into a single trailing-debounced write so a burst of
+   * status changes during download → convert → finalize doesn't stall
+   * the event loop with N sequential fsync + atomic-rename operations.
+   * The periodic save timer (_startPeriodicSave, every 30s) provides an
+   * independent guarantee that state gets flushed even under sustained
+   * churn. Shutdown paths must call _writeMetadataNow() directly so the
+   * debounced write doesn't get dropped.
+   */
   _saveMetadata() {
+    if (this._metadataSaveDebounce) return;
+    this._metadataSaveDebounce = setTimeout(() => {
+      this._metadataSaveDebounce = null;
+      this._writeMetadataNow();
+    }, 500);
+  }
+
+  _writeMetadataNow() {
+    // Any pending debounce is about to be superseded by this immediate
+    // write; clear it so the scheduled callback doesn't double-write.
+    if (this._metadataSaveDebounce) {
+      clearTimeout(this._metadataSaveDebounce);
+      this._metadataSaveDebounce = null;
+    }
     try {
       const data = [...this._items.values()].map(item => {
         const {

@@ -4648,7 +4648,21 @@ class LibraryManager {
     };
 
     if (!probe || !probe.probeOk) {
-      result.reason = (probe && probe.reason) || 'probe failed';
+      const reason = (probe && probe.reason) || 'probe failed';
+      // Last-resort salvage: ffprobe refused the file (quirky moov,
+      // non-standard headers, mildly truncated, NAL mismatches, etc.),
+      // but ffmpeg with permissive error-detection flags can often still
+      // decode it. Only attempt this for files whose extension is a known
+      // video type — we don't want to hand a .txt or .bin to libx264.
+      // Caller (transcode endpoint) passes +discardcorrupt so recoverable
+      // garbage becomes skipped frames instead of an immediate abort.
+      const ext = probe && probe.ext ? probe.ext : null;
+      if (ext && VIDEO_EXTENSIONS.has(ext)) {
+        result.action = 'transcode';
+        result.reason = `${reason} — attempting permissive transcode`;
+      } else {
+        result.reason = reason;
+      }
       return result;
     }
 

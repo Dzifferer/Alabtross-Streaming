@@ -846,6 +846,10 @@ html, body {
   align-items: center;
   gap: 8px;
   padding: 12px 16px;
+  /* Overlay is position:fixed/inset:0, so it sits under the system status
+     bar. Push the header down by the safe-area inset so the notch/clock
+     doesn't overlap the title. */
+  padding-top: calc(12px + var(--safe-top));
   background: var(--bg, #0f0f0f);
   border-bottom: 1px solid var(--border, rgba(255,255,255,0.1));
 }

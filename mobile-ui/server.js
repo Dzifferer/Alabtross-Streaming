@@ -3587,8 +3587,13 @@ app.get('/api/library/:id/stream/remux', rateLimit, remuxGate, async (req, res) 
   // Pipe file through stdin (like the working torrent stream remux) so ffmpeg
   // processes sequentially instead of seeking around the file on disk.
   const ffmpeg = spawn('ffmpeg', [
-    '-probesize', '5000000',
-    '-analyzeduration', '5000000',
+    // Permissive parsing so files with quirky moov atoms or mildly
+    // corrupted indexes can still be remuxed instead of aborting with
+    // "Invalid data found when processing input".
+    '-err_detect', 'ignore_err',
+    '-fflags', '+genpts+igndts+discardcorrupt',
+    '-probesize', '50000000',
+    '-analyzeduration', '50000000',
     '-i', 'pipe:0',
     '-map', '0:v:0',
     '-map', '0:a:0?',
@@ -3719,13 +3724,19 @@ app.get('/api/library/:id/stream/transcode', rateLimit, transcodeGate, async (re
   // itself means it can read the moov atom up front (faster startup).
   const ffmpeg = spawn('ffmpeg', [
     '-hide_banner',
-    '-fflags', '+genpts',
+    // Permissive input flags so files that ffprobe rejected (quirky moov
+    // atoms, mild truncation, NAL size mismatches, timestamp glitches) can
+    // still be decoded — damaged frames become skipped frames instead of
+    // an immediate abort with "Invalid data found when processing input".
+    '-err_detect', 'ignore_err',
+    '-fflags', '+genpts+igndts+discardcorrupt',
     ...FFMPEG_HWACCEL_ARGS,
-    // Keep initial input parse cheap — 1MB / 1s probe is plenty for
-    // every container we ingest, and waiting any longer just delays
-    // the first MP4 fragment on the wire.
-    '-probesize', '1000000',
-    '-analyzeduration', '1000000',
+    // Larger probe window (50 MB / 50 s) than the client-facing probe so
+    // we can read a trailing moov atom or late-declared audio stream that
+    // the cheap-probe path may have missed. Still capped to keep first-
+    // fragment latency bounded on well-formed inputs.
+    '-probesize', '50000000',
+    '-analyzeduration', '50000000',
     '-i', filePath,
 
     // Select first video + first audio stream, drop everything else.

@@ -466,6 +466,20 @@ class TorrentEngine {
     // first audio track (the '?' makes audio optional so files without audio
     // don't cause FFmpeg to error out).
     const ffmpeg = spawn('ffmpeg', [
+      // Permissive input flags: streaming-while-downloading torrents often
+      // hand ffmpeg a file whose moov is still being fetched or whose NAL
+      // sizes don't match the container index. With strict parsing this
+      // aborts immediately with "Invalid data found when processing input".
+      // +discardcorrupt + ignore_err let recoverable glitches become
+      // skipped frames so playback actually starts.
+      '-err_detect', 'ignore_err',
+      '-fflags', '+genpts+igndts+discardcorrupt',
+      // Give ffmpeg a bigger probe window to locate a late moov or audio
+      // stream in partially-arrived containers. 50 MB / 50 s is generous
+      // for first-fragment latency but saves the stream when the header
+      // hasn't fully landed yet.
+      '-probesize', '50000000',
+      '-analyzeduration', '50000000',
       '-i', 'pipe:0',
       '-map', '0:v:0',
       '-map', '0:a:0?',

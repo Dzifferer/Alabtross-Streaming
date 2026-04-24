@@ -47,12 +47,40 @@ sudo docker build $BUILD_FLAGS -t alabtross-mobile ./mobile-ui
 
 BIND_IP=$(ip route get 8.8.8.8 | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')
 
+# Detect whether the Docker daemon has the NVIDIA container runtime wired
+# up. Without it, --runtime=nvidia is a hard error on `docker run` and the
+# container has no /dev/nvhost-* nodes even if ffmpeg was built with CUDA.
+# jetson_setup.sh installs and configures the runtime on fresh Jetsons;
+# this fallback keeps deploys working on hosts where that hasn't happened
+# (e.g. upgrading an older install that predates this change).
+NVIDIA_RUNTIME_ARGS=()
+FFMPEG_HWACCEL_DEFAULT=""
+if sudo docker info 2>/dev/null | grep -qi 'Runtimes:.*nvidia'; then
+  NVIDIA_RUNTIME_ARGS=(--runtime=nvidia)
+  FFMPEG_HWACCEL_DEFAULT="cuda"
+  echo "==> NVIDIA container runtime detected — GPU decode (and NVENC when available) enabled"
+else
+  echo "==> WARN: NVIDIA container runtime NOT configured on this Docker daemon"
+  echo "         — transcodes will run on CPU (libx264). Run jetson_setup.sh to enable."
+fi
+
 echo "==> Starting container (bind IP: $BIND_IP)..."
 # WORKER_URL / WORKER_SECRET pull through from .env when set — if blank,
-# the library manager runs every conversion locally on libx264. See
-# worker/README.md to set up the GPU conversion worker on a Windows PC.
+# the library manager runs every conversion locally. Without a worker we
+# rely on the Jetson's own NVDEC (and NVENC on Orin NX / AGX) to carry as
+# much of the pipeline as the SoC supports. See mobile-ui/lib/ffmpeg-hw.js.
+#
+# FFMPEG_HWACCEL=cuda wires the Jetson's NVDEC + scale_cuda into every
+# ffmpeg call. Defaults to 'cuda' when the NVIDIA runtime is present, empty
+# otherwise.
+#
+# FFMPEG_ENCODER defaults to empty (= libx264 CPU encode) because the Orin
+# Nano has no NVENC hardware. On an Orin NX / AGX Orin (or when you migrate
+# to one), set FFMPEG_ENCODER=h264_nvenc in .env to move the encode side
+# onto the GPU too.
 sudo docker run -d \
   --name alabtross-mobile \
+  "${NVIDIA_RUNTIME_ARGS[@]}" \
   --restart unless-stopped \
   --net=host \
   -e PORT=8080 \
@@ -62,6 +90,8 @@ sudo docker run -d \
   -e TMDB_API_KEY="${TMDB_API_KEY:?Set TMDB_API_KEY env var before deploying}" \
   -e WORKER_URL="${WORKER_URL:-}" \
   -e WORKER_SECRET="${WORKER_SECRET:-}" \
+  -e FFMPEG_HWACCEL="${FFMPEG_HWACCEL:-$FFMPEG_HWACCEL_DEFAULT}" \
+  -e FFMPEG_ENCODER="${FFMPEG_ENCODER:-}" \
   -v "/mnt/movies/torrent-cache:/app/torrent-cache" \
   alabtross-mobile
 

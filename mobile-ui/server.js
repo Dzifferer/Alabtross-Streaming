@@ -42,6 +42,7 @@ const {
 const { getSystemDiag } = require('./lib/system-diag');
 const { discoverDevices, getLocalIP } = require('./lib/local-discovery');
 const castManager = require('./lib/cast-manager');
+const ffmpegHw = require('./lib/ffmpeg-hw');
 
 const compression = require('compression');
 
@@ -65,11 +66,12 @@ const MUSIC_LIBRARY_PATH = process.env.MUSIC_LIBRARY_PATH
   || path.join(path.dirname(LIBRARY_PATH), 'music-library');
 const SETTINGS_PATH = path.join(TORRENT_CACHE_PATH, 'settings.json');
 
-// Optional ffmpeg hwaccel for the live transcode endpoint. Mirrors the
-// FFMPEG_HWACCEL handling in lib/library-manager.js — set =cuda / =nvdec /
-// =v4l2m2m to offload decode to NVDEC on Jetson and free CPU for libx264.
-const FFMPEG_HWACCEL = (process.env.FFMPEG_HWACCEL || '').trim();
-const FFMPEG_HWACCEL_ARGS = FFMPEG_HWACCEL ? ['-hwaccel', FFMPEG_HWACCEL] : [];
+// ffmpeg hardware pipeline is owned by lib/ffmpeg-hw.js — set FFMPEG_HWACCEL
+// (cuda / nvdec / v4l2m2m) and optionally FFMPEG_ENCODER=h264_nvenc in the
+// container env to enable GPU decode / GPU encode. Unset = CPU-only libx264
+// as before, which is what a stock ffmpeg build (no cuvid / nvenc compiled
+// in) can actually run.
+console.log(`[FFmpeg] Pipeline: ${ffmpegHw.describeMode()}`);
 // Default is intentionally low. 6 concurrent torrents on a Jetson-class box
 // starve each other for CPU (piece verify), disk I/O (random writes on eMMC/SD),
 // and BT reciprocity slots, so aggregate throughput is usually *better* with
@@ -344,10 +346,14 @@ function _startHlsSession(itemId, filePath) {
   //   * independent_segments so each .ts can be decoded on its own
   //   * temp_file so partially-written segments don't get served
   const gop = HLS_SEGMENT_DURATION * 24; // safe for 24/30fps sources
+  const sourceCodec = (() => {
+    try { return library.getProbedCodec(itemId); }
+    catch { return null; }
+  })();
   const ffmpeg = spawn('ffmpeg', [
     '-hide_banner',
     '-fflags', '+genpts',
-    ...FFMPEG_HWACCEL_ARGS,
+    ...ffmpegHw.buildDecodeArgs(sourceCodec),
     '-probesize', '1000000',
     '-analyzeduration', '1000000',
     '-i', filePath,
@@ -355,14 +361,8 @@ function _startHlsSession(itemId, filePath) {
     '-map', '0:a:0?',
     '-sn',
     '-dn',
-    '-c:v', 'libx264',
-    '-preset', 'ultrafast',
-    '-tune', 'zerolatency',
-    '-profile:v', 'main',
-    '-level', '4.1',
-    '-pix_fmt', 'yuv420p',
-    '-crf', '23',
-    '-vf', "scale='min(1280,iw)':'-2'",
+    ...ffmpegHw.buildLiveEncoderArgs(),
+    '-vf', ffmpegHw.buildScaleFilter(1280, sourceCodec),
     '-g', String(gop),
     '-keyint_min', String(gop),
     '-sc_threshold', '0',
@@ -4024,14 +4024,14 @@ app.get('/api/library/:id/stream/remux', rateLimit, remuxGate, async (req, res) 
 //   Audio : AAC-LC, 192k, stereo downmix
 //   Container : fragmented MP4 (streamable over HTTP, no seek)
 //
-// libx264 -preset ultrafast is used because the Jetson Orin Nano has NO
-// hardware video encoder — this path is CPU-bound. 720p keeps us within
-// realtime budget on the Orin's Cortex-A78AE cores for typical 24/30 fps
-// source material. Set FFMPEG_HWACCEL=cuda (or =nvdec / =auto / =v4l2m2m
-// depending on the local ffmpeg build) to offload the DECODE side of the
-// pipeline to NVDEC, which alone buys ~30-50% more CPU headroom for
-// libx264 on HEVC sources. If you upgrade to a Jetson with NVENC later,
-// swap the encoder args for h264_nvenc or h264_nvmpi.
+// libx264 -preset ultrafast is the default because the Jetson Orin Nano has
+// NO hardware video encoder — this path is CPU-bound there. 720p keeps us
+// within realtime budget on the Orin's Cortex-A78AE cores for typical 24/30
+// fps source material. Set FFMPEG_HWACCEL=cuda (requires a CUDA-enabled
+// ffmpeg build — see mobile-ui/Dockerfile) to offload DECODE to NVDEC and
+// scale_cuda, which buys ~30-50% more CPU headroom for libx264 on HEVC
+// sources. On Orin NX / AGX Orin / any box with a real NVENC, also set
+// FFMPEG_ENCODER=h264_nvenc for a full GPU pipeline.
 app.get('/api/library/:id/stream/transcode', rateLimit, transcodeGate, async (req, res) => {
   const item = library.getItem(req.params.id);
   if (!item) return res.status(404).json({ error: 'Item not found' });
@@ -4091,10 +4091,19 @@ app.get('/api/library/:id/stream/transcode', rateLimit, transcodeGate, async (re
   // read the whole file anyway so there's no benefit to the sequential
   // pipe trick the remux endpoint uses, and letting ffmpeg open the file
   // itself means it can read the moov atom up front (faster startup).
+  const sourceCodec = (() => {
+    try { return library.getProbedCodec(req.params.id); }
+    catch { return null; }
+  })();
   const ffmpeg = spawn('ffmpeg', [
     '-hide_banner',
     '-fflags', '+genpts',
-    ...FFMPEG_HWACCEL_ARGS,
+    // Decode + encode mode come from lib/ffmpeg-hw.js — CPU-only by default,
+    // CUDA decode when FFMPEG_HWACCEL=cuda, full GPU pipeline when
+    // FFMPEG_ENCODER=h264_nvenc is also set. The live encoder args use
+    // ultrafast+zerolatency (libx264) or p1+ll (NVENC) for first-byte
+    // latency — scaling to 720p max, preserving aspect, even height.
+    ...ffmpegHw.buildDecodeArgs(sourceCodec),
     // Keep initial input parse cheap — 1MB / 1s probe is plenty for
     // every container we ingest, and waiting any longer just delays
     // the first MP4 fragment on the wire.
@@ -4110,18 +4119,8 @@ app.get('/api/library/:id/stream/transcode', rateLimit, transcodeGate, async (re
     '-sn',
     '-dn',
 
-    // Video: H.264 main profile L4.1, widest compatibility. ultrafast
-    // preset is the only one that keeps up with realtime on Orin Nano
-    // software encoding. zerolatency trims the GOP to minimize first-
-    // frame delay. Scale to 720p max, preserve aspect, even height.
-    '-c:v', 'libx264',
-    '-preset', 'ultrafast',
-    '-tune', 'zerolatency',
-    '-profile:v', 'main',
-    '-level', '4.1',
-    '-pix_fmt', 'yuv420p',
-    '-crf', '23',
-    '-vf', "scale='min(1280,iw)':'-2'",
+    ...ffmpegHw.buildLiveEncoderArgs(),
+    '-vf', ffmpegHw.buildScaleFilter(1280, sourceCodec),
     // Short GOP so we get an IDR — and therefore a flushable fragment —
     // within ~2 seconds regardless of the source's native keyframe
     // interval. This is the single biggest knob for first-byte latency

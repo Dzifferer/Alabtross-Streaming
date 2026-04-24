@@ -49,14 +49,13 @@ function rewriteCoverUrl(url) {
   return `/api/cover/release/${m[1]}?size=${size}`;
 }
 
-// Optional ffmpeg hwaccel (e.g. 'cuda', 'nvdec', 'v4l2m2m'). On Jetson Orin
-// Nano this offloads the DECODE side of a transcode to NVDEC; the encode
-// stays on libx264 because the SoC has no NVENC. Opt-in because stock
-// ffmpeg builds without cuvid would otherwise fail every conversion.
-const FFMPEG_HWACCEL = (process.env.FFMPEG_HWACCEL || '').trim();
-function getHwaccelArgs() {
-  return FFMPEG_HWACCEL ? ['-hwaccel', FFMPEG_HWACCEL] : [];
-}
+// ffmpeg hwaccel / encoder plumbing lives in ./ffmpeg-hw.js. On Jetson Orin
+// Nano, FFMPEG_HWACCEL=cuda offloads DECODE to NVDEC while the encode stays
+// on libx264 (no NVENC in that SoC). On Orin NX / AGX Orin / desktop NVIDIA
+// cards, also set FFMPEG_ENCODER=h264_nvenc for a full GPU pipeline. Both
+// flags are opt-in because a stock ffmpeg build without cuvid / nvenc would
+// hard-fail every conversion if we enabled them by default.
+const ffmpegHw = require('./ffmpeg-hw');
 
 // LRU cache of ffprobe results, keyed on (path, mtimeMs, size). ffprobe is
 // a child-process spawn that takes ~100-250ms on the Orin, and the deep
@@ -3339,6 +3338,17 @@ class LibraryManager {
   }
 
   /**
+   * Video codec string (e.g. 'hevc', 'h264') from the most recent ffprobe,
+   * or null if the item was never probed. Used by the live transcode paths
+   * to select the right CUVID decoder — without the hint the GPU filter
+   * graph downgrades to CPU scale because frames don't stay in CUDA memory.
+   */
+  getProbedCodec(id) {
+    const item = this._items.get(id);
+    return (item && item._probeVideoCodec) || null;
+  }
+
+  /**
    * Get the full file path for streaming a completed item.
    */
   getFilePath(id) {
@@ -5787,13 +5797,14 @@ class LibraryManager {
    * shaves a small but real chunk off both remux and transcode wall clock
    * and avoids a generation-loss step on already-clean audio.
    */
-  _buildConversionArgs(inputPath, tempOutputPath, kind, audioCopy) {
+  _buildConversionArgs(inputPath, tempOutputPath, kind, audioCopy, sourceCodec) {
     // Thread cap: keep libx264 from grabbing every core on the box.
     // Without this, a single 1080p encode pegs all 6 Cortex-A78AE cores
     // to 100% and any CPU-based auto-pause would fire on the conversion
     // itself, producing a pause→resume loop. Capping threads at
     // _maxConversionCores caps the aggregate CPU ceiling instead, which
-    // is the only stable way to protect the box.
+    // is the only stable way to protect the box. (No-op when the encoder
+    // is h264_nvenc — NVENC ignores -threads — but harmless to pass.)
     const cores = this._maxConversionCores;
     const threadArgs = cores > 0
       ? ['-threads', String(cores), '-filter_threads', String(cores)]
@@ -5803,9 +5814,11 @@ class LibraryManager {
       '-hide_banner',
       ...threadArgs,
       '-fflags', '+genpts',
-      // Hwaccel is a no-op for kind='remux' (-c:v copy bypasses decode)
-      // but ffmpeg accepts it harmlessly, so both kinds share one prefix.
-      ...getHwaccelArgs(),
+      // GPU decode path needs the codec hint to pin the right CUVID
+      // decoder and keep frames in CUDA memory. For kind='remux' (-c:v
+      // copy) ffmpeg never actually decodes, so the hwaccel args are a
+      // no-op and it's safe to share one prefix across both kinds.
+      ...ffmpegHw.buildDecodeArgs(sourceCodec),
       '-i', inputPath,
       // Keep the first video stream and (optionally) the first audio
       // stream. Strip subtitles and data streams explicitly — muxing
@@ -5836,31 +5849,24 @@ class LibraryManager {
     }
 
     // kind === 'transcode' — full video re-encode.
-    // Preset choice rationale: libx264 on Jetson Orin Nano is the only
-    // game in town WHEN the remote GPU worker is unreachable. 'veryfast'
-    // gives a much better size/quality tradeoff than 'ultrafast' while
-    // still averaging ~15-25 fps at 1080p on the 6-core Cortex-A78AE, i.e.
-    // a 2-hour movie lands in 2-4 hours wall-clock. When WORKER_URL is set
-    // and the worker is online, _startConversion routes around this path
-    // entirely and the encode runs on a desktop NVIDIA card in minutes.
-    // (See FFMPEG_HWACCEL at the top of this file for the NVDEC decode
-    // offload that frees additional libx264 headroom on HEVC sources.)
     //
-    // 1920px cap (not 1280) preserves resolution when the source is
-    // already 1080p — we're storing permanently, not transcoding for
-    // an unknown mobile screen, so there's no reason to throw pixels
-    // away. Sources above 1080p get downscaled to fit 1080p width,
-    // which keeps libx264 realtime-adjacent and cuts file size for
-    // 4K inputs significantly.
+    // Encoder & filter come from ffmpeg-hw.js so all three local ffmpeg call
+    // sites stay on the same pipeline. On Orin Nano: libx264 veryfast on CPU,
+    // NVDEC decode (when FFMPEG_HWACCEL=cuda) feeding scale_cuda →
+    // hwdownload → libx264 for a hybrid GPU-decode / CPU-encode path that
+    // roughly doubles throughput on HEVC sources. On Orin NX / AGX / desktop
+    // NVIDIA (FFMPEG_ENCODER=h264_nvenc): full GPU pipeline, frames stay in
+    // CUDA memory all the way through.
+    //
+    // 1920px cap (not 1280) preserves resolution when the source is already
+    // 1080p — we're storing permanently, not transcoding for an unknown
+    // mobile screen, so there's no reason to throw pixels away. Sources above
+    // 1080p get downscaled to fit 1080p width, which keeps libx264 realtime-
+    // adjacent on Orin Nano and cuts file size for 4K inputs significantly.
     return [
       ...common,
-      '-c:v', 'libx264',
-      '-preset', 'veryfast',
-      '-profile:v', 'main',
-      '-level', '4.1',
-      '-pix_fmt', 'yuv420p',
-      '-crf', '23',
-      '-vf', "scale='min(1920,iw)':'-2'",
+      ...ffmpegHw.buildArchivalEncoderArgs(),
+      '-vf', ffmpegHw.buildScaleFilter(1920, sourceCodec),
       ...audioArgs,
       '-movflags', '+faststart',
       '-f', 'mp4',
@@ -6057,7 +6063,7 @@ class LibraryManager {
     // the total CPU ffmpeg can consume (that's what -threads is for) but
     // it ensures latency-sensitive work (BT piece verify, Express
     // request handling) doesn't starve when the encode is active.
-    const ffmpegArgs = this._buildConversionArgs(inputPath, tempOutputPath, kind, audioCopy);
+    const ffmpegArgs = this._buildConversionArgs(inputPath, tempOutputPath, kind, audioCopy, item._probeVideoCodec);
     const useNice = process.platform === 'linux' && this._conversionNiceLevel > 0;
     const ffmpeg = useNice
       ? spawn('nice', ['-n', String(this._conversionNiceLevel), 'ffmpeg', ...ffmpegArgs])

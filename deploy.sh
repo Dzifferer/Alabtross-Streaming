@@ -58,6 +58,18 @@ FFMPEG_HWACCEL_DEFAULT=""
 if sudo docker info 2>/dev/null | grep -qi 'Runtimes:.*nvidia'; then
   NVIDIA_RUNTIME_ARGS=(--runtime=nvidia)
   FFMPEG_HWACCEL_DEFAULT="cuda"
+  # Jetson's libnvcuvid.so / libnvidia-encode.so live in /usr/lib/aarch64-linux-gnu/tegra
+  # on the host. The NVIDIA container runtime is supposed to bind-mount them via the
+  # CSV files in /etc/nvidia-container-runtime/host-files-for-container.d/, but the CSV
+  # mode isn't always wired up after `nvidia-ctk runtime configure` alone — so we also
+  # pass the tegra dir through explicitly. Harmless if the runtime already mounted it.
+  if [[ -d /usr/lib/aarch64-linux-gnu/tegra ]]; then
+    NVIDIA_RUNTIME_ARGS+=(-v /usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu/tegra:ro)
+  fi
+  # On some JetPack installs there's also a tegra-egl dir used by NVENC via GL surfaces.
+  if [[ -d /usr/lib/aarch64-linux-gnu/tegra-egl ]]; then
+    NVIDIA_RUNTIME_ARGS+=(-v /usr/lib/aarch64-linux-gnu/tegra-egl:/usr/lib/aarch64-linux-gnu/tegra-egl:ro)
+  fi
   echo "==> NVIDIA container runtime detected — GPU decode (and NVENC when available) enabled"
 else
   echo "==> WARN: NVIDIA container runtime NOT configured on this Docker daemon"

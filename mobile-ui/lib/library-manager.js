@@ -3338,10 +3338,25 @@ class LibraryManager {
   }
 
   /**
-   * Video codec string (e.g. 'hevc', 'h264') from the most recent ffprobe,
-   * or null if the item was never probed. Used by the live transcode paths
-   * to select the right CUVID decoder — without the hint the GPU filter
-   * graph downgrades to CPU scale because frames don't stay in CUDA memory.
+   * Probe info used by lib/ffmpeg-hw.js to pick the right hardware decoder.
+   * `codec` is ffprobe's video codec name (e.g. 'hevc', 'h264').
+   * `pixFmt` is the pixel format (e.g. 'yuv420p', 'yuv420p10le') — needed
+   * because Keylost's libnvmpi only handles yuv420p / yuvj420p, so 10-bit
+   * HEVC sources have to fall back to software decode even though NVDEC
+   * hardware can technically handle them.
+   */
+  getProbeInfo(id) {
+    const item = this._items.get(id);
+    if (!item) return null;
+    return {
+      codec:  item._probeVideoCodec || null,
+      pixFmt: item._probePixFmt     || null,
+    };
+  }
+
+  /**
+   * Legacy codec-only getter. Kept for callers that don't care about
+   * pix_fmt; prefer getProbeInfo() for new code.
    */
   getProbedCodec(id) {
     const item = this._items.get(id);
@@ -5797,7 +5812,7 @@ class LibraryManager {
    * shaves a small but real chunk off both remux and transcode wall clock
    * and avoids a generation-loss step on already-clean audio.
    */
-  _buildConversionArgs(inputPath, tempOutputPath, kind, audioCopy, sourceCodec) {
+  _buildConversionArgs(inputPath, tempOutputPath, kind, audioCopy, sourceCodec, sourcePixFmt) {
     // Thread cap: keep libx264 from grabbing every core on the box.
     // Without this, a single 1080p encode pegs all 6 Cortex-A78AE cores
     // to 100% and any CPU-based auto-pause would fire on the conversion
@@ -5815,10 +5830,12 @@ class LibraryManager {
       ...threadArgs,
       '-fflags', '+genpts',
       // GPU decode path needs the codec hint to pin the right CUVID
-      // decoder and keep frames in CUDA memory. For kind='remux' (-c:v
-      // copy) ffmpeg never actually decodes, so the hwaccel args are a
-      // no-op and it's safe to share one prefix across both kinds.
-      ...ffmpegHw.buildDecodeArgs(sourceCodec),
+      // decoder and keep frames in CUDA memory. pix_fmt is also required
+      // so the helper can skip NVMPI for 10-bit HEVC (libnvmpi only
+      // handles yuv420p / yuvj420p). For kind='remux' (-c:v copy) ffmpeg
+      // never actually decodes, so the hwaccel args are a no-op and it's
+      // safe to share one prefix across both kinds.
+      ...ffmpegHw.buildDecodeArgs(sourceCodec, sourcePixFmt),
       '-i', inputPath,
       // Keep the first video stream and (optionally) the first audio
       // stream. Strip subtitles and data streams explicitly — muxing
@@ -5866,7 +5883,7 @@ class LibraryManager {
     return [
       ...common,
       ...ffmpegHw.buildArchivalEncoderArgs(),
-      '-vf', ffmpegHw.buildScaleFilter(1920, sourceCodec),
+      '-vf', ffmpegHw.buildScaleFilter(1920, sourceCodec, sourcePixFmt),
       ...audioArgs,
       '-movflags', '+faststart',
       '-f', 'mp4',
@@ -5908,6 +5925,7 @@ class LibraryManager {
     if (!item || !probe) return;
     item._probeDuration       = probe.duration;
     item._probeVideoCodec     = probe.videoCodec || null;
+    item._probePixFmt         = probe.pixFmt     || null;
     item._probeAudioCodec     = probe.audioCodec || null;
     item._probeAudioProfile   = probe.audioProfile || null;
     item._probeAudioChannels  = probe.audioChannels || null;
@@ -6063,7 +6081,7 @@ class LibraryManager {
     // the total CPU ffmpeg can consume (that's what -threads is for) but
     // it ensures latency-sensitive work (BT piece verify, Express
     // request handling) doesn't starve when the encode is active.
-    const ffmpegArgs = this._buildConversionArgs(inputPath, tempOutputPath, kind, audioCopy, item._probeVideoCodec);
+    const ffmpegArgs = this._buildConversionArgs(inputPath, tempOutputPath, kind, audioCopy, item._probeVideoCodec, item._probePixFmt);
     const useNice = process.platform === 'linux' && this._conversionNiceLevel > 0;
     const ffmpeg = useNice
       ? spawn('nice', ['-n', String(this._conversionNiceLevel), 'ffmpeg', ...ffmpegArgs])

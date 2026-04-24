@@ -346,14 +346,14 @@ function _startHlsSession(itemId, filePath) {
   //   * independent_segments so each .ts can be decoded on its own
   //   * temp_file so partially-written segments don't get served
   const gop = HLS_SEGMENT_DURATION * 24; // safe for 24/30fps sources
-  const sourceCodec = (() => {
-    try { return library.getProbedCodec(itemId); }
+  const probe = (() => {
+    try { return library.getProbeInfo(itemId); }
     catch { return null; }
-  })();
+  })() || {};
   const ffmpeg = spawn('ffmpeg', [
     '-hide_banner',
     '-fflags', '+genpts',
-    ...ffmpegHw.buildDecodeArgs(sourceCodec),
+    ...ffmpegHw.buildDecodeArgs(probe.codec, probe.pixFmt),
     '-probesize', '1000000',
     '-analyzeduration', '1000000',
     '-i', filePath,
@@ -362,7 +362,7 @@ function _startHlsSession(itemId, filePath) {
     '-sn',
     '-dn',
     ...ffmpegHw.buildLiveEncoderArgs(),
-    '-vf', ffmpegHw.buildScaleFilter(1280, sourceCodec),
+    '-vf', ffmpegHw.buildScaleFilter(1280, probe.codec, probe.pixFmt),
     '-g', String(gop),
     '-keyint_min', String(gop),
     '-sc_threshold', '0',
@@ -4091,10 +4091,10 @@ app.get('/api/library/:id/stream/transcode', rateLimit, transcodeGate, async (re
   // read the whole file anyway so there's no benefit to the sequential
   // pipe trick the remux endpoint uses, and letting ffmpeg open the file
   // itself means it can read the moov atom up front (faster startup).
-  const sourceCodec = (() => {
-    try { return library.getProbedCodec(req.params.id); }
+  const probe = (() => {
+    try { return library.getProbeInfo(req.params.id); }
     catch { return null; }
-  })();
+  })() || {};
   const ffmpeg = spawn('ffmpeg', [
     '-hide_banner',
     '-fflags', '+genpts',
@@ -4103,7 +4103,7 @@ app.get('/api/library/:id/stream/transcode', rateLimit, transcodeGate, async (re
     // FFMPEG_ENCODER=h264_nvenc is also set. The live encoder args use
     // ultrafast+zerolatency (libx264) or p1+ll (NVENC) for first-byte
     // latency — scaling to 720p max, preserving aspect, even height.
-    ...ffmpegHw.buildDecodeArgs(sourceCodec),
+    ...ffmpegHw.buildDecodeArgs(probe.codec, probe.pixFmt),
     // Keep initial input parse cheap — 1MB / 1s probe is plenty for
     // every container we ingest, and waiting any longer just delays
     // the first MP4 fragment on the wire.
@@ -4120,7 +4120,7 @@ app.get('/api/library/:id/stream/transcode', rateLimit, transcodeGate, async (re
     '-dn',
 
     ...ffmpegHw.buildLiveEncoderArgs(),
-    '-vf', ffmpegHw.buildScaleFilter(1280, sourceCodec),
+    '-vf', ffmpegHw.buildScaleFilter(1280, probe.codec, probe.pixFmt),
     // Short GOP so we get an IDR — and therefore a flushable fragment —
     // within ~2 seconds regardless of the source's native keyframe
     // interval. This is the single biggest knob for first-byte latency

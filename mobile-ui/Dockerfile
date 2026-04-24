@@ -79,7 +79,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libass9 libfreetype6 libnuma1 \
  && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
- && python3 -m pip install --no-cache-dir --break-system-packages yt-dlp \
+ && (python3 -m pip install --no-cache-dir yt-dlp \
+     || python3 -m pip install --no-cache-dir --break-system-packages yt-dlp) \
  && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ffmpeg-build /opt/ffmpeg/bin/ffmpeg  /usr/local/bin/ffmpeg

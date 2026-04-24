@@ -21,6 +21,7 @@ const { VIDEO_EXTENSIONS, TRACKERS, isFileNameSafe, getMimeType } = require('./f
 const { PeerManager } = require('./peer-manager');
 const { PeerReputation } = require('./peer-reputation');
 const { WorkerClient } = require('./worker-client');
+const { CpuMonitor } = require('./cpu-monitor');
 
 const DEFAULT_MAX_CONCURRENT_DOWNLOADS = 5;
 const METADATA_SAVE_INTERVAL = 30 * 1000; // Save metadata every 30s during active downloads
@@ -282,6 +283,34 @@ class LibraryManager {
     });
     this._workerHealth = null;
     this._workerHealthTimer = null;
+
+    // Hardware protection: pause local conversions when host CPU goes over
+    // a configurable threshold. Remote (GPU-worker) conversions aren't
+    // affected because they don't burn Orin CPU. The monitor is always
+    // instantiated — if the operator disables it in settings, updateConfig
+    // flips the internal flag without tearing down the poll timer.
+    const cpuOpts = opts.cpuProtection || {};
+    this._cpuMonitor = new CpuMonitor({
+      enabled:         cpuOpts.enabled !== false,
+      pauseThreshold:  cpuOpts.pauseThreshold,
+      resumeThreshold: cpuOpts.resumeThreshold,
+      pollMs:          cpuOpts.pollMs,
+    });
+    this._cpuMonitor.on('overload', () => {
+      this._pauseRunningLocalConversions('cpu-overload');
+    });
+    this._cpuMonitor.on('relieved', () => {
+      // Kick the queue — anything that got paused (or was deferred while
+      // we were hot) is now free to start again.
+      this._processConversionQueue().catch(() => {});
+    });
+    this._cpuMonitor.start();
+
+    // Manual "pause conversions" switch exposed via the settings API.
+    // Orthogonal to CPU protection — either gate blocks new conversions
+    // and kills running local ones. Not persisted across restarts on
+    // purpose: it's a "stop the world right now" button, not a policy.
+    this._manualConversionPause = false;
 
     // Ensure library directory exists
     if (!fs.existsSync(this._libraryPath)) {
@@ -5838,6 +5867,14 @@ class LibraryManager {
    * online the encode runs off-box, so the rule relaxes to "always OK".
    */
   _canStartConversionNow() {
+    // Hardware-protection gates apply to BOTH local and remote paths —
+    // a manual pause should stop everything (that's the whole point of a
+    // "pause all conversions" button), and even remote jobs hit the Orin
+    // for file I/O + network streaming during upload/download phases, so
+    // honoring the CPU gate there is the conservative default.
+    if (this._manualConversionPause) return false;
+    if (this._cpuMonitor && this._cpuMonitor.isOverloaded()) return false;
+
     if (this._workerClient && this._workerClient.enabled() && this._workerHealth) {
       return true;
     }
@@ -6399,25 +6436,84 @@ class LibraryManager {
    * contention.
    */
   _pauseRunningConversionsForDownloads() {
-    if (this._convertProcesses.size === 0) return;
     // Only 'downloads-first' pauses running conversions when a download
     // starts. 'conversions-first' and 'both' never kill a live transcode
     // for a download.
     if (this._taskPriority !== 'downloads-first') return;
-    for (const [id, handle] of this._convertProcesses) {
-      // Remote conversions run on the GPU worker, not on the Orin's CPU.
-      // The only Orin-side cost is reading the source file off disk and
-      // streaming it over Tailscale, neither of which competes with BT
-      // piece writes in any meaningful way. Letting them keep running
-      // during downloads is the whole point of having a remote worker.
-      if (handle.isRemote) continue;
+    this._pauseRunningLocalConversions('downloads');
+  }
 
+  /**
+   * Kill every running LOCAL ffmpeg conversion and requeue it as pending.
+   * Shared path for three triggers:
+   *   - 'downloads'     — a torrent-stream engine is about to hog CPU
+   *   - 'cpu-overload'  — host CPU crossed the hardware-protection threshold
+   *   - 'manual'        — operator flipped the "pause conversions" switch
+   *
+   * Remote (GPU-worker) conversions are left alone; they don't burn Orin
+   * CPU, so there's nothing for us to protect against locally. New remote
+   * jobs still get gated by _canStartConversionNow().
+   */
+  _pauseRunningLocalConversions(reason) {
+    if (this._convertProcesses.size === 0) return;
+    for (const [id, handle] of this._convertProcesses) {
+      if (handle.isRemote) continue;
       const item = this._items.get(id);
       const name = item ? item.name : id;
-      console.log(`[Library] Pausing local conversion "${name}" to free CPU for downloads`);
+      console.log(`[Library] Pausing local conversion "${name}" (reason: ${reason})`);
       handle._pausedForDownloads = true;
       handle.kill();
     }
+  }
+
+  /**
+   * Serializable snapshot of hardware-protection state for the settings UI.
+   */
+  getCpuProtection() {
+    const cfg = this._cpuMonitor.getConfig();
+    return {
+      enabled:          cfg.enabled,
+      pauseThreshold:   cfg.pauseThreshold,
+      resumeThreshold:  cfg.resumeThreshold,
+      pollMs:           cfg.pollMs,
+      currentCpuPct:    this._cpuMonitor.getCurrentPct(),
+      overloaded:       this._cpuMonitor.isOverloaded(),
+      manualPaused:     this._manualConversionPause,
+    };
+  }
+
+  /**
+   * Update CPU-protection thresholds / enabled flag. Accepted keys:
+   *   enabled, pauseThreshold, resumeThreshold, pollMs. Returns the
+   *   post-update config snapshot.
+   */
+  setCpuProtection(opts) {
+    const cfg = this._cpuMonitor.updateConfig(opts || {});
+    // Turning protection on with CPU already hot kicks a recompute on the
+    // next tick; turning it off triggers the monitor's 'relieved' event
+    // which wakes the queue. Either way, nudge the queue so a newly
+    // configured box doesn't sit idle until the next natural trigger.
+    this._processConversionQueue().catch(() => {});
+    return { ...cfg, manualPaused: this._manualConversionPause };
+  }
+
+  /**
+   * Manual pause / resume of all new conversions. When paused, running
+   * LOCAL conversions are killed and requeued (same requeue path used by
+   * the downloads and CPU-overload gates); remote jobs in flight finish
+   * on their own but nothing new starts until the operator resumes.
+   */
+  setConversionsPaused(paused) {
+    const wasPaused = this._manualConversionPause;
+    this._manualConversionPause = !!paused;
+    if (!wasPaused && this._manualConversionPause) {
+      console.log('[Library] Conversions manually paused by operator');
+      this._pauseRunningLocalConversions('manual');
+    } else if (wasPaused && !this._manualConversionPause) {
+      console.log('[Library] Conversions manually resumed by operator');
+      this._processConversionQueue().catch(() => {});
+    }
+    return this._manualConversionPause;
   }
 
   /**

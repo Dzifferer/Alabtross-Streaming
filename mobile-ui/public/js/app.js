@@ -5253,6 +5253,9 @@
       });
     }
 
+    // ─── Hardware Protection (CPU) ──────────────────
+    initCpuProtectionSettings();
+
     // ─── Auto-play Next ─────────────────────────────
     const autoplayEnabledInput = $('#setting-autoplay-enabled');
     const autoplayCountdownInput = $('#setting-autoplay-countdown');
@@ -5420,6 +5423,165 @@
     });
 
     renderAddonList();
+  }
+
+  // ─── Hardware Protection (CPU) ──────────────────
+  // Poll cadence matches the backend CpuMonitor's default (3s). The
+  // endpoint already includes live CPU and overloaded state so we don't
+  // need a second poll of /api/diagnostics/system.
+  const CPU_PROTECTION_POLL_MS = 3000;
+  let _cpuProtectionTimer = null;
+  // Remembers the last known-good server state so pause/resume/slider
+  // handlers can optimistically clear the manualPaused flag without
+  // overwriting whatever thresholds the user hasn't touched.
+  let _cpuProtectionState = null;
+
+  function initCpuProtectionSettings() {
+    const enabledInput     = $('#setting-cpu-protection-enabled');
+    const pauseSlider      = $('#setting-cpu-pause-threshold');
+    const resumeSlider     = $('#setting-cpu-resume-threshold');
+    const pauseLabel       = $('#cpu-pause-threshold-value');
+    const resumeLabel      = $('#cpu-resume-threshold-value');
+    const pauseBtn         = $('#cpu-pause-btn');
+    const gaugeFill        = $('#cpu-gauge-fill');
+    const gaugeValue       = $('#cpu-gauge-value');
+    const gaugeStatus      = $('#cpu-gauge-status');
+    const protectionStatus = $('#cpu-protection-status');
+
+    if (!enabledInput || !pauseBtn) return;
+
+    function renderThresholdLabels() {
+      if (pauseLabel)  pauseLabel.textContent  = pauseSlider.value + '%';
+      if (resumeLabel) resumeLabel.textContent = resumeSlider.value + '%';
+    }
+
+    function renderGauge(state) {
+      if (!state) return;
+      const pct = Math.max(0, Math.min(100, Number(state.currentCpuPct) || 0));
+      if (gaugeFill)  gaugeFill.style.width = pct + '%';
+      if (gaugeValue) gaugeValue.textContent = pct + '%';
+
+      if (state.manualPaused) {
+        gaugeStatus.textContent = 'Conversions manually paused';
+        gaugeStatus.style.color = 'var(--danger, #ff6b6b)';
+        pauseBtn.textContent = 'Resume Conversions';
+        pauseBtn.classList.add('active');
+      } else if (state.overloaded) {
+        gaugeStatus.textContent = `Paused — CPU over ${state.pauseThreshold}% safe threshold`;
+        gaugeStatus.style.color = 'var(--danger, #ff6b6b)';
+        pauseBtn.textContent = 'Pause Conversions';
+        pauseBtn.classList.remove('active');
+      } else if (!state.enabled) {
+        gaugeStatus.textContent = 'Auto-protection disabled';
+        gaugeStatus.style.color = 'var(--text-dim, #888)';
+        pauseBtn.textContent = 'Pause Conversions';
+        pauseBtn.classList.remove('active');
+      } else {
+        gaugeStatus.textContent = `Running — auto-pause at ${state.pauseThreshold}%`;
+        gaugeStatus.style.color = 'var(--success, #51cf66)';
+        pauseBtn.textContent = 'Pause Conversions';
+        pauseBtn.classList.remove('active');
+      }
+    }
+
+    function applyState(state, { syncInputs = false } = {}) {
+      _cpuProtectionState = state;
+      if (syncInputs) {
+        enabledInput.checked = !!state.enabled;
+        pauseSlider.value    = String(state.pauseThreshold);
+        resumeSlider.value   = String(state.resumeThreshold);
+        renderThresholdLabels();
+      }
+      renderGauge(state);
+    }
+
+    async function refresh() {
+      try {
+        const r = await fetch('/api/settings/cpu-protection');
+        if (!r.ok) return;
+        const state = await r.json();
+        // Only re-sync the sliders on the very first load — otherwise
+        // a slow-arriving poll response would clobber whatever the user
+        // is dragging at that exact moment.
+        const firstLoad = _cpuProtectionState === null;
+        applyState(state, { syncInputs: firstLoad });
+      } catch { /* network blip — UI keeps last known state */ }
+    }
+
+    async function postUpdate(body) {
+      try {
+        const r = await fetch('/api/settings/cpu-protection', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (r.ok) {
+          const state = await r.json();
+          applyState(state);
+        } else {
+          const err = await r.json().catch(() => ({}));
+          if (protectionStatus) {
+            protectionStatus.textContent = err.error || 'Failed to save';
+            protectionStatus.style.color = 'var(--danger, #ff6b6b)';
+          }
+        }
+      } catch {
+        if (protectionStatus) {
+          protectionStatus.textContent = 'Network error';
+          protectionStatus.style.color = 'var(--danger, #ff6b6b)';
+        }
+      }
+    }
+
+    // Live label updates while dragging; debounced POST on release only
+    // so we don't hammer the API on every 1-pixel slider tick.
+    let sliderCommitTimer = null;
+    function scheduleSliderCommit() {
+      if (sliderCommitTimer) clearTimeout(sliderCommitTimer);
+      sliderCommitTimer = setTimeout(() => {
+        const pause  = parseInt(pauseSlider.value, 10);
+        let resume   = parseInt(resumeSlider.value, 10);
+        // Client-side hysteresis mirror — server enforces this too, but
+        // showing the clamped value immediately avoids a jarring snap.
+        if (resume >= pause) {
+          resume = Math.max(10, pause - 10);
+          resumeSlider.value = String(resume);
+          renderThresholdLabels();
+        }
+        postUpdate({ pauseThreshold: pause, resumeThreshold: resume });
+      }, 250);
+    }
+
+    pauseSlider.addEventListener('input', renderThresholdLabels);
+    resumeSlider.addEventListener('input', renderThresholdLabels);
+    pauseSlider.addEventListener('change', scheduleSliderCommit);
+    resumeSlider.addEventListener('change', scheduleSliderCommit);
+
+    enabledInput.addEventListener('change', () => {
+      postUpdate({ enabled: enabledInput.checked });
+    });
+
+    pauseBtn.addEventListener('click', async () => {
+      const nextPaused = !(_cpuProtectionState && _cpuProtectionState.manualPaused);
+      try {
+        const r = await fetch('/api/settings/cpu-protection/pause', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ paused: nextPaused }),
+        });
+        if (r.ok) {
+          const state = await r.json();
+          applyState(state);
+          showToast(nextPaused ? 'Conversions paused' : 'Conversions resumed');
+        }
+      } catch {
+        showToast('Network error');
+      }
+    });
+
+    refresh();
+    if (_cpuProtectionTimer) clearInterval(_cpuProtectionTimer);
+    _cpuProtectionTimer = setInterval(refresh, CPU_PROTECTION_POLL_MS);
   }
 
   // ─── Downloads Panel ────────────────────────────

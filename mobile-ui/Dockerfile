@@ -166,21 +166,19 @@ RUN echo "=====  pkg-config diagnostic for nvmpi  =====" \
  && echo "--- Keylost require_pkg_config line in ffmpeg patch :" \
  && (grep -E 'require_pkg_config.*nvmpi|enabled nvmpi' /src/jetson-ffmpeg/${FFMPEG_PATCH_PATH} || true) \
  && echo "==============================================" \
- && (PATH="/usr/local/cuda/bin:${PATH}" \
-     PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib/aarch64-linux-gnu/pkgconfig:/usr/lib/aarch64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH}" \
+ && (PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib/aarch64-linux-gnu/pkgconfig:/usr/lib/aarch64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH}" \
      ./configure \
        --prefix=/opt/ffmpeg \
-       --extra-cflags="-I/usr/local/cuda/include -I/usr/local/include" \
-       --extra-ldflags="-L/usr/local/cuda/lib64 -L/usr/local/lib -L/src/jetson-ffmpeg/stubs -Wl,-rpath-link=/src/jetson-ffmpeg/stubs" \
+       --extra-cflags="-I/usr/local/include" \
+       --extra-ldflags="-L/usr/local/lib -L/src/jetson-ffmpeg/stubs -Wl,-rpath-link=/src/jetson-ffmpeg/stubs" \
        --extra-libs="-lpthread -lm -lnvmpi" \
        --enable-gpl --enable-nonfree --enable-version3 \
        --enable-libx264 --enable-libx265 --enable-libvpx \
        --enable-libopus --enable-libmp3lame --enable-libass --enable-libfreetype \
        --enable-nvmpi \
-       --enable-cuda-nvcc --enable-cuvid --enable-nvenc --enable-libnpp \
        --disable-debug --disable-doc --disable-ffplay) \
- || (echo "====== configure failed — last 80 lines of ffbuild/config.log ======" \
-     && tail -80 ffbuild/config.log 2>&1 || echo "no config.log" ; exit 1) \
+ || (echo "====== configure failed — last 150 lines of ffbuild/config.log ======" \
+     && tail -150 ffbuild/config.log 2>&1 || echo "no config.log" ; exit 1) \
  && make -j"$(nproc)" \
  && make install
 

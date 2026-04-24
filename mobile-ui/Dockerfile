@@ -67,7 +67,8 @@ FROM nvcr.io/nvidia/l4t-jetpack:${L4T_TAG}
 ENV DEBIAN_FRONTEND=noninteractive \
     NODE_ENV=production \
     NVIDIA_DRIVER_CAPABILITIES=compute,video,utility \
-    NVIDIA_VISIBLE_DEVICES=all
+    NVIDIA_VISIBLE_DEVICES=all \
+    LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/tegra:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 
 # Runtime shared libs that ffmpeg links to, plus Node.js 20 (from NodeSource
 # — the distro package on Ubuntu 20.04/22.04 is too old for modern Express)

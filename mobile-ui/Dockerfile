@@ -66,9 +66,17 @@ RUN git clone --depth 1 --branch ${NV_CODEC_HEADERS_TAG} \
 #    a small C wrapper around the L4T Multimedia API (NvVideoDecoder,
 #    NvBuffer, ...) that exposes the same hardware NVDEC block cuvid
 #    would use on desktop NVIDIA. Installs as /usr/local/lib/libnvmpi.so.
+#
+#    CMake needs help finding the Jetson libs — libnvbufsurface /
+#    libnvbufsurftransform / libnvjpeg all live in the Jetson-specific
+#    /usr/lib/aarch64-linux-gnu/{tegra,nvidia} dirs which aren't on the
+#    default linker path. Without CMAKE_LIBRARY_PATH the configure step
+#    fails with "LIB_NVBUFSURFACE NOTFOUND" and friends.
 RUN git clone ${JETSON_FFMPEG_REPO} /src/jetson-ffmpeg \
  && git -C /src/jetson-ffmpeg checkout ${JETSON_FFMPEG_REF} \
  && cmake -S /src/jetson-ffmpeg -B /src/jetson-ffmpeg/build \
+      -DCMAKE_LIBRARY_PATH="/usr/lib/aarch64-linux-gnu/tegra;/usr/lib/aarch64-linux-gnu/nvidia" \
+      -DCMAKE_INCLUDE_PATH="/usr/src/jetson_multimedia_api/include" \
  && cmake --build /src/jetson-ffmpeg/build -j"$(nproc)" \
  && cmake --install /src/jetson-ffmpeg/build \
  && ldconfig

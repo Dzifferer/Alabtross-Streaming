@@ -90,9 +90,28 @@ RUN git clone ${JETSON_FFMPEG_REPO} /src/jetson-ffmpeg \
       -DCMAKE_LIBRARY_PATH="/src/jetson-ffmpeg/stubs;/usr/lib/aarch64-linux-gnu;/usr/lib/aarch64-linux-gnu/tegra;/usr/lib/aarch64-linux-gnu/nvidia" \
  && cmake --build /src/jetson-ffmpeg/build -j"$(nproc)" \
  && cmake --install /src/jetson-ffmpeg/build \
- && ldconfig \
- && echo "==> libnvmpi install results:" \
- && find /usr/local -name 'libnvmpi*' -o -name 'nvmpi.pc' -o -name 'nvmpi.h' 2>/dev/null | sort
+ && ldconfig
+
+# Hand-write nvmpi.pc — Keylost's CMakeLists doesn't install one, which is
+# why ffmpeg's `./configure --enable-nvmpi` (added by their patch) keeps
+# failing with "nvmpi not found using pkg-config" regardless of what we
+# put in PKG_CONFIG_PATH. The values mirror Keylost's install layout:
+# libnvmpi.so lands in /usr/local/lib, nvmpi.h in /usr/local/include.
+RUN mkdir -p /usr/local/lib/pkgconfig \
+ && printf '%s\n' \
+      'prefix=/usr/local' \
+      'exec_prefix=${prefix}' \
+      'libdir=${exec_prefix}/lib' \
+      'includedir=${prefix}/include' \
+      '' \
+      'Name: nvmpi' \
+      'Description: NVIDIA Jetson Multimedia API wrapper (Keylost/jetson-ffmpeg)' \
+      'Version: 1.0.0' \
+      'Libs: -L${libdir} -lnvmpi' \
+      'Cflags: -I${includedir}' \
+    > /usr/local/lib/pkgconfig/nvmpi.pc \
+ && echo "==> wrote /usr/local/lib/pkgconfig/nvmpi.pc:" \
+ && cat /usr/local/lib/pkgconfig/nvmpi.pc
 
 # 3) ffmpeg source — clone upstream at the pinned tag.
 RUN git clone --depth 1 --branch ${FFMPEG_VERSION} \

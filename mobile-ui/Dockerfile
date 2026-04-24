@@ -31,8 +31,13 @@
 #   --build-arg NV_CODEC_HEADERS_TAG=n12.1.14.0
 
 ARG L4T_TAG=r36.4.0
-ARG FFMPEG_VERSION=n6.1.1
-ARG FFMPEG_PATCH_PATH=ffmpeg_patches/ffmpeg6.1_nvmpi.patch
+# Paired with FFMPEG_PATCH_PATH below — Keylost's jetson-ffmpeg fork only
+# ships patches for ffmpeg 4.2 / 4.4 / 6.0 at the moment (verified by
+# listing /src/jetson-ffmpeg/ffmpeg_patches/ in a previous build). Pin to
+# n6.0 so the 6.0 patch applies cleanly; bump both together when the fork
+# publishes a 6.1+ patch.
+ARG FFMPEG_VERSION=n6.0
+ARG FFMPEG_PATCH_PATH=ffmpeg_patches/ffmpeg6.0_nvmpi.patch
 ARG JETSON_FFMPEG_REPO=https://github.com/Keylost/jetson-ffmpeg.git
 ARG JETSON_FFMPEG_REF=master
 ARG NV_CODEC_HEADERS_TAG=n12.1.14.0

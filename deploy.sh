@@ -57,7 +57,6 @@ NVIDIA_RUNTIME_ARGS=()
 FFMPEG_HWACCEL_DEFAULT=""
 if sudo docker info 2>/dev/null | grep -qi 'Runtimes:.*nvidia'; then
   NVIDIA_RUNTIME_ARGS=(--runtime=nvidia)
-  FFMPEG_HWACCEL_DEFAULT="cuda"
   # Jetson's libnvcuvid.so / libnvidia-encode.so live in /usr/lib/aarch64-linux-gnu/tegra
   # on the host. The NVIDIA container runtime is supposed to bind-mount them via the
   # CSV files in /etc/nvidia-container-runtime/host-files-for-container.d/, but the CSV
@@ -70,7 +69,38 @@ if sudo docker info 2>/dev/null | grep -qi 'Runtimes:.*nvidia'; then
   if [[ -d /usr/lib/aarch64-linux-gnu/tegra-egl ]]; then
     NVIDIA_RUNTIME_ARGS+=(-v /usr/lib/aarch64-linux-gnu/tegra-egl:/usr/lib/aarch64-linux-gnu/tegra-egl:ro)
   fi
-  echo "==> NVIDIA container runtime detected — GPU decode (and NVENC when available) enabled"
+
+  # Only turn on ffmpeg's CUDA path if libnvcuvid.so is actually reachable.
+  # JetPack 6 on Orin Nano ships *only* libnvcuvidv4l2.so (a V4L2 shim) and
+  # NO libnvcuvid.so, so ffmpeg's hevc_cuvid / h264_cuvid decoders hard-fail
+  # at runtime with "Cannot load libnvcuvid.so.1" and every transcode exits
+  # 255. Probing here keeps that platform on a working CPU pipeline instead
+  # of silently breaking the background conversion queue. Desktop NVIDIA
+  # hosts and Orin NX / AGX Orin (which do ship libnvcuvid.so) still get
+  # FFMPEG_HWACCEL=cuda on by default.
+  CUVID_PATHS=(
+    /usr/lib/aarch64-linux-gnu/tegra/libnvcuvid.so*
+    /usr/lib/aarch64-linux-gnu/nvidia/libnvcuvid.so*
+    /usr/local/cuda/targets/aarch64-linux/lib/libnvcuvid.so*
+    /usr/lib/x86_64-linux-gnu/libnvcuvid.so*
+  )
+  CUVID_FOUND=""
+  for p in "${CUVID_PATHS[@]}"; do
+    if compgen -G "$p" >/dev/null 2>&1; then CUVID_FOUND="$p"; break; fi
+  done
+  if [[ -n "$CUVID_FOUND" ]]; then
+    FFMPEG_HWACCEL_DEFAULT="cuda"
+    echo "==> NVIDIA container runtime + libnvcuvid detected — GPU decode enabled"
+  else
+    FFMPEG_HWACCEL_DEFAULT=""
+    echo "==> NVIDIA container runtime detected, but libnvcuvid.so not present"
+    echo "         — JetPack 6 on Orin Nano ships only libnvcuvidv4l2.so, which"
+    echo "           upstream ffmpeg's cuvid decoders don't speak."
+    echo "         — falling back to libx264 CPU for decode+encode (safe default)."
+    echo "         — hardware NVDEC on this platform needs a Jetson-patched ffmpeg"
+    echo "           (h264_nvmpi / hevc_nvmpi via L4T Multimedia API); tracked as"
+    echo "           a follow-up to the GPU-offload PR."
+  fi
 else
   echo "==> WARN: NVIDIA container runtime NOT configured on this Docker daemon"
   echo "         — transcodes will run on CPU (libx264). Run jetson_setup.sh to enable."

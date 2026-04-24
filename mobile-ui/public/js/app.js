@@ -5414,16 +5414,20 @@
       // Aggregate speed/peers (shared engine, so take max — they're the same)
       const speed = Math.max(...packItems.map(i => i.downloadSpeed || 0));
       const peers = Math.max(...packItems.map(i => i.numPeers || 0));
-      // Determine aggregate status
+      // Determine aggregate status. Converting items have finished downloading
+      // and are post-processing on CPU/GPU — they belong in their own section,
+      // not under "Downloading" where they've been masquerading as stuck at
+      // 100%.
       const hasDownloading = packItems.some(i => i.status === 'downloading');
       const hasPaused = packItems.some(i => i.status === 'paused');
-      const hasConverting = packItems.some(i => i.status === 'converting');
+      const convertingItems = packItems.filter(i => i.status === 'converting');
+      const hasConverting = convertingItems.length > 0;
       const hasQueued = packItems.some(i => i.status === 'queued');
       let aggStatus = 'queued';
       if (completedCount === packItems.length) aggStatus = 'complete';
       else if (failedCount === packItems.length) aggStatus = 'failed';
       else if (hasDownloading) aggStatus = 'downloading';
-      else if (hasConverting) aggStatus = 'downloading';
+      else if (hasConverting) aggStatus = 'converting';
       else if (hasPaused) aggStatus = 'paused';
       else if (hasQueued) aggStatus = 'queued';
       // Partial-failure pack: some episodes failed, rest completed, nothing
@@ -5431,6 +5435,22 @@
       // Retry button instead of disappearing into "Completed".
       else if (failedCount > 0) aggStatus = 'failed';
       else if (completedCount > 0) aggStatus = 'complete';
+
+      // Cap download progress at 99% when items are still ACTIVELY downloading
+      // (not just converting). Byte-weighted progress can round to 100 while a
+      // single item is still missing a piece; showing 100% in that case reads
+      // as "done" even though the pack is stuck at "8/9 episodes". Converting
+      // items have already finished downloading, so 100% download progress is
+      // honest for a pack that's only converting.
+      if (totalProgress >= 100 && aggStatus === 'downloading' && completedCount < packItems.length) {
+        totalProgress = 99;
+      }
+
+      // Aggregate conversion progress so the pack row can show e.g.
+      // "Converting 47%" instead of "100%" when downloads are done.
+      const convertProgressAvg = hasConverting
+        ? Math.round(convertingItems.reduce((s, i) => s + (i.convertProgress || 0), 0) / convertingItems.length)
+        : 0;
 
       // Determine season label: single season or multi-season
       const uniqueSeasons = [...new Set(packItems.map(i => i.season).filter(Boolean))].sort((a, b) => a - b);
@@ -5452,6 +5472,8 @@
         episodes: packItems,
         completedCount,
         totalCount: packItems.length,
+        convertingCount: convertingItems.length,
+        convertProgress: convertProgressAvg,
         addedAt: first.addedAt,
       });
     }
@@ -5478,12 +5500,13 @@
 
       // Split into categories (sort queued by addedAt to match actual queue priority)
       const downloading = grouped.filter(i => i.status === 'downloading');
+      const converting = grouped.filter(i => i.status === 'converting');
       const paused = grouped.filter(i => i.status === 'paused');
       const queued = grouped.filter(i => i.status === 'queued').sort((a, b) => (a.addedAt || 0) - (b.addedAt || 0));
       const completed = grouped.filter(i => i.status === 'complete').slice(0, 5);
       const failed = grouped.filter(i => i.status === 'failed');
 
-      if (downloading.length === 0 && paused.length === 0 && queued.length === 0 && completed.length === 0 && failed.length === 0) {
+      if (downloading.length === 0 && converting.length === 0 && paused.length === 0 && queued.length === 0 && completed.length === 0 && failed.length === 0) {
         panel.innerHTML = '<div class="downloads-empty"><span class="setting-hint">No downloads</span></div>';
         renderSourceStats(items);
         return;
@@ -5497,6 +5520,12 @@
       if (downloading.length > 0) {
         html += '<div class="download-section-label">Downloading</div>';
         html += downloading.map(i => renderItem(i)).join('');
+      }
+
+      // Converting (downloads done, waiting on CPU/GPU transcode)
+      if (converting.length > 0) {
+        html += '<div class="download-section-label">Converting</div>';
+        html += converting.map(i => renderItem(i)).join('');
       }
 
       // Paused
@@ -5561,10 +5590,19 @@
     const episodeCount = `${pack.completedCount}/${pack.totalCount} episodes`;
 
     const progressClass = pack.status === 'complete' ? 'complete'
-      : pack.status === 'paused' ? 'paused' : '';
+      : pack.status === 'paused' ? 'paused'
+      : pack.status === 'converting' ? 'converting' : '';
+
+    // "X/Y converting" when some episodes are still converting, so the count
+    // isn't silently replaced by the download completed count.
+    const convertingSuffix = pack.convertingCount > 0
+      ? ` \u00b7 ${pack.convertingCount} converting`
+      : '';
 
     const statusLabel = pack.status === 'downloading'
-      ? `${pack.progress}% \u00b7 ${episodeCount}`
+      ? `${pack.progress}% \u00b7 ${episodeCount}${convertingSuffix}`
+      : pack.status === 'converting'
+      ? `Converting ${pack.convertProgress || 0}% \u00b7 ${episodeCount}`
       : pack.status === 'complete'
       ? `${episodeCount} \u00b7 ${totalSizeStr}`
       : pack.status === 'paused'
@@ -5636,9 +5674,15 @@
         </button>`;
     }
 
-    const showProgress = ['downloading', 'paused', 'queued'].includes(pack.status);
+    const showProgress = ['downloading', 'paused', 'queued', 'converting'].includes(pack.status);
+    // For converting packs the bar represents transcode progress (aggregate
+    // across still-converting episodes), not download progress — downloads
+    // already finished.
+    const progressBarValue = pack.status === 'converting'
+      ? (pack.convertProgress || 0)
+      : (pack.progress || 0);
     const progressBar = showProgress
-      ? `<div class="download-progress-bar"><div class="download-progress-fill ${progressClass}" style="width:${pack.progress || 0}%"></div></div>`
+      ? `<div class="download-progress-bar"><div class="download-progress-fill ${progressClass}" style="width:${progressBarValue}%"></div></div>`
       : '';
 
     // Build collapsed episode list (hidden by default)
@@ -5649,8 +5693,24 @@
         ? `${seasonPrefix}E${String(ep.episode).padStart(2, '0')}`
         : seasonPrefix || '?';
       const epName = ep.name || ep.fileName || '';
-      const epPct = ep.status === 'complete' ? '100%' : `${ep.progress || 0}%`;
-      const epStatus = ep.status === 'complete' ? 'done' : ep.status === 'failed' ? 'fail' : '';
+      let epPct, epStatus;
+      if (ep.status === 'complete') {
+        epPct = '100%';
+        epStatus = 'done';
+      } else if (ep.status === 'converting') {
+        // Show transcode progress instead of the stale 100% download progress
+        // — otherwise every converting row reads as "done but not cyan" and
+        // looks like a stuck download.
+        const cp = ep.convertProgress != null ? Math.round(ep.convertProgress) : 0;
+        epPct = `Conv ${cp}%`;
+        epStatus = 'converting';
+      } else if (ep.status === 'failed') {
+        epPct = 'Failed';
+        epStatus = 'fail';
+      } else {
+        epPct = `${ep.progress || 0}%`;
+        epStatus = '';
+      }
       return `<div class="pack-episode-row ${epStatus}"><span class="pack-ep-label">${escapeHTML(epLabel)}</span><span class="pack-ep-file">${escapeHTML(epName)}</span><span class="pack-ep-pct">${epPct}</span></div>`;
     }).join('');
 
@@ -5689,7 +5749,8 @@
     const sizeStr = item.fileSize > 0 ? formatSize(item.fileSize) : (item.size || '');
 
     const progressClass = item.status === 'complete' ? 'complete'
-      : item.status === 'paused' ? 'paused' : '';
+      : item.status === 'paused' ? 'paused'
+      : item.status === 'converting' ? 'converting' : '';
 
     let actions = '';
     if (item.status === 'downloading') {
@@ -5736,13 +5797,19 @@
         </button>`;
     }
 
-    const showProgress = ['downloading', 'paused', 'queued'].includes(item.status);
+    const showProgress = ['downloading', 'paused', 'queued', 'converting'].includes(item.status);
+    // Converting bar shows transcode %, not the stale 100% download progress.
+    const progressBarValue = item.status === 'converting'
+      ? (item.convertProgress || 0)
+      : (item.progress || 0);
     const progressBar = showProgress
-      ? `<div class="download-progress-bar"><div class="download-progress-fill ${progressClass}" style="width:${item.progress || 0}%"></div></div>`
+      ? `<div class="download-progress-bar"><div class="download-progress-fill ${progressClass}" style="width:${progressBarValue}%"></div></div>`
       : '';
 
     const statusLabel = item.status === 'downloading'
       ? `${item.progress || 0}%` + (sizeStr ? ` of ${sizeStr}` : '')
+      : item.status === 'converting'
+      ? `Converting ${Math.round(item.convertProgress || 0)}%`
       : item.status === 'paused'
       ? `Paused at ${item.progress || 0}%`
       : item.status === 'failed'

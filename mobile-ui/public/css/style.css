@@ -3768,6 +3768,10 @@ select.manual-import-input {
   background: var(--warning);
 }
 
+.download-progress-fill.converting {
+  background: var(--warning, #f59e0b);
+}
+
 .download-actions {
   display: flex;
   flex-direction: column;
@@ -3929,6 +3933,10 @@ select.manual-import-input {
 
 .pack-episode-row.fail .pack-ep-pct {
   color: var(--danger);
+}
+
+.pack-episode-row.converting .pack-ep-pct {
+  color: var(--warning, #f59e0b);
 }
 
 .pack-ep-label {

@@ -41,10 +41,24 @@ class CpuMonitor extends EventEmitter {
     // 3s gives a decent signal-to-noise on a Jetson-class box without
     // burning measurable CPU of our own.
     this._pollMs = Math.max(500, Math.min(60000, opts.pollMs || 3000));
+    // How long CPU must STAY above pauseThreshold before we actually
+    // fire 'overload'. Critical: libx264 spikes past 90% on every I-frame
+    // batch and stays there for 2-5s even on a healthy encode, so any
+    // naive instant trigger fires on the workload we're trying to
+    // protect. 20s of sustained >threshold is a strong signal that
+    // something is genuinely wrong — either the encode actually
+    // exceeded its budget, or some unrelated process is spinning.
+    this._sustainedMs = Number.isFinite(Number(opts.sustainedMs))
+      ? Math.max(0, Math.min(600000, Math.round(Number(opts.sustainedMs))))
+      : 20000;
     this._timer = null;
     this._lastSnap = null;
     this._currentPct = 0;
     this._overloaded = false;
+    // Timestamp of the first consecutive sample above pauseThreshold. Null
+    // while CPU is under the threshold; reset to null on any under-threshold
+    // sample. Overload fires only once elapsed ≥ sustainedMs.
+    this._overloadWindowStart = null;
   }
 
   start() {
@@ -70,6 +84,7 @@ class CpuMonitor extends EventEmitter {
       enabled: this._enabled,
       pauseThreshold: this._pauseThreshold,
       resumeThreshold: this._resumeThreshold,
+      sustainedMs: this._sustainedMs,
       pollMs: this._pollMs,
     };
   }
@@ -85,9 +100,14 @@ class CpuMonitor extends EventEmitter {
     if (typeof opts.enabled === 'boolean') this._enabled = opts.enabled;
     if (opts.pauseThreshold != null) this._pauseThreshold = clampPct(opts.pauseThreshold, this._pauseThreshold);
     if (opts.resumeThreshold != null) this._resumeThreshold = clampPct(opts.resumeThreshold, this._resumeThreshold);
+    if (opts.sustainedMs != null) {
+      const n = Number(opts.sustainedMs);
+      if (Number.isFinite(n)) this._sustainedMs = Math.max(0, Math.min(600000, Math.round(n)));
+    }
     this._ensureHysteresis();
     if (wasEnabled && !this._enabled && wasOverloaded) {
       this._overloaded = false;
+      this._overloadWindowStart = null;
       this.emit('relieved', { pct: this._currentPct, reason: 'disabled' });
     }
     return this.getConfig();
@@ -109,15 +129,38 @@ class CpuMonitor extends EventEmitter {
     if (totalDelta <= 0) return;
     const pct = Math.round(100 * (1 - idleDelta / totalDelta));
     this._currentPct = pct;
-    if (!this._enabled) return;
+    if (!this._enabled) {
+      this._overloadWindowStart = null;
+      return;
+    }
 
-    if (!this._overloaded && pct >= this._pauseThreshold) {
-      this._overloaded = true;
-      console.warn(`[CPU] Overload detected (${pct}% ≥ ${this._pauseThreshold}%) — pausing conversions to protect hardware`);
-      this.emit('overload', { pct, threshold: this._pauseThreshold });
-    } else if (this._overloaded && pct <= this._resumeThreshold) {
+    const now = Date.now();
+
+    if (!this._overloaded) {
+      if (pct >= this._pauseThreshold) {
+        // Start (or continue) the sustained-overload window. Fire only
+        // once the configured sustainedMs has elapsed with every sample
+        // in the window staying above the pause threshold.
+        if (this._overloadWindowStart == null) {
+          this._overloadWindowStart = now;
+        }
+        const elapsed = now - this._overloadWindowStart;
+        if (elapsed >= this._sustainedMs) {
+          this._overloaded = true;
+          this._overloadWindowStart = null;
+          console.warn(`[CPU] Sustained overload (${pct}% for ${Math.round(elapsed / 1000)}s ≥ ${this._pauseThreshold}%)`);
+          this.emit('overload', { pct, threshold: this._pauseThreshold, sustainedMs: elapsed });
+        }
+      } else {
+        // Any single sample under the pause threshold resets the
+        // sustained window. We want "continuously above" — a single dip
+        // means the workload isn't actually saturating the box.
+        this._overloadWindowStart = null;
+      }
+    } else if (pct <= this._resumeThreshold) {
       this._overloaded = false;
-      console.log(`[CPU] Overload cleared (${pct}% ≤ ${this._resumeThreshold}%) — conversions may resume`);
+      this._overloadWindowStart = null;
+      console.log(`[CPU] Overload cleared (${pct}% ≤ ${this._resumeThreshold}%) — conversions may resume after cooldown`);
       this.emit('relieved', { pct, threshold: this._resumeThreshold });
     }
   }

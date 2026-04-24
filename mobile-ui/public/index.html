@@ -147,26 +147,48 @@
               <div class="cpu-gauge-track"><div id="cpu-gauge-fill" class="cpu-gauge-fill"></div></div>
               <div id="cpu-gauge-status" class="setting-hint">Monitoring…</div>
             </div>
+            <div id="cpu-suppression-banner" class="cpu-banner" hidden>
+              Auto-pause has fired repeatedly — auto-retry is suppressed. Lower the core cap below and then tap Resume.
+            </div>
             <div class="setting-row" style="margin-top:10px">
               <button id="cpu-pause-btn" class="btn-block btn-danger">Pause Conversions</button>
             </div>
+
+            <!-- Primary protection: cap the cores ffmpeg can use -->
             <div class="setting-row">
+              <span style="min-width:130px">Max cores for conversion</span>
+              <input type="range" id="setting-cpu-max-cores" min="1" max="8" step="1" value="2" style="flex:1">
+              <span id="cpu-max-cores-value" style="min-width:44px;text-align:right">2</span>
+            </div>
+            <span class="setting-hint">Caps how many CPU cores ffmpeg is allowed to use. This is the real protection — stops a local encode from pinning every core. Lower = cooler, slower encodes.</span>
+
+            <div class="setting-row" style="margin-top:10px">
               <label class="setting-toggle">
                 <input type="checkbox" id="setting-cpu-protection-enabled" checked>
-                <span>Auto-pause when CPU is overloaded</span>
+                <span>Also auto-pause on sustained CPU overload</span>
               </label>
             </div>
             <div class="setting-row">
               <span style="min-width:130px">Pause above</span>
-              <input type="range" id="setting-cpu-pause-threshold" min="50" max="100" step="1" value="90" style="flex:1">
-              <span id="cpu-pause-threshold-value" style="min-width:44px;text-align:right">90%</span>
+              <input type="range" id="setting-cpu-pause-threshold" min="50" max="100" step="1" value="95" style="flex:1">
+              <span id="cpu-pause-threshold-value" style="min-width:44px;text-align:right">95%</span>
             </div>
             <div class="setting-row">
               <span style="min-width:130px">Resume below</span>
               <input type="range" id="setting-cpu-resume-threshold" min="20" max="95" step="1" value="70" style="flex:1">
               <span id="cpu-resume-threshold-value" style="min-width:44px;text-align:right">70%</span>
             </div>
-            <span id="cpu-protection-status" class="setting-hint">When CPU passes the pause threshold, running conversions are killed and requeued. They restart after CPU drops below the resume threshold. Use the red button to stop conversions immediately regardless of CPU.</span>
+            <div class="setting-row">
+              <span style="min-width:130px">Sustained window</span>
+              <input type="range" id="setting-cpu-sustained-sec" min="0" max="120" step="5" value="20" style="flex:1">
+              <span id="cpu-sustained-sec-value" style="min-width:44px;text-align:right">20s</span>
+            </div>
+            <div class="setting-row">
+              <span style="min-width:130px">Cooldown after pause</span>
+              <input type="range" id="setting-cpu-cooldown-min" min="0" max="30" step="1" value="5" style="flex:1">
+              <span id="cpu-cooldown-min-value" style="min-width:44px;text-align:right">5m</span>
+            </div>
+            <span id="cpu-protection-status" class="setting-hint">Auto-pause only fires if CPU stays above the pause threshold for the full sustained window — filters out libx264's startup spike. After a pause, conversions stay deferred for the cooldown so the box can actually cool off. Use the red button for an instant stop.</span>
           </div>
 
           <!-- Auto-play Next -->

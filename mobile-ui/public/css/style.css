@@ -2895,6 +2895,16 @@ select.manual-import-input {
   background: linear-gradient(90deg, #51cf66 0%, #ffd43b 70%, #ff6b6b 100%);
   transition: width 0.4s ease;
 }
+.cpu-banner {
+  margin: 8px 0;
+  padding: 10px 12px;
+  background: rgba(255, 107, 107, 0.12);
+  border: 1px solid rgba(255, 107, 107, 0.35);
+  border-radius: var(--radius-sm);
+  color: #ff8a8a;
+  font-size: 13px;
+  line-height: 1.4;
+}
 
 /* ===== Source List ===== */
 .source-list {

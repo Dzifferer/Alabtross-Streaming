@@ -284,24 +284,77 @@ class LibraryManager {
     this._workerHealth = null;
     this._workerHealthTimer = null;
 
-    // Hardware protection: pause local conversions when host CPU goes over
-    // a configurable threshold. Remote (GPU-worker) conversions aren't
-    // affected because they don't burn Orin CPU. The monitor is always
-    // instantiated — if the operator disables it in settings, updateConfig
-    // flips the internal flag without tearing down the poll timer.
+    // Hardware protection — primary mechanism is a core cap on the local
+    // ffmpeg process. Without this, libx264 pegs every core to 100% the
+    // moment the encode starts, and any CPU-based auto-pause fires on
+    // the conversion itself (pause→CPU drops→resume→encode→pin→pause
+    // forever). Capping at cores-2 leaves the Node event loop, BT piece
+    // verification, and OS work room to breathe; the encode runs slower
+    // but deterministically instead of thrashing.
+    const totalCores = os.cpus().length;
     const cpuOpts = opts.cpuProtection || {};
+    const requestedCap = Number(cpuOpts.maxConversionCores);
+    this._maxConversionCores = Number.isFinite(requestedCap) && requestedCap >= 1
+      ? Math.min(totalCores, Math.round(requestedCap))
+      : Math.max(1, totalCores - 2);
+    // Nice level — spawned ffmpeg runs at lower-than-default priority so
+    // the OS scheduler gives Node and the torrent engine their fair share
+    // even if the encode does manage to saturate its allotted cores.
+    // Range 0 (default) - 19 (lowest). 10 is a common "background work"
+    // value that doesn't starve ffmpeg entirely.
+    this._conversionNiceLevel = Number.isFinite(Number(cpuOpts.niceLevel))
+      ? Math.max(0, Math.min(19, Math.round(Number(cpuOpts.niceLevel))))
+      : 10;
+
+    // Secondary mechanism: the CPU monitor pauses conversions when host
+    // CPU stays above pauseThreshold for sustainedMs. Sustained is the
+    // critical knob — libx264 spikes to 100% for a few seconds on every
+    // I-frame batch, and a naive instant trigger would fire on startup.
+    // Defaulting sustainedMs high (20s) filters those spikes.
     this._cpuMonitor = new CpuMonitor({
       enabled:         cpuOpts.enabled !== false,
       pauseThreshold:  cpuOpts.pauseThreshold,
       resumeThreshold: cpuOpts.resumeThreshold,
       pollMs:          cpuOpts.pollMs,
+      sustainedMs:     cpuOpts.sustainedMs,
     });
-    this._cpuMonitor.on('overload', () => {
+    // Cooldown window — after an auto-pause, we REFUSE to restart any
+    // conversion until this timestamp, even if CPU has dropped below the
+    // resume threshold. Breaks the pause→resume loop: without a cooldown,
+    // the moment we kill ffmpeg the CPU drops, the monitor fires
+    // 'relieved', the queue respawns ffmpeg, and CPU pins again. 5 min
+    // is long enough for the ffmpeg file handles to actually release and
+    // for the operator to notice something's going on.
+    this._cpuCooldownUntil = 0;
+    this._cpuCooldownMs = Number.isFinite(Number(cpuOpts.cooldownMs))
+      ? Math.max(0, Math.round(Number(cpuOpts.cooldownMs)))
+      : 5 * 60 * 1000;
+    // Loop detection — after this many auto-pauses within the tracking
+    // window we stop auto-retrying and keep conversions paused until the
+    // operator raises the core cap or manually resumes. Without this,
+    // even with a cooldown a misconfigured box (e.g. cap still too high
+    // for the hardware) will auto-pause every cooldown cycle forever.
+    this._cpuPauseHistory = []; // array of ms timestamps, trimmed to window
+    this._cpuPauseHistoryWindowMs = 30 * 60 * 1000; // 30 min
+    this._cpuPauseHistoryMax = 3;
+    this._cpuAutoPauseSuppressed = false;
+
+    this._cpuMonitor.on('overload', ({ pct }) => {
+      this._cpuCooldownUntil = Date.now() + this._cpuCooldownMs;
+      this._cpuPauseHistory.push(Date.now());
+      const cutoff = Date.now() - this._cpuPauseHistoryWindowMs;
+      this._cpuPauseHistory = this._cpuPauseHistory.filter(t => t >= cutoff);
+      if (this._cpuPauseHistory.length >= this._cpuPauseHistoryMax) {
+        this._cpuAutoPauseSuppressed = true;
+        console.warn(`[CPU] Auto-pause fired ${this._cpuPauseHistory.length}× in ${Math.round(this._cpuPauseHistoryWindowMs / 60000)} min — suppressing auto-retry until the operator lowers the core cap or manually resumes conversions`);
+      }
+      console.warn(`[CPU] Pausing conversions — sustained overload at ${pct}% (cooldown ${Math.round(this._cpuCooldownMs / 1000)}s)`);
       this._pauseRunningLocalConversions('cpu-overload');
     });
     this._cpuMonitor.on('relieved', () => {
-      // Kick the queue — anything that got paused (or was deferred while
-      // we were hot) is now free to start again.
+      // Cooldown and loop-suppression are both checked inside
+      // _canStartConversionNow, so the queue can safely be kicked here —
+      // it'll no-op if we're still in the cooldown window.
       this._processConversionQueue().catch(() => {});
     });
     this._cpuMonitor.start();
@@ -5735,8 +5788,20 @@ class LibraryManager {
    * and avoids a generation-loss step on already-clean audio.
    */
   _buildConversionArgs(inputPath, tempOutputPath, kind, audioCopy) {
+    // Thread cap: keep libx264 from grabbing every core on the box.
+    // Without this, a single 1080p encode pegs all 6 Cortex-A78AE cores
+    // to 100% and any CPU-based auto-pause would fire on the conversion
+    // itself, producing a pause→resume loop. Capping threads at
+    // _maxConversionCores caps the aggregate CPU ceiling instead, which
+    // is the only stable way to protect the box.
+    const cores = this._maxConversionCores;
+    const threadArgs = cores > 0
+      ? ['-threads', String(cores), '-filter_threads', String(cores)]
+      : [];
+
     const common = [
       '-hide_banner',
+      ...threadArgs,
       '-fflags', '+genpts',
       // Hwaccel is a no-op for kind='remux' (-c:v copy bypasses decode)
       // but ffmpeg accepts it harmlessly, so both kinds share one prefix.
@@ -5873,7 +5938,14 @@ class LibraryManager {
     // for file I/O + network streaming during upload/download phases, so
     // honoring the CPU gate there is the conservative default.
     if (this._manualConversionPause) return false;
+    if (this._cpuAutoPauseSuppressed) return false;
     if (this._cpuMonitor && this._cpuMonitor.isOverloaded()) return false;
+    // Cooldown after a CPU auto-pause. Even though the monitor has
+    // already emitted 'relieved' (CPU dropped below resume threshold —
+    // which will happen within seconds of killing ffmpeg), we hold off
+    // restarting until the cooldown expires. This is what actually
+    // breaks the pause→resume loop.
+    if (this._cpuCooldownUntil && Date.now() < this._cpuCooldownUntil) return false;
 
     if (this._workerClient && this._workerClient.enabled() && this._workerHealth) {
       return true;
@@ -5980,7 +6052,16 @@ class LibraryManager {
     const duration = item._probeDuration || 0;
     const audioCopy = this._itemCanCopyAudio(item);
 
-    const ffmpeg = spawn('ffmpeg', this._buildConversionArgs(inputPath, tempOutputPath, kind, audioCopy));
+    // Wrap ffmpeg with `nice` on Linux so the scheduler gives Node and
+    // the torrent engine priority over the encode. This doesn't change
+    // the total CPU ffmpeg can consume (that's what -threads is for) but
+    // it ensures latency-sensitive work (BT piece verify, Express
+    // request handling) doesn't starve when the encode is active.
+    const ffmpegArgs = this._buildConversionArgs(inputPath, tempOutputPath, kind, audioCopy);
+    const useNice = process.platform === 'linux' && this._conversionNiceLevel > 0;
+    const ffmpeg = useNice
+      ? spawn('nice', ['-n', String(this._conversionNiceLevel), 'ffmpeg', ...ffmpegArgs])
+      : spawn('ffmpeg', ffmpegArgs);
 
     // Wrap the child process in a uniform handle so the pause / shutdown
     // path can treat local and remote conversions the same way.
@@ -6471,30 +6552,73 @@ class LibraryManager {
    */
   getCpuProtection() {
     const cfg = this._cpuMonitor.getConfig();
+    const now = Date.now();
+    const cooldownMsRemaining = Math.max(0, this._cpuCooldownUntil - now);
     return {
-      enabled:          cfg.enabled,
-      pauseThreshold:   cfg.pauseThreshold,
-      resumeThreshold:  cfg.resumeThreshold,
-      pollMs:           cfg.pollMs,
-      currentCpuPct:    this._cpuMonitor.getCurrentPct(),
-      overloaded:       this._cpuMonitor.isOverloaded(),
-      manualPaused:     this._manualConversionPause,
+      enabled:            cfg.enabled,
+      pauseThreshold:     cfg.pauseThreshold,
+      resumeThreshold:    cfg.resumeThreshold,
+      sustainedMs:        cfg.sustainedMs,
+      pollMs:             cfg.pollMs,
+      currentCpuPct:      this._cpuMonitor.getCurrentPct(),
+      overloaded:         this._cpuMonitor.isOverloaded(),
+      manualPaused:       this._manualConversionPause,
+      // Per-hardware: how many cores the local encoder is allowed to use
+      // and the total the box has. The UI uses these to render the core
+      // cap slider range without probing os.cpus() itself.
+      maxConversionCores: this._maxConversionCores,
+      totalCores:         os.cpus().length,
+      niceLevel:          this._conversionNiceLevel,
+      cooldownMs:         this._cpuCooldownMs,
+      cooldownMsRemaining,
+      autoPauseSuppressed: this._cpuAutoPauseSuppressed,
+      recentAutoPauseCount: this._cpuPauseHistory.length,
     };
   }
 
   /**
-   * Update CPU-protection thresholds / enabled flag. Accepted keys:
-   *   enabled, pauseThreshold, resumeThreshold, pollMs. Returns the
-   *   post-update config snapshot.
+   * Update CPU-protection config. Accepted keys:
+   *   enabled, pauseThreshold, resumeThreshold, sustainedMs, pollMs,
+   *   maxConversionCores, niceLevel, cooldownMs. Returns the post-update
+   *   config snapshot.
+   *
+   * Changing maxConversionCores takes effect on the NEXT conversion —
+   * there's no sensible way to re-thread a running ffmpeg mid-encode.
    */
   setCpuProtection(opts) {
-    const cfg = this._cpuMonitor.updateConfig(opts || {});
+    const o = opts || {};
+    this._cpuMonitor.updateConfig(o);
+    if (o.maxConversionCores != null) {
+      const n = parseInt(o.maxConversionCores, 10);
+      const totalCores = os.cpus().length;
+      if (Number.isFinite(n) && n >= 1) {
+        this._maxConversionCores = Math.min(totalCores, n);
+      }
+    }
+    if (o.niceLevel != null) {
+      const n = parseInt(o.niceLevel, 10);
+      if (Number.isFinite(n)) {
+        this._conversionNiceLevel = Math.max(0, Math.min(19, n));
+      }
+    }
+    if (o.cooldownMs != null) {
+      const n = parseInt(o.cooldownMs, 10);
+      if (Number.isFinite(n) && n >= 0) this._cpuCooldownMs = n;
+    }
+    // Raising the core cap or turning protection off should clear the
+    // suppression flag — the operator has actively acknowledged the
+    // condition and taken action. Also clear on explicit disable.
+    if (o.maxConversionCores != null || o.enabled === false) {
+      this._cpuAutoPauseSuppressed = false;
+      this._cpuPauseHistory = [];
+      this._cpuCooldownUntil = 0;
+    }
     // Turning protection on with CPU already hot kicks a recompute on the
     // next tick; turning it off triggers the monitor's 'relieved' event
     // which wakes the queue. Either way, nudge the queue so a newly
     // configured box doesn't sit idle until the next natural trigger.
     this._processConversionQueue().catch(() => {});
-    return { ...cfg, manualPaused: this._manualConversionPause };
+    return this.getCpuProtection();
   }
 
   /**
@@ -6511,6 +6635,13 @@ class LibraryManager {
       this._pauseRunningLocalConversions('manual');
     } else if (wasPaused && !this._manualConversionPause) {
       console.log('[Library] Conversions manually resumed by operator');
+      // A manual resume is an explicit operator acknowledgment — clear
+      // any loop-suppression state and cooldown so the queue actually
+      // moves. Without this, clicking "Resume" after the auto-pause
+      // loop kicked in would appear to do nothing.
+      this._cpuAutoPauseSuppressed = false;
+      this._cpuPauseHistory = [];
+      this._cpuCooldownUntil = 0;
       this._processConversionQueue().catch(() => {});
     }
     return this._manualConversionPause;

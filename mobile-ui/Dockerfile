@@ -55,6 +55,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libass-dev libfreetype6-dev libnuma-dev zlib1g-dev libv4l-dev \
  && rm -rf /var/lib/apt/lists/*
 
+# The l4t-jetpack image has CUDA / cuDNN / TensorRT but NOT the L4T
+# Multimedia API runtime libs (libnvbufsurface / libnvbufsurftransform /
+# libnvjpeg — verified by listing /usr/lib/aarch64-linux-gnu/nvidia/).
+# Those come from the nvidia-l4t-jetson-multimedia-api package in
+# NVIDIA's apt repo, which the base image already configures but doesn't
+# preinstall. Post-install scripts on nvidia-l4t-* sometimes fail inside
+# a container (they poke at host-only paths / kernel modules); we catch
+# the failure with `|| dpkg --configure -a` so the layer still succeeds
+# as long as the .so files were unpacked, which is all we need to link
+# libnvmpi against.
+RUN apt-get update \
+ && ( apt-get install -y --no-install-recommends nvidia-l4t-jetson-multimedia-api \
+      || dpkg --configure -a || true ) \
+ && rm -rf /var/lib/apt/lists/*
+
 # 1) nv-codec-headers — ffmpeg's configure needs these to accept
 #    --enable-cuvid / --enable-nvenc. They're harmless on Orin Nano at
 #    runtime (cuvid just won't load), and essential for desktop NVIDIA.
@@ -80,13 +95,13 @@ RUN git clone --depth 1 --branch ${NV_CODEC_HEADERS_TAG} \
 RUN git clone ${JETSON_FFMPEG_REPO} /src/jetson-ffmpeg \
  && git -C /src/jetson-ffmpeg checkout ${JETSON_FFMPEG_REF} \
  && echo "=====  libs available at build time  =====" \
+ && (dpkg -l | grep -E 'nvidia-l4t|multimedia' || true) \
+ && echo "----- files in nvidia-l4t-jetson-multimedia-api -----" \
+ && (dpkg -L nvidia-l4t-jetson-multimedia-api 2>/dev/null | grep -E '\.so($|\.)' || echo "  package not installed") \
+ && echo "----- nvbufsurface / nvjpeg anywhere on / -----" \
+ && (find / -name 'libnvbufsurface*' -o -name 'libnvbufsurftransform*' -o -name 'libnvjpeg*' 2>/dev/null || true) \
+ && echo "----- libv4l2 -----" \
  && (ls -la /usr/lib/aarch64-linux-gnu/libv4l2* 2>&1 || true) \
- && echo "----- /usr/lib/aarch64-linux-gnu/nvidia/ -----" \
- && (ls -la /usr/lib/aarch64-linux-gnu/nvidia/ 2>&1 | head -60 || true) \
- && echo "----- /usr/lib/aarch64-linux-gnu/tegra/  -----" \
- && (ls -la /usr/lib/aarch64-linux-gnu/tegra/ 2>&1 | head -60 || true) \
- && echo "----- nvbufsurface / nvjpeg anywhere on /usr -----" \
- && (find /usr -name 'libnvbufsurface*' -o -name 'libnvbufsurftransform*' -o -name 'libnvjpeg*' 2>/dev/null || true) \
  && echo "==========================================" \
  && cmake -S /src/jetson-ffmpeg -B /src/jetson-ffmpeg/build \
       -DCMAKE_LIBRARY_PATH="/usr/lib/aarch64-linux-gnu/tegra;/usr/lib/aarch64-linux-gnu/nvidia" \

@@ -5175,6 +5175,56 @@
       }
     });
 
+    // ─── Task Priority ──────────────────────────────
+    const taskPrioritySelect = $('#setting-task-priority');
+    const taskPriorityStatus = $('#task-priority-status');
+    if (taskPrioritySelect) {
+      const TASK_PRIORITY_DESCRIPTIONS = {
+        'downloads-first': 'Starting a download pauses running local conversions; new conversions wait until downloads are idle.',
+        'conversions-first': 'Active local conversions block new downloads from starting; conversions never get paused for a download.',
+        'both': 'No mutual pausing — downloads and local conversions run in parallel.',
+      };
+      const applyDescription = (value) => {
+        if (taskPriorityStatus && TASK_PRIORITY_DESCRIPTIONS[value]) {
+          taskPriorityStatus.textContent = TASK_PRIORITY_DESCRIPTIONS[value];
+          taskPriorityStatus.style.color = '';
+        }
+      };
+
+      fetch('/api/settings/task-priority').then(r => r.json()).then(data => {
+        if (data.taskPriority) {
+          taskPrioritySelect.value = data.taskPriority;
+          applyDescription(data.taskPriority);
+        }
+      }).catch(() => {});
+
+      taskPrioritySelect.addEventListener('change', async () => {
+        const value = taskPrioritySelect.value;
+        try {
+          const resp = await fetch('/api/settings/task-priority', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ taskPriority: value }),
+          });
+          if (resp.ok) {
+            applyDescription(value);
+            showToast(`Task priority: ${taskPrioritySelect.options[taskPrioritySelect.selectedIndex].text}`);
+          } else {
+            const err = await resp.json().catch(() => ({}));
+            if (taskPriorityStatus) {
+              taskPriorityStatus.textContent = err.error || 'Failed to save';
+              taskPriorityStatus.style.color = 'var(--danger, #ff6b6b)';
+            }
+          }
+        } catch {
+          if (taskPriorityStatus) {
+            taskPriorityStatus.textContent = 'Network error';
+            taskPriorityStatus.style.color = 'var(--danger, #ff6b6b)';
+          }
+        }
+      });
+    }
+
     // ─── Auto-play Next ─────────────────────────────
     const autoplayEnabledInput = $('#setting-autoplay-enabled');
     const autoplayCountdownInput = $('#setting-autoplay-countdown');

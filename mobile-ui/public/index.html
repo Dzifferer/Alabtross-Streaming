@@ -123,6 +123,19 @@
             <span id="max-streams-status" class="setting-hint">Max simultaneous torrent streams and downloads (1–20)</span>
           </div>
 
+          <!-- Task Priority -->
+          <div class="setting-group">
+            <label>Task Priority</label>
+            <div class="setting-row">
+              <select id="setting-task-priority" style="min-width:180px">
+                <option value="downloads-first">Downloads first</option>
+                <option value="conversions-first">Conversions first</option>
+                <option value="both">Both (concurrent)</option>
+              </select>
+            </div>
+            <span id="task-priority-status" class="setting-hint">Which background work gets right-of-way on the server's CPU.</span>
+          </div>
+
           <!-- Auto-play Next -->
           <div class="setting-group">
             <label>Auto-play Next</label>

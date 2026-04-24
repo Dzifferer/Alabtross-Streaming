@@ -77,6 +77,12 @@ const FFMPEG_HWACCEL_ARGS = FFMPEG_HWACCEL ? ['-hwaccel', FFMPEG_HWACCEL] : [];
 // Override with the MAX_CONCURRENT_STREAMS env var or the in-app setting.
 let MAX_CONCURRENT_STREAMS = parseInt(process.env.MAX_CONCURRENT_STREAMS, 10) || 2;
 
+// Which background work gets right-of-way when downloads and local
+// conversions would contend for CPU. See LibraryManager._taskPriority
+// for the semantics. Default matches the old behavior.
+const VALID_TASK_PRIORITIES = ['downloads-first', 'conversions-first', 'both'];
+let TASK_PRIORITY = 'downloads-first';
+
 // Load persisted settings from disk
 try {
   if (fs.existsSync(SETTINGS_PATH)) {
@@ -84,9 +90,27 @@ try {
     if (saved.maxConcurrentStreams >= 1 && saved.maxConcurrentStreams <= 20) {
       MAX_CONCURRENT_STREAMS = saved.maxConcurrentStreams;
     }
+    if (VALID_TASK_PRIORITIES.includes(saved.taskPriority)) {
+      TASK_PRIORITY = saved.taskPriority;
+    }
   }
 } catch (e) {
   console.warn('[Settings] Failed to load saved settings:', e.message);
+}
+
+// Centralized writer: always persist the full known setting set so a later
+// toggle doesn't silently drop unrelated keys. Swallows errors because a
+// failed write is a logged warning, not a request failure.
+function persistSettings() {
+  try {
+    fs.mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true });
+    fs.writeFileSync(SETTINGS_PATH, JSON.stringify({
+      maxConcurrentStreams: MAX_CONCURRENT_STREAMS,
+      taskPriority: TASK_PRIORITY,
+    }), 'utf8');
+  } catch (e) {
+    console.warn('[Settings] Failed to persist settings:', e.message);
+  }
 }
 
 // JSON body parsing for library POST/DELETE requests
@@ -390,6 +414,7 @@ const library = new LibraryManager({
   workerSecret: WORKER_SECRET,
   diskReserveBytes: DISK_RESERVE_BYTES,
   maxConcurrentRemoteConversions: MAX_CONCURRENT_REMOTE_CONVERSIONS,
+  taskPriority: TASK_PRIORITY,
 });
 // Separate LibraryManager instance for music with its own _metadata.json.
 // Music items are type: 'album' and take a different completion path
@@ -4748,15 +4773,34 @@ app.post('/api/settings/max-streams', (req, res) => {
   // Update running engines
   if (engine) engine._maxConcurrent = value;
   library._maxConcurrentDownloads = value;
-  // Persist to disk
-  try {
-    fs.mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true });
-    fs.writeFileSync(SETTINGS_PATH, JSON.stringify({ maxConcurrentStreams: value }), 'utf8');
-  } catch (e) {
-    console.warn('[Settings] Failed to persist settings:', e.message);
-  }
+  persistSettings();
   console.log(`[Settings] Max concurrent streams updated to ${value}`);
   res.json({ maxConcurrentStreams: value });
+});
+
+// Task priority: 'downloads-first' | 'conversions-first' | 'both'
+app.get('/api/settings/task-priority', (req, res) => {
+  res.json({
+    taskPriority: library.getTaskPriority(),
+    options: VALID_TASK_PRIORITIES,
+  });
+});
+
+app.post('/api/settings/task-priority', (req, res) => {
+  const value = String(req.body.taskPriority || '');
+  if (!VALID_TASK_PRIORITIES.includes(value)) {
+    return res.status(400).json({
+      error: `taskPriority must be one of ${VALID_TASK_PRIORITIES.join(', ')}`,
+    });
+  }
+  try {
+    library.setTaskPriority(value);
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+  TASK_PRIORITY = value;
+  persistSettings();
+  res.json({ taskPriority: value });
 });
 
 // ─── Cast / Local Discovery API ──────────────────────────────────────

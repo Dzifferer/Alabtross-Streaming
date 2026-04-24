@@ -120,6 +120,26 @@ RUN git clone --depth 1 --branch ${FFMPEG_VERSION} \
 # 4) Apply Keylost's nvmpi patch. Fails fast with a directory listing if
 #    the patch file isn't where FFMPEG_PATCH_PATH points — makes it easy
 #    to pick the right file name when bumping ffmpeg versions.
+# Diagnostic: surface exactly what pkg-config sees for nvmpi BEFORE configure.
+# Runs in its own RUN so it's always visible in the build log (not buried in
+# a cached layer) — cheap, non-destructive, removable once the build is green.
+RUN echo "=====  pkg-config diagnostic for nvmpi  =====" \
+ && echo "--- /usr/local/lib/pkgconfig/" \
+ && (ls -la /usr/local/lib/pkgconfig/ 2>&1 || echo "  dir does not exist") \
+ && echo "--- nvmpi.pc content (if any):" \
+ && (cat /usr/local/lib/pkgconfig/nvmpi.pc 2>&1 || echo "  file does not exist") \
+ && echo "--- all .pc files anywhere on / :" \
+ && (find / -name 'nvmpi.pc' 2>/dev/null || true) \
+ && echo "--- pkg-config default search path:" \
+ && pkg-config --variable pc_path pkg-config \
+ && echo "--- pkg-config --list-all | head:" \
+ && (pkg-config --list-all 2>&1 | head -5 || true) \
+ && echo "--- pkg-config --exists nvmpi (exit code $?):" \
+ && (pkg-config --exists nvmpi && echo "  FOUND" || echo "  NOT FOUND") \
+ && echo "--- pkg-config --cflags nvmpi:" \
+ && (pkg-config --cflags nvmpi 2>&1 || true) \
+ && echo "=============================================="
+
 WORKDIR /src/ffmpeg
 RUN if [ ! -f "/src/jetson-ffmpeg/${FFMPEG_PATCH_PATH}" ]; then \
       echo "==> patch not found at /src/jetson-ffmpeg/${FFMPEG_PATCH_PATH}"; \

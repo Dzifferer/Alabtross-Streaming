@@ -83,6 +83,25 @@ let MAX_CONCURRENT_STREAMS = parseInt(process.env.MAX_CONCURRENT_STREAMS, 10) ||
 const VALID_TASK_PRIORITIES = ['downloads-first', 'conversions-first', 'both'];
 let TASK_PRIORITY = 'downloads-first';
 
+// Hardware protection — pause conversions when host CPU pins. Defaults
+// are tuned for Jetson-class hardware: 90% pause / 70% resume gives
+// enough hysteresis that libx264's startup spike doesn't immediately
+// trigger a pause+requeue loop, while still catching sustained overload
+// before thermal throttling kicks in. Persisted across restarts so the
+// operator doesn't have to re-tune after every container rebuild.
+const DEFAULT_CPU_PROTECTION = {
+  enabled: true,
+  pauseThreshold: 90,
+  resumeThreshold: 70,
+};
+let CPU_PROTECTION = { ...DEFAULT_CPU_PROTECTION };
+
+function _clampPct(n, fallback) {
+  const v = parseInt(n, 10);
+  if (!Number.isFinite(v)) return fallback;
+  return Math.max(1, Math.min(100, v));
+}
+
 // Load persisted settings from disk
 try {
   if (fs.existsSync(SETTINGS_PATH)) {
@@ -92,6 +111,18 @@ try {
     }
     if (VALID_TASK_PRIORITIES.includes(saved.taskPriority)) {
       TASK_PRIORITY = saved.taskPriority;
+    }
+    if (saved.cpuProtection && typeof saved.cpuProtection === 'object') {
+      CPU_PROTECTION = {
+        enabled: saved.cpuProtection.enabled !== false,
+        pauseThreshold:  _clampPct(saved.cpuProtection.pauseThreshold,  DEFAULT_CPU_PROTECTION.pauseThreshold),
+        resumeThreshold: _clampPct(saved.cpuProtection.resumeThreshold, DEFAULT_CPU_PROTECTION.resumeThreshold),
+      };
+      // Enforce hysteresis at load time too so a hand-edited settings file
+      // with pause=70,resume=80 doesn't flap the conversion queue.
+      if (CPU_PROTECTION.resumeThreshold >= CPU_PROTECTION.pauseThreshold) {
+        CPU_PROTECTION.resumeThreshold = Math.max(10, CPU_PROTECTION.pauseThreshold - 10);
+      }
     }
   }
 } catch (e) {
@@ -107,6 +138,7 @@ function persistSettings() {
     fs.writeFileSync(SETTINGS_PATH, JSON.stringify({
       maxConcurrentStreams: MAX_CONCURRENT_STREAMS,
       taskPriority: TASK_PRIORITY,
+      cpuProtection: CPU_PROTECTION,
     }), 'utf8');
   } catch (e) {
     console.warn('[Settings] Failed to persist settings:', e.message);
@@ -415,6 +447,7 @@ const library = new LibraryManager({
   diskReserveBytes: DISK_RESERVE_BYTES,
   maxConcurrentRemoteConversions: MAX_CONCURRENT_REMOTE_CONVERSIONS,
   taskPriority: TASK_PRIORITY,
+  cpuProtection: CPU_PROTECTION,
 });
 // Separate LibraryManager instance for music with its own _metadata.json.
 // Music items are type: 'album' and take a different completion path
@@ -425,6 +458,7 @@ const musicLibrary = new LibraryManager({
   libraryPath: MUSIC_LIBRARY_PATH,
   maxConcurrentDownloads: MAX_CONCURRENT_STREAMS,
   diskReserveBytes: DISK_RESERVE_BYTES,
+  cpuProtection: CPU_PROTECTION,
 });
 const MusicPlaylists = require('./lib/music-playlists');
 const musicPlaylists = new MusicPlaylists(MUSIC_LIBRARY_PATH);
@@ -4801,6 +4835,71 @@ app.post('/api/settings/task-priority', (req, res) => {
   TASK_PRIORITY = value;
   persistSettings();
   res.json({ taskPriority: value });
+});
+
+// ─── Hardware Protection (CPU) Settings API ──────────────────────────
+// Lets the operator cap host CPU pressure by pausing conversions when
+// the box heats up, and manually stop all conversions mid-flight. The
+// manual pause is intentionally NOT persisted — it's an instant-stop
+// button, not a policy. The auto-pause thresholds ARE persisted.
+app.get('/api/settings/cpu-protection', (req, res) => {
+  // library.getCpuProtection() returns live monitor state (currentCpuPct,
+  // overloaded) alongside the stored config, so the UI doesn't need a
+  // separate poll of /api/diagnostics/system just to show the gauge.
+  res.json(library.getCpuProtection());
+});
+
+app.post('/api/settings/cpu-protection', (req, res) => {
+  const body = req.body || {};
+  const update = {};
+  if (typeof body.enabled === 'boolean') update.enabled = body.enabled;
+  if (body.pauseThreshold != null)  update.pauseThreshold  = _clampPct(body.pauseThreshold,  CPU_PROTECTION.pauseThreshold);
+  if (body.resumeThreshold != null) update.resumeThreshold = _clampPct(body.resumeThreshold, CPU_PROTECTION.resumeThreshold);
+
+  try {
+    const applied = library.setCpuProtection(update);
+    // Mirror monitor state back to the persisted config so a restart picks
+    // up the operator's tuned thresholds. Manual pause is skipped on purpose.
+    CPU_PROTECTION = {
+      enabled:         applied.enabled,
+      pauseThreshold:  applied.pauseThreshold,
+      resumeThreshold: applied.resumeThreshold,
+    };
+    // Also apply to the music LibraryManager so a manual pause covers
+    // album downloads as well (music workloads are lighter but still
+    // share the same CPU budget on Jetson-class hardware).
+    try { musicLibrary.setCpuProtection(update); } catch { /* music mgr may not be ready yet */ }
+
+    // Manual-pause toggle is orthogonal to the threshold config — accept
+    // it in the same POST body for UI convenience. Apply BEFORE the JSON
+    // response so the snapshot reflects the final state.
+    if (typeof body.manualPaused === 'boolean') {
+      library.setConversionsPaused(body.manualPaused);
+      try { musicLibrary.setConversionsPaused(body.manualPaused); } catch { /* ignore */ }
+    }
+
+    persistSettings();
+    res.json(library.getCpuProtection());
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// Dedicated manual pause/resume endpoint — simpler shape for the "big red
+// button" UI control. Accepts { paused: true|false } or a toggle if no
+// body is provided.
+app.post('/api/settings/cpu-protection/pause', (req, res) => {
+  const body = req.body || {};
+  let paused;
+  if (typeof body.paused === 'boolean') {
+    paused = body.paused;
+  } else {
+    // Toggle current state.
+    paused = !library.getCpuProtection().manualPaused;
+  }
+  library.setConversionsPaused(paused);
+  try { musicLibrary.setConversionsPaused(paused); } catch { /* ignore */ }
+  res.json(library.getCpuProtection());
 });
 
 // ─── Cast / Local Discovery API ──────────────────────────────────────

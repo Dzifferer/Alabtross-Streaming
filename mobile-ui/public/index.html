@@ -136,6 +136,39 @@
             <span id="task-priority-status" class="setting-hint">Which background work gets right-of-way on the server's CPU.</span>
           </div>
 
+          <!-- Hardware Protection (CPU) -->
+          <div class="setting-group">
+            <label>Hardware Protection</label>
+            <div id="cpu-protection-gauge" class="cpu-gauge">
+              <div class="cpu-gauge-label">
+                <span>Host CPU</span>
+                <span id="cpu-gauge-value">—%</span>
+              </div>
+              <div class="cpu-gauge-track"><div id="cpu-gauge-fill" class="cpu-gauge-fill"></div></div>
+              <div id="cpu-gauge-status" class="setting-hint">Monitoring…</div>
+            </div>
+            <div class="setting-row" style="margin-top:10px">
+              <button id="cpu-pause-btn" class="btn-block btn-danger">Pause Conversions</button>
+            </div>
+            <div class="setting-row">
+              <label class="setting-toggle">
+                <input type="checkbox" id="setting-cpu-protection-enabled" checked>
+                <span>Auto-pause when CPU is overloaded</span>
+              </label>
+            </div>
+            <div class="setting-row">
+              <span style="min-width:130px">Pause above</span>
+              <input type="range" id="setting-cpu-pause-threshold" min="50" max="100" step="1" value="90" style="flex:1">
+              <span id="cpu-pause-threshold-value" style="min-width:44px;text-align:right">90%</span>
+            </div>
+            <div class="setting-row">
+              <span style="min-width:130px">Resume below</span>
+              <input type="range" id="setting-cpu-resume-threshold" min="20" max="95" step="1" value="70" style="flex:1">
+              <span id="cpu-resume-threshold-value" style="min-width:44px;text-align:right">70%</span>
+            </div>
+            <span id="cpu-protection-status" class="setting-hint">When CPU passes the pause threshold, running conversions are killed and requeued. They restart after CPU drops below the resume threshold. Use the red button to stop conversions immediately regardless of CPU.</span>
+          </div>
+
           <!-- Auto-play Next -->
           <div class="setting-group">
             <label>Auto-play Next</label>

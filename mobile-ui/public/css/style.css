@@ -2844,6 +2844,58 @@ select.manual-import-input {
   background: var(--bg-elevated);
 }
 
+/* Danger variant — tinted red, used for the manual pause button. */
+.btn-danger {
+  background: rgba(255, 107, 107, 0.12);
+  border-color: rgba(255, 107, 107, 0.35);
+  color: #ff8a8a;
+  text-align: center;
+  font-weight: 600;
+}
+.btn-danger:active {
+  background: rgba(255, 107, 107, 0.22);
+}
+.btn-danger.active {
+  background: rgba(81, 207, 102, 0.14);
+  border-color: rgba(81, 207, 102, 0.4);
+  color: #8fe8a5;
+}
+
+/* ===== CPU Protection Gauge ===== */
+.cpu-gauge {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  background: var(--bg-card);
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(255,255,255,0.06);
+  margin-bottom: 8px;
+}
+.cpu-gauge-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  color: var(--text);
+}
+.cpu-gauge-label > span:last-child {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.cpu-gauge-track {
+  width: 100%;
+  height: 8px;
+  background: rgba(255,255,255,0.08);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.cpu-gauge-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #51cf66 0%, #ffd43b 70%, #ff6b6b 100%);
+  transition: width 0.4s ease;
+}
+
 /* ===== Source List ===== */
 .source-list {
   display: flex;

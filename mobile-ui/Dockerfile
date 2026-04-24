@@ -120,26 +120,6 @@ RUN git clone --depth 1 --branch ${FFMPEG_VERSION} \
 # 4) Apply Keylost's nvmpi patch. Fails fast with a directory listing if
 #    the patch file isn't where FFMPEG_PATCH_PATH points — makes it easy
 #    to pick the right file name when bumping ffmpeg versions.
-# Diagnostic: surface exactly what pkg-config sees for nvmpi BEFORE configure.
-# Runs in its own RUN so it's always visible in the build log (not buried in
-# a cached layer) — cheap, non-destructive, removable once the build is green.
-RUN echo "=====  pkg-config diagnostic for nvmpi  =====" \
- && echo "--- /usr/local/lib/pkgconfig/" \
- && (ls -la /usr/local/lib/pkgconfig/ 2>&1 || echo "  dir does not exist") \
- && echo "--- nvmpi.pc content (if any):" \
- && (cat /usr/local/lib/pkgconfig/nvmpi.pc 2>&1 || echo "  file does not exist") \
- && echo "--- all .pc files anywhere on / :" \
- && (find / -name 'nvmpi.pc' 2>/dev/null || true) \
- && echo "--- pkg-config default search path:" \
- && pkg-config --variable pc_path pkg-config \
- && echo "--- pkg-config --list-all | head:" \
- && (pkg-config --list-all 2>&1 | head -5 || true) \
- && echo "--- pkg-config --exists nvmpi (exit code $?):" \
- && (pkg-config --exists nvmpi && echo "  FOUND" || echo "  NOT FOUND") \
- && echo "--- pkg-config --cflags nvmpi:" \
- && (pkg-config --cflags nvmpi 2>&1 || true) \
- && echo "=============================================="
-
 WORKDIR /src/ffmpeg
 RUN if [ ! -f "/src/jetson-ffmpeg/${FFMPEG_PATCH_PATH}" ]; then \
       echo "==> patch not found at /src/jetson-ffmpeg/${FFMPEG_PATCH_PATH}"; \
@@ -153,7 +133,36 @@ RUN if [ ! -f "/src/jetson-ffmpeg/${FFMPEG_PATCH_PATH}" ]; then \
 # 5) Configure + build ffmpeg. --enable-nvmpi is added by Keylost's patch.
 #    The cuvid / nvenc flags stay enabled so desktop NVIDIA hosts and
 #    future Orin NX / AGX deploys of the same image get GPU encode too.
-RUN PATH="/usr/local/cuda/bin:${PATH}" \
+# 5) Configure + build ffmpeg. --enable-nvmpi is added by Keylost's patch.
+#    The cuvid / nvenc flags stay enabled so desktop NVIDIA hosts and
+#    future Orin NX / AGX deploys of the same image get GPU encode too.
+#
+#    The echo / ls / pkg-config block at the top is a diagnostic surface:
+#    when configure fails, BuildKit prints the full stdout/stderr of the
+#    failing RUN, so keeping the diagnostic in the SAME RUN as configure
+#    guarantees the output is visible (moving it to a separate RUN would
+#    let BuildKit cache the diagnostic and suppress its output).
+RUN echo "=====  pkg-config diagnostic for nvmpi  =====" \
+ && echo "--- /usr/local/lib/pkgconfig/" \
+ && (ls -la /usr/local/lib/pkgconfig/ 2>&1 || echo "  dir does not exist") \
+ && echo "--- nvmpi.pc content (if any):" \
+ && (cat /usr/local/lib/pkgconfig/nvmpi.pc 2>&1 || echo "  file does not exist") \
+ && echo "--- all nvmpi.pc anywhere on / :" \
+ && (find / -name 'nvmpi.pc' 2>/dev/null || true) \
+ && echo "--- pkg-config default search path:" \
+ && pkg-config --variable pc_path pkg-config \
+ && echo "--- pkg-config --list-all | head:" \
+ && (pkg-config --list-all 2>&1 | head -5 || true) \
+ && echo "--- pkg-config --exists nvmpi :" \
+ && (pkg-config --exists nvmpi && echo "  FOUND" || echo "  NOT FOUND") \
+ && echo "--- pkg-config --cflags nvmpi:" \
+ && (pkg-config --cflags nvmpi 2>&1 || true) \
+ && echo "--- WITH explicit PKG_CONFIG_PATH=/usr/local/lib/pkgconfig :" \
+ && (PKG_CONFIG_PATH=/usr/local/lib/pkgconfig pkg-config --exists nvmpi && echo "  FOUND" || echo "  NOT FOUND") \
+ && echo "--- libnvmpi.so :" \
+ && (ls -la /usr/local/lib/libnvmpi* 2>&1 || echo "  no libnvmpi") \
+ && echo "==============================================" \
+ && PATH="/usr/local/cuda/bin:${PATH}" \
     PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib/aarch64-linux-gnu/pkgconfig:/usr/lib/aarch64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH}" \
     ./configure \
       --prefix=/opt/ffmpeg \

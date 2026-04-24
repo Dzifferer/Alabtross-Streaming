@@ -3593,6 +3593,17 @@ app.post('/api/library/:id/retry', rateLimit, (req, res) => {
   res.json({ success: true });
 });
 
+// POST /api/library/:id/repair — force-refetch a seemingly-complete item
+// whose on-disk bytes turned out to be sparse / incomplete. Flips the item
+// back through the download state machine so torrent-stream's verify pass
+// refills the missing pieces. No-op if the stored magnet URI is missing
+// (nothing to re-download from).
+app.post('/api/library/:id/repair', rateLimit, (req, res) => {
+  const result = library.repairItem(req.params.id);
+  if (!result.ok) return res.status(400).json({ error: result.reason });
+  res.json({ success: true, queued: !!result.queued });
+});
+
 // POST /api/library/:id/start — force-start a queued item (if slots available)
 app.post('/api/library/:id/start', rateLimit, (req, res) => {
   const started = library.startQueuedItem(req.params.id);

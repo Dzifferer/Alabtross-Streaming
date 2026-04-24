@@ -2736,6 +2736,38 @@ class LibraryManager {
   /**
    * Retry a failed download. Resets status and re-starts the torrent engine.
    */
+  /**
+   * Force-refetch a library item from its torrent, even if its stored status
+   * says 'complete'. Used when the sweep detects a sparse / incomplete file
+   * (bytes on disk ≪ expected size) and wants to refill missing pieces, and
+   * when the user clicks "Repair" in the UI. Returns:
+   *   { ok: true, queued: bool }     — re-download started
+   *   { ok: false, reason: string }  — item missing, no magnet on file, etc.
+   *
+   * Unlike retryItem() this does NOT require status === 'failed' — it flips
+   * the state itself. Without that, UI-driven repair of a seemingly-complete
+   * item would be a no-op because retryItem bails on non-failed items.
+   */
+  repairItem(id) {
+    const item = this._items.get(id);
+    if (!item) return { ok: false, reason: 'item not found' };
+    if (!item.magnetUri || !item.infoHash) {
+      return { ok: false, reason: 'no magnet URI stored — cannot re-download' };
+    }
+    const prevStatus = item.status;
+    item.status = 'failed';
+    item.error = 'User-requested repair';
+    item.progress = 0;
+    item.completedAt = null;
+    item.conversionCheckedAt = null;
+    // Clear auto-repair guard so the next sweep probe doesn't short-circuit.
+    item._autoRepairAttempted = false;
+    this._saveMetadata();
+    console.log(`[Library] Repair requested for "${item.name}" (was ${prevStatus})`);
+    const queued = this.retryItem(id);
+    return { ok: true, queued: !!queued };
+  }
+
   retryItem(id) {
     const item = this._items.get(id);
     if (!item) return false;
@@ -5274,12 +5306,42 @@ class LibraryManager {
     // re-download) automatically invalidates the entry. If stat fails
     // we let ffprobe produce its own canonical error path below.
     let cacheKey = null;
+    let statResult = null;
     try {
       const st = fs.statSync(filePath);
+      statResult = st;
       cacheKey = `${filePath}\u0000${st.mtimeMs}\u0000${st.size}`;
       const cached = _probeCacheGet(cacheKey);
       if (cached) return cached;
     } catch { /* stat failed — let ffprobe report it */ }
+
+    // Pre-check for sparse / incomplete files. torrent-stream allocates the
+    // file at its full size up front (via ftruncate) and only fills in the
+    // pieces that actually download, so an abandoned torrent leaves a file
+    // where stat.size looks right but stat.blocks is nearly zero. Reads
+    // from unwritten holes return zeros, which is why ffprobe then hits
+    // "EBML header parsing failed" / "Invalid data found" — the bytes
+    // genuinely aren't on disk. stat.blocks is in 512-byte units per POSIX
+    // regardless of the filesystem's native block size, so blocks*512/size
+    // is a reliable completeness ratio on any sane FS. Below 90% we mark
+    // the file as incomplete and skip ffprobe entirely — escalating through
+    // all three tiers on a mostly-empty file is pure CPU waste, and the
+    // caller needs to surface a clear "re-download" message anyway.
+    if (statResult && statResult.size > 1024 * 1024) {
+      const actualBytes = (statResult.blocks || 0) * 512;
+      const ratio = actualBytes / statResult.size;
+      if (ratio < 0.90) {
+        return {
+          probeOk: false,
+          ext: path.extname(filePath).toLowerCase(),
+          reason: `Incomplete download — only ${(ratio * 100).toFixed(1)}% of ${statResult.size} bytes present on disk`,
+          incomplete: true,
+          completenessRatio: ratio,
+          expectedBytes: statResult.size,
+          actualBytes,
+        };
+      }
+    }
 
     // Escalation ladder. Each tier strictly supersets the previous in
     // tolerance, so if tier N rejects a file, tier N+1 is worth trying.
@@ -5673,7 +5735,31 @@ class LibraryManager {
     const probe = await this._probeFile(fullPath);
 
     if (!probe.probeOk) {
-      console.log(`[Library] "${item.name}" probe failed (${probe.reason}) — skipping background conversion`);
+      // Sparse torrent files: the on-disk bytes are mostly zeros because
+      // the download never completed. If we still have the magnet URI we
+      // can refill the missing pieces instead of leaving the user with a
+      // dead entry. Guard against flapping: only auto-repair an item once
+      // per server lifetime — without this guard a torrent with zero
+      // seeders would fail the next sweep and retry forever.
+      if (probe.incomplete && item.magnetUri && item.infoHash && !item._autoRepairAttempted) {
+        console.log(`[Library] "${item.name}" is an incomplete torrent file (${(probe.completenessRatio * 100).toFixed(1)}% on disk) — triggering repair re-download`);
+        item._autoRepairAttempted = true;
+        item.status = 'failed';
+        item.error = probe.reason;
+        item.progress = 0;
+        item.completedAt = null;
+        item.conversionCheckedAt = null;
+        this._saveMetadata();
+        try { this.retryItem(id); } catch (err) {
+          console.error(`[Library] Auto-repair retry failed for "${item.name}": ${err.message}`);
+        }
+        return;
+      }
+      if (probe.incomplete) {
+        console.log(`[Library] "${item.name}" probe failed: ${probe.reason} — no magnet/infoHash available for repair, skipping`);
+      } else {
+        console.log(`[Library] "${item.name}" probe failed (${probe.reason}) — skipping background conversion`);
+      }
       return;
     }
 

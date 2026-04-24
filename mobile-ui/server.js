@@ -3618,6 +3618,20 @@ app.post('/api/library/repair-all-incomplete', rateLimit, async (req, res) => {
   }
 });
 
+// POST /api/library/remove-unfixable-broken — delete every library item
+// flagged incomplete that has no recoverable magnet (own, pack sibling,
+// or directory sibling). These are the "can't auto-fix" entries — the
+// user explicitly opts in to cleaning them up.
+app.post('/api/library/remove-unfixable-broken', rateLimit, (req, res) => {
+  try {
+    const summary = library.removeUnfixableBroken();
+    res.json({ success: true, ...summary });
+  } catch (err) {
+    console.error('[Server] removeUnfixableBroken failed:', err);
+    res.status(500).json({ error: err.message || 'bulk remove failed' });
+  }
+});
+
 // POST /api/library/:id/start — force-start a queued item (if slots available)
 app.post('/api/library/:id/start', rateLimit, (req, res) => {
   const started = library.startQueuedItem(req.params.id);

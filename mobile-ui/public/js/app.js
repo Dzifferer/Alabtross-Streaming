@@ -3642,6 +3642,24 @@
       const posText = item._queuePosition ? `#${item._queuePosition} in queue` : 'Waiting...';
       overlayHtml = `<div class="library-card-overlay queued">Queued</div>`;
       metaHtml = `<div class="library-card-meta queued">${posText}</div>`;
+    } else if (item.status === 'complete' && item.incompleteOnDisk) {
+      // File is on disk but the bytes are mostly missing (sparse / abandoned
+      // torrent). Mark the card so the user can see at a glance which items
+      // need repair vs. which are healthy.
+      const pct = typeof item.completenessRatio === 'number'
+        ? Math.round(item.completenessRatio * 100)
+        : null;
+      const pctText = pct !== null ? `${pct}% downloaded` : 'Incomplete download';
+      const actionHint = item.canRepair ? ' &middot; tap to repair' : ' &middot; re-import needed';
+      overlayHtml = `
+        <div class="library-card-overlay failed">Broken &middot; ${pctText}</div>
+        ${item.canRepair ? `
+        <div class="library-card-play library-card-repair-overlay" data-id="${escapeHTML(item.id)}">
+          <div class="library-card-play-circle">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10"/><path d="M20.49 15a9 9 0 01-14.85 3.36L1 14"/></svg>
+          </div>
+        </div>` : ''}`;
+      metaHtml = `<div class="library-card-meta failed">${pctText}${actionHint}</div>`;
     } else if (item.status === 'complete') {
       const size = item.fileSize ? formatSize(item.fileSize) : item.size || '';
       overlayHtml = `
@@ -4563,11 +4581,14 @@
       });
     });
 
-    // Repair buttons on library cards. Unlike Retry this works on a
-    // 'complete' item whose bytes are actually missing on disk — flips
-    // the item back through the download state machine so torrent-stream
-    // refills the missing pieces.
-    container.querySelectorAll('.library-card-repair').forEach(btn => {
+    // Repair buttons on library cards (both the small icon next to
+    // relink/remove AND the prominent overlay on a broken item's poster).
+    // Unlike Retry this works on a 'complete' item whose bytes are actually
+    // missing on disk — flips the item back through the download state
+    // machine so torrent-stream refills the missing pieces. The server-side
+    // repairItem also inherits a magnet from a pack sibling if the item
+    // itself lost its own.
+    container.querySelectorAll('.library-card-repair, .library-card-repair-overlay').forEach(btn => {
       btn.addEventListener('click', async (e) => {
         e.stopPropagation();
         const id = btn.dataset.id;
@@ -4578,7 +4599,12 @@
             showToast(j.error ? `Repair failed: ${j.error}` : 'Repair failed');
             return;
           }
-          showToast('Repair queued — re-downloading missing pieces…');
+          const j = await r.json().catch(() => ({}));
+          const src = j.magnetSource;
+          const msg = src === 'pack-sibling' ? 'Repair queued (magnet inherited from pack sibling)'
+                    : src === 'dir-sibling'  ? 'Repair queued (magnet inherited from directory sibling)'
+                                             : 'Repair queued — re-downloading missing pieces…';
+          showToast(msg);
           loadLibrary();
         } catch { showToast('Repair request failed'); }
       });
@@ -7066,6 +7092,40 @@
         runAutoMatch(true);
       }
     });
+
+    // Library toolbar: bulk remove unfixable-broken. Deletes library items
+    // that are incompleteOnDisk AND have no recoverable magnet (self, pack
+    // sibling, or directory sibling). After this the user typically re-imports
+    // the missing content via a fresh magnet.
+    const removeBrokenBtn = document.getElementById('library-remove-broken-btn');
+    if (removeBrokenBtn) {
+      removeBrokenBtn.addEventListener('click', async () => {
+        if (removeBrokenBtn.disabled) return;
+        if (!confirm('Delete every incomplete library item that has no magnet to re-download from?\nThis removes the broken entries permanently. Items that CAN be repaired are kept.')) {
+          return;
+        }
+        const label = removeBrokenBtn.querySelector('.library-automatch-label');
+        const orig = label ? label.textContent : null;
+        removeBrokenBtn.disabled = true;
+        if (label) label.textContent = 'Removing…';
+        try {
+          const resp = await fetch('/api/library/remove-unfixable-broken', { method: 'POST' });
+          if (!resp.ok) {
+            const j = await resp.json().catch(() => ({}));
+            showToast(j.error ? `Remove failed: ${j.error}` : 'Remove broken failed');
+            return;
+          }
+          const data = await resp.json();
+          showToast(data.removed === 0 ? 'No unfixable broken items found'
+                                       : `Removed ${data.removed} unfixable item${data.removed === 1 ? '' : 's'}`);
+          loadLibrary();
+        } catch { showToast('Remove request failed'); }
+        finally {
+          removeBrokenBtn.disabled = false;
+          if (label && orig) label.textContent = orig;
+        }
+      });
+    }
 
     // Library toolbar: bulk repair. Scans every 'complete' item server-side,
     // identifies the ones whose on-disk bytes are < 90% of expected size

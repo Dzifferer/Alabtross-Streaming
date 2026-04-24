@@ -2751,9 +2751,20 @@ class LibraryManager {
   repairItem(id) {
     const item = this._items.get(id);
     if (!item) return { ok: false, reason: 'item not found' };
-    if (!item.magnetUri || !item.infoHash) {
-      return { ok: false, reason: 'no magnet URI stored — cannot re-download' };
+
+    // Try own magnet first, then pack sibling, then directory sibling.
+    // Lets the user hit "Repair" on an episode whose own magnet got lost
+    // if any sibling in the same season pack still has it.
+    const recovery = this._findRecoveryMagnet(item);
+    if (!recovery) {
+      return { ok: false, reason: 'no magnet available (not on item, pack sibling, or directory sibling)' };
     }
+    if (recovery.source !== 'self') {
+      console.log(`[Library] Repair: inheriting magnet for "${item.name}" from ${recovery.source} (${recovery.infoHash.slice(0, 8)})`);
+      item.magnetUri = recovery.magnetUri;
+      item.infoHash  = recovery.infoHash;
+    }
+
     const prevStatus = item.status;
     item.status = 'failed';
     item.error = 'User-requested repair';
@@ -2763,9 +2774,9 @@ class LibraryManager {
     // Clear auto-repair guard so the next sweep probe doesn't short-circuit.
     item._autoRepairAttempted = false;
     this._saveMetadata();
-    console.log(`[Library] Repair requested for "${item.name}" (was ${prevStatus})`);
+    console.log(`[Library] Repair requested for "${item.name}" (was ${prevStatus}, magnet source: ${recovery.source})`);
     const queued = this.retryItem(id);
-    return { ok: true, queued: !!queued };
+    return { ok: true, queued: !!queued, magnetSource: recovery.source };
   }
 
   /**
@@ -2802,16 +2813,14 @@ class LibraryManager {
       if (ratio >= 0.90) continue; // healthy-looking file, leave alone
       incomplete++;
 
-      if (!item.magnetUri || !item.infoHash) {
-        noMagnet++;
-        details.push({ id, name: item.name, ratio, status: 'no-magnet' });
-        continue;
-      }
+      // repairItem() already tries self -> pack sibling -> dir sibling.
+      // We just interpret its result.
       const r = this.repairItem(id);
       if (r.ok) {
         triggered++;
-        details.push({ id, name: item.name, ratio, status: 'queued' });
+        details.push({ id, name: item.name, ratio, status: 'queued', magnetSource: r.magnetSource });
       } else {
+        noMagnet++;
         details.push({ id, name: item.name, ratio, status: `failed: ${r.reason}` });
       }
       // Yield so a large library scan doesn't block the HTTP loop.
@@ -2820,6 +2829,101 @@ class LibraryManager {
 
     console.log(`[Library] Bulk repair: scanned=${scannedIds.length} incomplete=${incomplete} triggered=${triggered} noMagnet=${noMagnet}`);
     return { scanned: scannedIds.length, incomplete, triggered, noMagnet, details };
+  }
+
+  /**
+   * Find a magnet URI we can use to re-download a broken item. Walks three
+   * fallbacks in order of reliability:
+   *
+   *   1. The item's own magnetUri — nothing to do, use it.
+   *   2. A sibling in the same pack (same packId). This is the big one:
+   *      season packs share a single magnet, so if "S01E03" is broken but
+   *      "S01E04" still carries the magnet, E03 can be refetched by
+   *      pointing at the same pack torrent and letting torrent-stream's
+   *      verify pass fill in E03's missing pieces.
+   *   3. A sibling in the same top-level library directory. Covers cases
+   *      where packId wasn't preserved (older imports) but the disk
+   *      layout still groups the pack — directory suffix "{name}_{hex}"
+   *      was created from the infoHash when the pack was first added.
+   *
+   * Returns { magnetUri, infoHash, source } or null if no candidate.
+   */
+  _findRecoveryMagnet(brokenItem) {
+    if (!brokenItem) return null;
+    if (brokenItem.magnetUri && brokenItem.infoHash) {
+      return { magnetUri: brokenItem.magnetUri, infoHash: brokenItem.infoHash, source: 'self' };
+    }
+    // Build an index of {packId|rootDir} -> first matching sibling with a
+    // magnet, cached briefly. Without this cache, _sanitizeItem would be
+    // O(n) per call and sanitize-all would be O(n²) on library load (big
+    // libraries go from milliseconds to multi-hundred-ms). TTL is short
+    // so new torrent adds become visible to the repair flow quickly.
+    const now = Date.now();
+    if (!this._recoveryIndex || now - this._recoveryIndexBuiltAt > 2000) {
+      const byPackId  = new Map();
+      const byRootDir = new Map();
+      for (const other of this._items.values()) {
+        if (!other.magnetUri || !other.infoHash) continue;
+        if (other.packId && !byPackId.has(other.packId)) {
+          byPackId.set(other.packId, { magnetUri: other.magnetUri, infoHash: other.infoHash });
+        }
+        if (other.filePath) {
+          const rootDir = String(other.filePath).split('/')[0];
+          if (rootDir && !byRootDir.has(rootDir)) {
+            byRootDir.set(rootDir, { magnetUri: other.magnetUri, infoHash: other.infoHash });
+          }
+        }
+      }
+      this._recoveryIndex = { byPackId, byRootDir };
+      this._recoveryIndexBuiltAt = now;
+    }
+
+    if (brokenItem.packId) {
+      const hit = this._recoveryIndex.byPackId.get(brokenItem.packId);
+      if (hit) return { ...hit, source: 'pack-sibling' };
+    }
+    if (brokenItem.filePath) {
+      const rootDir = String(brokenItem.filePath).split('/')[0];
+      const hit = rootDir ? this._recoveryIndex.byRootDir.get(rootDir) : null;
+      if (hit) return { ...hit, source: 'dir-sibling' };
+    }
+    return null;
+  }
+
+  // Invalidate the recovery index when we add/remove items or mutate magnet
+  // metadata. Called from the main mutation paths below.
+  _invalidateRecoveryIndex() {
+    this._recoveryIndex = null;
+    this._recoveryIndexBuiltAt = 0;
+  }
+
+  /**
+   * Delete every library item that was flagged incomplete on disk AND has
+   * no recoverable magnet (own, pack-sibling, or dir-sibling). These are
+   * the "no way to re-download them, bytes aren't on disk" entries — the
+   * user can't fix them from within the app, so the sensible cleanup is
+   * to remove them from the library so they stop cluttering the UI.
+   *
+   * Returns { scanned, removed, kept, details[] }. Synchronous
+   * removeItem calls on each match; does not touch the file unless
+   * removeItem would. Items whose files still contain some bytes are
+   * left on disk by default.
+   */
+  removeUnfixableBroken() {
+    const toRemove = [];
+    for (const item of this._items.values()) {
+      if (!item.incompleteOnDisk) continue;
+      if (this._findRecoveryMagnet(item)) continue;
+      toRemove.push({ id: item.id, name: item.name, ratio: item.completenessRatio });
+    }
+    for (const rec of toRemove) {
+      try { this.removeItem(rec.id); } catch (err) {
+        console.error(`[Library] removeUnfixableBroken: failed to remove ${rec.id}: ${err.message}`);
+      }
+    }
+    this._invalidateRecoveryIndex();
+    console.log(`[Library] removeUnfixableBroken: removed ${toRemove.length} unfixable item(s)`);
+    return { removed: toRemove.length, details: toRemove };
   }
 
   retryItem(id) {
@@ -5790,31 +5894,57 @@ class LibraryManager {
 
     if (!probe.probeOk) {
       // Sparse torrent files: the on-disk bytes are mostly zeros because
-      // the download never completed. If we still have the magnet URI we
-      // can refill the missing pieces instead of leaving the user with a
-      // dead entry. Guard against flapping: only auto-repair an item once
-      // per server lifetime — without this guard a torrent with zero
-      // seeders would fail the next sweep and retry forever.
-      if (probe.incomplete && item.magnetUri && item.infoHash && !item._autoRepairAttempted) {
-        console.log(`[Library] "${item.name}" is an incomplete torrent file (${(probe.completenessRatio * 100).toFixed(1)}% on disk) — triggering repair re-download`);
-        item._autoRepairAttempted = true;
-        item.status = 'failed';
-        item.error = probe.reason;
-        item.progress = 0;
-        item.completedAt = null;
-        item.conversionCheckedAt = null;
-        this._saveMetadata();
-        try { this.retryItem(id); } catch (err) {
-          console.error(`[Library] Auto-repair retry failed for "${item.name}": ${err.message}`);
+      // the download never completed. Mark the item so the UI can show a
+      // broken-state badge, then try to find ANY magnet we can use to
+      // refill pieces — own magnet → pack sibling → directory sibling.
+      // Pack/dir inheritance handles the common case where most of a
+      // season pack landed intact but one or two episodes are sparse and
+      // have lost their own magnet metadata.
+      if (probe.incomplete) {
+        item.incompleteOnDisk     = true;
+        item.completenessRatio    = Number(probe.completenessRatio.toFixed(4));
+        item.incompleteDetectedAt = Date.now();
+
+        const recovery = this._findRecoveryMagnet(item);
+        const canRetry = recovery && !item._autoRepairAttempted;
+
+        if (canRetry) {
+          if (recovery.source !== 'self') {
+            console.log(`[Library] "${item.name}" inherited magnet from ${recovery.source} (${recovery.infoHash.slice(0, 8)}) for repair`);
+            item.magnetUri = recovery.magnetUri;
+            item.infoHash  = recovery.infoHash;
+          }
+          console.log(`[Library] "${item.name}" is incomplete (${(probe.completenessRatio * 100).toFixed(1)}% on disk) — triggering repair re-download`);
+          item._autoRepairAttempted = true;
+          item.status       = 'failed';
+          item.error        = probe.reason;
+          item.progress     = 0;
+          item.completedAt  = null;
+          item.conversionCheckedAt = null;
+          this._saveMetadata();
+          try { this.retryItem(id); } catch (err) {
+            console.error(`[Library] Auto-repair retry failed for "${item.name}": ${err.message}`);
+          }
+          return;
         }
+
+        // Can't auto-repair: either already attempted OR no magnet anywhere
+        // in the library. Leave the broken-state flag set so the UI can
+        // surface it, and fall through.
+        this._saveMetadata();
+        console.log(`[Library] "${item.name}" probe failed: ${probe.reason} — ${item._autoRepairAttempted ? 'already attempted auto-repair' : 'no magnet available in library for repair'}, skipping`);
         return;
       }
-      if (probe.incomplete) {
-        console.log(`[Library] "${item.name}" probe failed: ${probe.reason} — no magnet/infoHash available for repair, skipping`);
-      } else {
-        console.log(`[Library] "${item.name}" probe failed (${probe.reason}) — skipping background conversion`);
-      }
+      console.log(`[Library] "${item.name}" probe failed (${probe.reason}) — skipping background conversion`);
       return;
+    }
+
+    // Probe succeeded — if the item was previously marked incomplete, clear
+    // the flag so the UI stops showing the broken-state badge.
+    if (item.incompleteOnDisk) {
+      item.incompleteOnDisk  = false;
+      item.completenessRatio = 1;
+      this._saveMetadata();
     }
 
     const kind = this._classifyConversionKind(probe);
@@ -6451,6 +6581,12 @@ class LibraryManager {
       item.convertError = null;
       item.originalFilePath = null;
       item.conversionCheckedAt = Date.now();
+      // A successful conversion means fresh bytes just landed on disk —
+      // clear any stale "incomplete on disk" flag so the UI stops showing
+      // the broken-state badge.
+      item.incompleteOnDisk = false;
+      item.completenessRatio = 1;
+      item._autoRepairAttempted = false;
       delete item._probeDuration;
 
       if (isRemote) this._convertStats.successRemote++;
@@ -6875,13 +7011,18 @@ class LibraryManager {
       convertKind: item.convertKind || null,
       convertProgress: item.convertProgress || null,
       convertError: item.convertError || null,
-      // canRepair gates the "Repair" UI button. Only items whose torrent
-      // metadata is still on file can be refetched (imported/discovered
-      // files don't have a magnet, so we couldn't re-download their pieces
-      // even if we wanted to). We also hide the button while the torrent
-      // is already downloading — the user can't "repair" something that's
-      // actively being fetched.
-      canRepair: !!(item.magnetUri && item.infoHash && item.status !== 'downloading'),
+      // canRepair gates the "Repair" UI button. True when either:
+      //   - the item has its own magnet + infoHash, OR
+      //   - a sibling in the same pack / top-level directory still does
+      //     (we inherit it at repair time via _findRecoveryMagnet).
+      // Hidden while the item is already downloading — the user can't
+      // "repair" something that's actively being fetched.
+      canRepair: item.status !== 'downloading' && !!this._findRecoveryMagnet(item),
+      // Broken-state flag + ratio, set by the probe sweep when stat.blocks
+      // says < 90% of the file is actually on disk. Used by the UI to show
+      // an "Incomplete" badge so the user knows what to act on.
+      incompleteOnDisk:   !!item.incompleteOnDisk,
+      completenessRatio:  typeof item.completenessRatio === 'number' ? item.completenessRatio : null,
       packId: item.packId || null,
       showName: item.showName || null,
       matchState,

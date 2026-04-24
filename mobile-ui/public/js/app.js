@@ -5564,8 +5564,65 @@
       }
 
       renderSourceStats(items);
+      renderSystemStatus();
     } catch {
       panel.innerHTML = '<div class="downloads-empty"><span class="setting-hint">Could not load downloads</span></div>';
+    }
+  }
+
+  // CPU / GPU / Streams indicator bar rendered at the top of the Downloads
+  // section. Pulls a lightweight snapshot from /api/status. Failures are
+  // silent — the indicator just clears itself so the rest of the Downloads
+  // panel stays usable.
+  async function renderSystemStatus() {
+    const bar = $('#system-status-bar');
+    if (!bar) return;
+    try {
+      const resp = await fetch('/api/status');
+      if (!resp.ok) throw new Error('status');
+      const s = await resp.json();
+      const cpuPct = s.cpu?.usagePct ?? 0;
+      // Warn-then-alert color steps so a loaded box is visible at a glance.
+      const cpuCls = cpuPct >= 90 ? 'alert' : cpuPct >= 70 ? 'warn' : '';
+
+      let gpuLabel, gpuCls, gpuTitle;
+      if (!s.gpu || !s.gpu.enabled) {
+        gpuLabel = 'Off'; gpuCls = 'off';
+        gpuTitle = 'GPU worker not configured (WORKER_URL unset) — conversions run on CPU';
+      } else if (!s.gpu.online) {
+        gpuLabel = 'Offline'; gpuCls = 'alert';
+        gpuTitle = 'GPU worker configured but unreachable — falling back to CPU';
+      } else {
+        gpuLabel = 'Online'; gpuCls = 'ok';
+        gpuTitle = `GPU worker online${s.gpu.gpu ? ` · ${s.gpu.gpu}` : ''}${s.gpu.encoder ? ` · ${s.gpu.encoder}` : ''}`;
+      }
+
+      const streams = s.streams?.active ?? 0;
+      const convLocal = s.conversion?.activeLocal ?? 0;
+      const convRemote = s.conversion?.activeRemote ?? 0;
+      const convActive = convLocal + convRemote;
+
+      bar.innerHTML = `
+        <div class="status-pill ${cpuCls}" title="CPU usage across ${s.cpu?.cores || 0} cores">
+          <span class="status-pill-label">CPU</span>
+          <span class="status-pill-value">${cpuPct}%</span>
+        </div>
+        <div class="status-pill ${gpuCls}" title="${escapeHTML(gpuTitle)}">
+          <span class="status-pill-label">GPU</span>
+          <span class="status-pill-value">${gpuLabel}</span>
+        </div>
+        <div class="status-pill ${streams > 0 ? 'ok' : ''}" title="Active HLS playback sessions">
+          <span class="status-pill-label">Streams</span>
+          <span class="status-pill-value">${streams}</span>
+        </div>
+        ${convActive > 0 ? `
+        <div class="status-pill warn" title="Transcodes running (local + remote)">
+          <span class="status-pill-label">Convert</span>
+          <span class="status-pill-value">${convActive}</span>
+        </div>` : ''}
+      `;
+    } catch {
+      bar.innerHTML = '';
     }
   }
 

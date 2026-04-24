@@ -3772,6 +3772,46 @@ select.manual-import-input {
   background: var(--warning, #f59e0b);
 }
 
+.system-status-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.system-status-bar:empty {
+  display: none;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.08);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.status-pill-label {
+  color: var(--text-muted, rgba(255,255,255,0.55));
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.status-pill-value {
+  color: var(--text, #fff);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.status-pill.ok .status-pill-value { color: var(--success, #10b981); }
+.status-pill.warn .status-pill-value { color: var(--warning, #f59e0b); }
+.status-pill.alert .status-pill-value { color: var(--danger, #ef4444); }
+.status-pill.off .status-pill-value { color: var(--text-muted, rgba(255,255,255,0.55)); }
+
 .download-actions {
   display: flex;
   flex-direction: column;

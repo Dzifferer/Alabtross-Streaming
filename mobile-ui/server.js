@@ -4898,6 +4898,42 @@ app.get('/api/stats', (req, res) => {
   });
 });
 
+// Lightweight system-status snapshot for the Downloads page indicator bar.
+// Unlike /api/diagnostics/system (which samples CPU over ~1 s and walks every
+// interface), this returns just what the status pills need: CPU %, GPU worker
+// state, and counts of active streams / conversions.
+//
+// Uses a short 200 ms CPU sample so polling every few seconds doesn't starve
+// the event loop but still produces a responsive number.
+app.get('/api/status', async (req, res) => {
+  try {
+    const sys = await getSystemDiag(200);
+    const conversion = library.getConversionStats();
+    res.json({
+      ok: true,
+      cpu: {
+        usagePct: sys.cpu.usagePct,
+        cores: sys.cpu.cores,
+        loadAvg: sys.cpu.loadAvg,
+      },
+      memory: {
+        usedPct: sys.memory.usedPct,
+      },
+      gpu: library.getWorkerStatus(),
+      streams: {
+        active: hlsSessions.size,
+      },
+      conversion: {
+        activeLocal: conversion.active.local,
+        activeRemote: conversion.active.remote,
+        pending: conversion.pending,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // SPA fallback
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));

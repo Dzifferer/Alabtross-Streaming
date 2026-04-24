@@ -3422,6 +3422,28 @@ class LibraryManager {
     };
   }
 
+  /**
+   * Serializable snapshot of the GPU-worker state for the status endpoint.
+   * Returns:
+   *   - { enabled: false }                          — no WORKER_URL configured
+   *   - { enabled: true, online: false }            — configured but health probe failed
+   *   - { enabled: true, online: true, encoder, gpu, preset } — reachable
+   */
+  getWorkerStatus() {
+    if (!this._workerClient || !this._workerClient.enabled()) {
+      return { enabled: false };
+    }
+    const h = this._workerHealth;
+    if (!h) return { enabled: true, online: false };
+    return {
+      enabled: true,
+      online: true,
+      encoder: h.encoder || null,
+      gpu: h.gpu || null,
+      preset: h.preset || null,
+    };
+  }
+
   destroy() {
     console.log('[Library] Shutting down — saving download state for resumption...');
     if (this._metadataSaveTimer) {

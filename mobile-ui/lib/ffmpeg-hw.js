@@ -12,24 +12,29 @@
  *
  * Two environment variables drive the behavior:
  *
- *   FFMPEG_HWACCEL   — '' (default), 'cuda' / 'nvdec', or 'v4l2m2m'
- *                      Enables GPU decode. On Jetson Orin Nano this alone
- *                      is the big win because the SoC has NVDEC but no
- *                      NVENC; decode is the most expensive part of an
- *                      HEVC → H.264 pipeline so moving it to the GPU frees
- *                      a significant chunk of CPU for libx264 to use.
+ *   FFMPEG_HWACCEL   — '' (default), 'nvmpi', 'cuda' / 'nvdec', or 'v4l2m2m'
+ *                      '' — CPU everything (libx264 decode + encode).
+ *                      'nvmpi' — Jetson L4T Multimedia API hardware decode
+ *                        (via libnvmpi + libnvv4l2). Needed on Orin Nano
+ *                        because JetPack 6 on that SoC doesn't ship
+ *                        libnvcuvid.so, so cuvid is a dead end.
+ *                      'cuda' / 'nvdec' — classic NVDEC via libnvcuvid.
+ *                        Works on desktop NVIDIA cards and Orin NX / AGX.
  *
  *   FFMPEG_ENCODER   — '' (default = libx264), or 'h264_nvenc'
  *                      Opt-in GPU encode. Orin Nano has no NVENC hardware,
  *                      so leave unset there. Orin NX / AGX Orin / any
- *                      desktop NVIDIA card: set to 'h264_nvenc' and the
- *                      whole pipeline stays on the GPU, no hwdownload copy.
+ *                      desktop NVIDIA card: set to 'h264_nvenc'. NVENC is
+ *                      only compatible with the 'cuda' decode path because
+ *                      scale_cuda keeps frames on the GPU; nvmpi frames
+ *                      come back to system memory after decode, so pairing
+ *                      nvmpi with nvenc doesn't give a zero-copy pipeline
+ *                      and usually isn't worth it vs libx264.
  *
  * Defaults are conservative on purpose — unset both and you get byte-for-byte
  * the same libx264 pipeline the code ran before this module existed, which
- * matters because a stock Alpine ffmpeg build has none of the CUDA codecs
- * compiled in and would hard-fail every transcode if we flipped these on by
- * default.
+ * matters because a stock ffmpeg build without the Jetson patch / cuvid
+ * support would hard-fail every transcode if we flipped these on by default.
  */
 
 const FFMPEG_HWACCEL = (process.env.FFMPEG_HWACCEL || '').trim().toLowerCase();
@@ -49,12 +54,35 @@ const CUVID_DECODERS = {
   vc1:        'vc1_cuvid',
 };
 
+// ffprobe-reported codec names → the matching NVMPI decoder (from Keylost's
+// jetson-ffmpeg patch). Orin Nano's NVDEC block supports H.264, HEVC, VP8,
+// VP9, MPEG-2, MPEG-4 and VC-1 via the L4T Multimedia API; AV1 is NOT
+// supported on Ampere NVDEC (Orin is Ampere-based), so av1 falls through to
+// software decode. Any codec not in this map also falls through.
+const NVMPI_DECODERS = {
+  h264:       'h264_nvmpi',
+  hevc:       'hevc_nvmpi',
+  h265:       'hevc_nvmpi',
+  vp8:        'vp8_nvmpi',
+  vp9:        'vp9_nvmpi',
+  mpeg2video: 'mpeg2_nvmpi',
+  mpeg4:      'mpeg4_nvmpi',
+};
+
+function _isNvmpi() {
+  return FFMPEG_HWACCEL === 'nvmpi';
+}
+
 function _isCudaLike() {
   return FFMPEG_HWACCEL === 'cuda' || FFMPEG_HWACCEL === 'nvdec';
 }
 
 function _useNvenc() {
-  return FFMPEG_ENCODER === 'h264_nvenc' || FFMPEG_ENCODER === 'nvenc';
+  // NVENC only makes sense paired with the CUDA decode path (zero-copy via
+  // scale_cuda). With nvmpi, frames are already on the CPU after decode, so
+  // we stay on libx264 regardless of the encoder request.
+  return (FFMPEG_ENCODER === 'h264_nvenc' || FFMPEG_ENCODER === 'nvenc')
+    && _isCudaLike();
 }
 
 function _cuvidFor(sourceCodec) {
@@ -62,41 +90,63 @@ function _cuvidFor(sourceCodec) {
   return CUVID_DECODERS[String(sourceCodec).toLowerCase()] || null;
 }
 
+function _nvmpiFor(sourceCodec) {
+  if (!sourceCodec || !_isNvmpi()) return null;
+  return NVMPI_DECODERS[String(sourceCodec).toLowerCase()] || null;
+}
+
 /**
  * Decode/input args. Returns the list that goes BEFORE `-i <path>`.
  *
- * With a known CUVID-supported codec we pin the decoder explicitly and keep
- * frames in CUDA memory (-hwaccel_output_format=cuda), which is required for
- * scale_cuda downstream. Without a codec hint we fall back to `-hwaccel X`
- * alone — ffmpeg picks the decoder and downloads to system memory, so the
- * filter graph stays on the CPU side. That's still a win (decode is off-CPU)
- * and it keeps us robust against source codecs NVDEC doesn't handle.
+ * The three modes produce very different prefixes:
+ *   nvmpi — just `-c:v hevc_nvmpi` (no -hwaccel flag). libnvmpi talks to the
+ *     L4T Multimedia API directly; frames are delivered to ffmpeg's filter
+ *     chain in system memory as if decoded by libavcodec.
+ *   cuda + known cuvid codec — pin the decoder and keep frames in CUDA
+ *     memory (-hwaccel_output_format=cuda), which is required for scale_cuda
+ *     downstream. Desktop NVIDIA / Orin NX / AGX only.
+ *   cuda + unknown codec — `-hwaccel X` alone so ffmpeg picks the decoder
+ *     and downloads to system memory. Still a win vs libx264 decode.
+ *
+ * With the codec hint missing and nvmpi selected, we fall through to
+ * software decode rather than blindly guessing, because nvmpi is strictly
+ * per-codec (no generic "-hwaccel nvmpi" flag exists in the patch).
  */
 function buildDecodeArgs(sourceCodec) {
   if (!FFMPEG_HWACCEL) return [];
-  const cuvid = _cuvidFor(sourceCodec);
-  if (cuvid) {
-    return ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda', '-c:v', cuvid];
+
+  if (_isNvmpi()) {
+    const nvmpi = _nvmpiFor(sourceCodec);
+    return nvmpi ? ['-c:v', nvmpi] : [];
   }
+
+  if (_isCudaLike()) {
+    const cuvid = _cuvidFor(sourceCodec);
+    if (cuvid) {
+      return ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda', '-c:v', cuvid];
+    }
+    return ['-hwaccel', FFMPEG_HWACCEL];
+  }
+
+  // v4l2m2m / future modes — pass through and let ffmpeg interpret.
   return ['-hwaccel', FFMPEG_HWACCEL];
 }
 
 /**
- * Scale-to-max-width filter string. Picks scale_cuda when the decoder kept
- * frames on the GPU, and tacks on hwdownload when the encoder is a CPU one
- * so libx264 gets system-memory yuv420p frames as it expects.
+ * Scale-to-max-width filter string. Picks scale_cuda only when the CUDA
+ * decoder kept frames on the GPU and tacks on hwdownload when the encoder
+ * is a CPU one; otherwise returns a plain CPU scale.
  *
- * The output pixel format is chosen to match the encoder's native input:
- * NVENC wants nv12, libx264 wants yuv420p. Getting this wrong triggers an
- * extra auto-inserted format conversion inside ffmpeg that blows the CUDA
- * pipeline back onto the CPU silently.
+ * nvmpi frames are already in system memory after decode, so nvmpi+libx264
+ * uses the CPU scale path exactly like no-hwaccel does. That's not as good
+ * as a fully-GPU pipeline but the decode win is still large — and on Orin
+ * Nano it's the only hardware decode path that works at all.
  */
 function buildScaleFilter(maxWidth, sourceCodec) {
   const cuvid = _cuvidFor(sourceCodec);
   if (cuvid) {
     const pixfmt = _useNvenc() ? 'nv12' : 'yuv420p';
     const gpuScale = `scale_cuda=w='min(${maxWidth},iw)':h=-2:format=${pixfmt}`;
-    // NVENC consumes CUDA frames directly; libx264 needs them on the CPU.
     return _useNvenc() ? gpuScale : `${gpuScale},hwdownload,format=${pixfmt}`;
   }
   return `scale='min(${maxWidth},iw)':'-2'`;
@@ -175,9 +225,10 @@ function buildArchivalEncoderArgs() {
  * One-line summary of the effective mode, for a startup log line.
  */
 function describeMode() {
-  const decode = FFMPEG_HWACCEL
-    ? `${FFMPEG_HWACCEL.toUpperCase()} decode`
-    : 'CPU decode';
+  let decode;
+  if (_isNvmpi()) decode = 'NVMPI decode (Jetson L4T)';
+  else if (FFMPEG_HWACCEL) decode = `${FFMPEG_HWACCEL.toUpperCase()} decode`;
+  else decode = 'CPU decode';
   const encode = _useNvenc() ? 'NVENC encode' : 'libx264 encode';
   return `${decode} + ${encode}`;
 }

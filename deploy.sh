@@ -57,20 +57,60 @@ NVIDIA_RUNTIME_ARGS=()
 FFMPEG_HWACCEL_DEFAULT=""
 if sudo docker info 2>/dev/null | grep -qi 'Runtimes:.*nvidia'; then
   NVIDIA_RUNTIME_ARGS=(--runtime=nvidia)
-  FFMPEG_HWACCEL_DEFAULT="cuda"
-  # Jetson's libnvcuvid.so / libnvidia-encode.so live in /usr/lib/aarch64-linux-gnu/tegra
-  # on the host. The NVIDIA container runtime is supposed to bind-mount them via the
-  # CSV files in /etc/nvidia-container-runtime/host-files-for-container.d/, but the CSV
-  # mode isn't always wired up after `nvidia-ctk runtime configure` alone — so we also
-  # pass the tegra dir through explicitly. Harmless if the runtime already mounted it.
-  if [[ -d /usr/lib/aarch64-linux-gnu/tegra ]]; then
-    NVIDIA_RUNTIME_ARGS+=(-v /usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu/tegra:ro)
+
+  # Jetson's NVIDIA userspace libs live in three well-known host directories:
+  #   /usr/lib/aarch64-linux-gnu/tegra       — libnvbuf_utils, libnvjpeg, ...
+  #   /usr/lib/aarch64-linux-gnu/tegra-egl   — EGL shims used by NVENC
+  #   /usr/lib/aarch64-linux-gnu/nvidia      — libnvv4l2 (the Jetson multimedia
+  #                                            library libnvmpi dlopens for
+  #                                            NVDEC decode on Orin Nano)
+  # The NVIDIA container runtime is supposed to bind-mount these via the CSV
+  # files in /etc/nvidia-container-runtime/host-files-for-container.d/, but
+  # the CSV mode isn't always wired up after `nvidia-ctk runtime configure`
+  # alone — so we pass them through explicitly. Harmless if already mounted.
+  for d in /usr/lib/aarch64-linux-gnu/tegra \
+           /usr/lib/aarch64-linux-gnu/tegra-egl \
+           /usr/lib/aarch64-linux-gnu/nvidia; do
+    if [[ -d "$d" ]]; then
+      NVIDIA_RUNTIME_ARGS+=(-v "$d:$d:ro")
+    fi
+  done
+
+  # Pick the decode backend by probing host libs, priority nvmpi > cuda > CPU.
+  #
+  # nvmpi uses NVIDIA's L4T Multimedia API (libnvv4l2) and works on every
+  # Orin generation. cuvid uses libnvcuvid.so, which is shipped on desktop
+  # NVIDIA and Orin NX / AGX but NOT on Orin Nano (JetPack 6 ships only
+  # libnvcuvidv4l2.so there). So for the common "container image that may
+  # run on either the Nano OR a desktop NVIDIA box" case we prefer nvmpi
+  # when its backing lib is present, fall through to cuda when only cuvid
+  # is, and land on CPU libx264 when neither is.
+  NVMPI_HOST_LIB=""
+  for p in /usr/lib/aarch64-linux-gnu/nvidia/libnvv4l2.so* \
+           /usr/lib/aarch64-linux-gnu/tegra/libnvv4l2.so* ; do
+    if compgen -G "$p" >/dev/null 2>&1; then NVMPI_HOST_LIB="$p"; break; fi
+  done
+  CUVID_HOST_LIB=""
+  for p in /usr/lib/aarch64-linux-gnu/tegra/libnvcuvid.so* \
+           /usr/lib/aarch64-linux-gnu/nvidia/libnvcuvid.so* \
+           /usr/local/cuda/targets/aarch64-linux/lib/libnvcuvid.so* \
+           /usr/lib/x86_64-linux-gnu/libnvcuvid.so* ; do
+    if compgen -G "$p" >/dev/null 2>&1; then CUVID_HOST_LIB="$p"; break; fi
+  done
+
+  if [[ -n "$NVMPI_HOST_LIB" ]]; then
+    FFMPEG_HWACCEL_DEFAULT="nvmpi"
+    echo "==> Jetson L4T multimedia libs detected — NVMPI hardware decode enabled"
+    echo "         (libnvv4l2 at $NVMPI_HOST_LIB)"
+  elif [[ -n "$CUVID_HOST_LIB" ]]; then
+    FFMPEG_HWACCEL_DEFAULT="cuda"
+    echo "==> libnvcuvid detected — CUDA/NVDEC hardware decode enabled"
+    echo "         ($CUVID_HOST_LIB)"
+  else
+    FFMPEG_HWACCEL_DEFAULT=""
+    echo "==> NVIDIA container runtime detected, but no hardware-decode library found"
+    echo "         (neither libnvv4l2 nor libnvcuvid) — falling back to libx264 CPU."
   fi
-  # On some JetPack installs there's also a tegra-egl dir used by NVENC via GL surfaces.
-  if [[ -d /usr/lib/aarch64-linux-gnu/tegra-egl ]]; then
-    NVIDIA_RUNTIME_ARGS+=(-v /usr/lib/aarch64-linux-gnu/tegra-egl:/usr/lib/aarch64-linux-gnu/tegra-egl:ro)
-  fi
-  echo "==> NVIDIA container runtime detected — GPU decode (and NVENC when available) enabled"
 else
   echo "==> WARN: NVIDIA container runtime NOT configured on this Docker daemon"
   echo "         — transcodes will run on CPU (libx264). Run jetson_setup.sh to enable."
@@ -82,14 +122,17 @@ echo "==> Starting container (bind IP: $BIND_IP)..."
 # rely on the Jetson's own NVDEC (and NVENC on Orin NX / AGX) to carry as
 # much of the pipeline as the SoC supports. See mobile-ui/lib/ffmpeg-hw.js.
 #
-# FFMPEG_HWACCEL=cuda wires the Jetson's NVDEC + scale_cuda into every
-# ffmpeg call. Defaults to 'cuda' when the NVIDIA runtime is present, empty
-# otherwise.
+# FFMPEG_HWACCEL picks the decode backend:
+#   nvmpi — Jetson L4T Multimedia API (works on every Orin, including Nano)
+#   cuda  — classic NVDEC via libnvcuvid (desktop NVIDIA / Orin NX / AGX)
+#   ''    — pure libx264 CPU pipeline (fallback)
+# Auto-detected above by probing for the backing host libs; override with
+# FFMPEG_HWACCEL=<mode> in .env if you want a specific one.
 #
 # FFMPEG_ENCODER defaults to empty (= libx264 CPU encode) because the Orin
 # Nano has no NVENC hardware. On an Orin NX / AGX Orin (or when you migrate
 # to one), set FFMPEG_ENCODER=h264_nvenc in .env to move the encode side
-# onto the GPU too.
+# onto the GPU too. Only compatible with FFMPEG_HWACCEL=cuda.
 sudo docker run -d \
   --name alabtross-mobile \
   "${NVIDIA_RUNTIME_ARGS[@]}" \

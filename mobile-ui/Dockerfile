@@ -1,66 +1,114 @@
 # syntax=docker/dockerfile:1.6
 #
-# Jetson-aware build. The image is split into a "ffmpeg-build" stage that
-# compiles ffmpeg against the JetPack CUDA / NVDEC / NVENC headers, and a
-# runtime stage that just copies the resulting binaries onto a slim L4T
-# base. End result: /usr/local/bin/ffmpeg knows about h264_cuvid /
-# hevc_cuvid / scale_cuda / h264_nvenc, which is what lib/ffmpeg-hw.js
-# needs when FFMPEG_HWACCEL=cuda (and optionally FFMPEG_ENCODER=h264_nvenc).
+# Jetson-aware build.
 #
-# The first build on an Orin Nano takes ~15-20 min for the ffmpeg compile.
-# Subsequent rebuilds hit the Docker layer cache and finish in seconds
-# unless FFMPEG_VERSION / L4T_TAG actually change.
+# Multi-stage: compile libnvmpi against JetPack's L4T Multimedia API,
+# apply Keylost's nvmpi patch to ffmpeg so it picks up h264_nvmpi /
+# hevc_nvmpi / etc., then copy the resulting binaries onto a slim L4T
+# runtime. End result: /usr/local/bin/ffmpeg talks to NVDEC on the SoC
+# via libnvmpi → libnvv4l2 → kernel driver, and also keeps cuvid /
+# scale_cuda / h264_nvenc available for desktop NVIDIA hosts and Orin
+# NX / AGX Orin. lib/ffmpeg-hw.js picks the right path at runtime based
+# on FFMPEG_HWACCEL.
+#
+# Why NVMPI instead of CUVID on Orin Nano: JetPack 6 on Orin Nano ships
+# libnvv4l2.so (NVIDIA's V4L2 wrapper around the multimedia API) but
+# NOT libnvcuvid.so. ffmpeg's cuvid decoders dlopen libnvcuvid.so.1
+# and hard-fail with "Cannot load libnvcuvid.so.1" when it's absent.
+# libnvmpi wraps the same hardware NVDEC block through the L4T API
+# instead, so we get hardware decode on the Nano where cuvid can't.
+#
+# First build on Orin Nano: ~20-25 min (libnvmpi + ffmpeg compile).
+# Subsequent rebuilds hit Docker layer cache and finish in seconds
+# unless FFMPEG_VERSION / L4T_TAG change.
 #
 # Override knobs (all optional):
-#   --build-arg L4T_TAG=r35.4.1          # JetPack 5.x host (default is 6.2 = r36.4.0)
-#   --build-arg FFMPEG_VERSION=n6.1.1    # pin a different ffmpeg tag
+#   --build-arg L4T_TAG=r35.4.1                # JetPack 5.x host
+#   --build-arg FFMPEG_VERSION=n6.1.1          # pin a different ffmpeg tag
+#   --build-arg FFMPEG_PATCH_PATH=ffmpeg_patches/ffmpeg6.1_nvmpi.patch
+#   --build-arg JETSON_FFMPEG_REPO=https://github.com/Keylost/jetson-ffmpeg.git
+#   --build-arg JETSON_FFMPEG_REF=master
 #   --build-arg NV_CODEC_HEADERS_TAG=n12.1.14.0
 
 ARG L4T_TAG=r36.4.0
 ARG FFMPEG_VERSION=n6.1.1
+ARG FFMPEG_PATCH_PATH=ffmpeg_patches/ffmpeg6.1_nvmpi.patch
+ARG JETSON_FFMPEG_REPO=https://github.com/Keylost/jetson-ffmpeg.git
+ARG JETSON_FFMPEG_REF=master
 ARG NV_CODEC_HEADERS_TAG=n12.1.14.0
 
 # ──────────────────────────────────────────────────────────────────────────
-# Stage 1 — compile ffmpeg with CUDA / CUVID / NVENC
+# Stage 1 — build libnvmpi + patched ffmpeg
 # ──────────────────────────────────────────────────────────────────────────
 FROM nvcr.io/nvidia/l4t-jetpack:${L4T_TAG} AS ffmpeg-build
 
 ARG FFMPEG_VERSION
+ARG FFMPEG_PATCH_PATH
+ARG JETSON_FFMPEG_REPO
+ARG JETSON_FFMPEG_REF
 ARG NV_CODEC_HEADERS_TAG
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential ca-certificates git pkg-config yasm nasm \
+      build-essential ca-certificates git pkg-config yasm nasm cmake \
       libx264-dev libx265-dev libvpx-dev libopus-dev libmp3lame-dev \
-      libass-dev libfreetype6-dev libnuma-dev zlib1g-dev \
+      libass-dev libfreetype6-dev libnuma-dev zlib1g-dev libv4l-dev \
  && rm -rf /var/lib/apt/lists/*
 
-# ffmpeg's nvenc / cuvid / npp support is gated on NVIDIA's header shim —
-# these headers describe the driver ABI without requiring the closed-source
-# driver at build time.
+# 1) nv-codec-headers — ffmpeg's configure needs these to accept
+#    --enable-cuvid / --enable-nvenc. They're harmless on Orin Nano at
+#    runtime (cuvid just won't load), and essential for desktop NVIDIA.
 RUN git clone --depth 1 --branch ${NV_CODEC_HEADERS_TAG} \
       https://git.videolan.org/git/ffmpeg/nv-codec-headers.git /src/nv-codec-headers \
  && make -C /src/nv-codec-headers install PREFIX=/usr/local
 
+# 2) libnvmpi + ffmpeg patch from a maintained Jetson fork. libnvmpi is
+#    a small C wrapper around the L4T Multimedia API (NvVideoDecoder,
+#    NvBuffer, ...) that exposes the same hardware NVDEC block cuvid
+#    would use on desktop NVIDIA. Installs as /usr/local/lib/libnvmpi.so.
+RUN git clone ${JETSON_FFMPEG_REPO} /src/jetson-ffmpeg \
+ && git -C /src/jetson-ffmpeg checkout ${JETSON_FFMPEG_REF} \
+ && cmake -S /src/jetson-ffmpeg -B /src/jetson-ffmpeg/build \
+ && cmake --build /src/jetson-ffmpeg/build -j"$(nproc)" \
+ && cmake --install /src/jetson-ffmpeg/build \
+ && ldconfig
+
+# 3) ffmpeg source — clone upstream at the pinned tag.
 RUN git clone --depth 1 --branch ${FFMPEG_VERSION} \
       https://git.ffmpeg.org/ffmpeg.git /src/ffmpeg
 
+# 4) Apply Keylost's nvmpi patch. Fails fast with a directory listing if
+#    the patch file isn't where FFMPEG_PATCH_PATH points — makes it easy
+#    to pick the right file name when bumping ffmpeg versions.
 WORKDIR /src/ffmpeg
+RUN if [ ! -f "/src/jetson-ffmpeg/${FFMPEG_PATCH_PATH}" ]; then \
+      echo "==> patch not found at /src/jetson-ffmpeg/${FFMPEG_PATCH_PATH}"; \
+      echo "==> available patches in fork:"; \
+      find /src/jetson-ffmpeg -name '*.patch' -type f | sort; \
+      exit 1; \
+    fi \
+ && echo "==> applying /src/jetson-ffmpeg/${FFMPEG_PATCH_PATH}" \
+ && git apply --whitespace=nowarn "/src/jetson-ffmpeg/${FFMPEG_PATCH_PATH}"
+
+# 5) Configure + build ffmpeg. --enable-nvmpi is added by Keylost's patch.
+#    The cuvid / nvenc flags stay enabled so desktop NVIDIA hosts and
+#    future Orin NX / AGX deploys of the same image get GPU encode too.
 RUN PATH="/usr/local/cuda/bin:${PATH}" ./configure \
       --prefix=/opt/ffmpeg \
       --extra-cflags="-I/usr/local/cuda/include -I/usr/local/include" \
       --extra-ldflags="-L/usr/local/cuda/lib64 -L/usr/local/lib" \
-      --extra-libs="-lpthread -lm" \
+      --extra-libs="-lpthread -lm -lnvmpi" \
       --enable-gpl --enable-nonfree --enable-version3 \
       --enable-libx264 --enable-libx265 --enable-libvpx \
       --enable-libopus --enable-libmp3lame --enable-libass --enable-libfreetype \
+      --enable-nvmpi \
       --enable-cuda-nvcc --enable-cuvid --enable-nvenc --enable-libnpp \
       --disable-debug --disable-doc --disable-ffplay \
  && make -j"$(nproc)" \
  && make install
 
 # ──────────────────────────────────────────────────────────────────────────
-# Stage 2 — runtime image: L4T base + Node 20 + the compiled ffmpeg
+# Stage 2 — runtime: L4T base + Node 20 + compiled ffmpeg + libnvmpi
 # ──────────────────────────────────────────────────────────────────────────
 FROM nvcr.io/nvidia/l4t-jetpack:${L4T_TAG}
 
@@ -68,24 +116,29 @@ ENV DEBIAN_FRONTEND=noninteractive \
     NODE_ENV=production \
     NVIDIA_DRIVER_CAPABILITIES=compute,video,utility \
     NVIDIA_VISIBLE_DEVICES=all \
-    LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/tegra:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
+    LD_LIBRARY_PATH=/usr/local/lib:/usr/lib/aarch64-linux-gnu/tegra:/usr/lib/aarch64-linux-gnu/nvidia:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 
-# Runtime shared libs that ffmpeg links to, plus Node.js 20 (from NodeSource
-# — the distro package on Ubuntu 20.04/22.04 is too old for modern Express)
-# and Python 3 + yt-dlp for the Music tab's YouTube fallback source.
-# curl is needed by the NodeSource installer; ca-certificates by npm.
+# Runtime shared libs ffmpeg links against, plus Node.js 20 (from NodeSource
+# — the distro package on Ubuntu 22.04 is too old for modern Express) and
+# yt-dlp for the Music tab's YouTube fallback source.
+# libv4l-0 is required by libnvmpi at runtime.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl python3 python3-pip \
       libx264-163 libx265-199 libvpx7 libopus0 libmp3lame0 \
-      libass9 libfreetype6 libnuma1 \
+      libass9 libfreetype6 libnuma1 libv4l-0 \
  && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && (python3 -m pip install --no-cache-dir yt-dlp \
      || python3 -m pip install --no-cache-dir --break-system-packages yt-dlp) \
  && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-COPY --from=ffmpeg-build /opt/ffmpeg/bin/ffmpeg  /usr/local/bin/ffmpeg
-COPY --from=ffmpeg-build /opt/ffmpeg/bin/ffprobe /usr/local/bin/ffprobe
+# Compiled ffmpeg + the libnvmpi shim it loads at runtime. libnvmpi in turn
+# dlopens libnvv4l2 / libnvbuf_utils from the host (bind-mounted by
+# deploy.sh), which talk to the NVDEC kernel driver through /dev/nvhost-*.
+COPY --from=ffmpeg-build /opt/ffmpeg/bin/ffmpeg    /usr/local/bin/ffmpeg
+COPY --from=ffmpeg-build /opt/ffmpeg/bin/ffprobe   /usr/local/bin/ffprobe
+COPY --from=ffmpeg-build /usr/local/lib/libnvmpi.* /usr/local/lib/
+RUN ldconfig
 
 WORKDIR /app
 

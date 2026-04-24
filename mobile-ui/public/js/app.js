@@ -3184,15 +3184,42 @@
     }
   }
 
-  // In-memory cache of /api/collections/enrich results. Keyed by the
-  // sorted IMDb id set so a stable library hits the same entry across
-  // tab switches; 5-min expiry so new/removed items re-fetch fresh
-  // grouping eventually. _collectionInflight dedupes parallel misses.
+  // Cache of /api/collections/enrich results. Keyed by the sorted IMDb
+  // id set so a stable library hits the same entry across tab switches
+  // and full page reloads. Groups rarely change, so we persist to
+  // localStorage with a long expiry — a changed library falls through
+  // to a fresh fetch because the cache key won't match.
+  // _collectionInflight dedupes parallel misses within one session.
+  const COLLECTION_CACHE_KEY = 'library_collections_v1';
+  const COLLECTION_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
   let _collectionCache = null;
+  let _collectionCacheHydrated = false;
   let _collectionInflight = false;
+
+  function hydrateCollectionCache() {
+    if (_collectionCacheHydrated) return;
+    _collectionCacheHydrated = true;
+    try {
+      const raw = localStorage.getItem(COLLECTION_CACHE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && parsed.key && parsed.data && parsed.expiresAt > Date.now()) {
+        _collectionCache = parsed;
+      } else if (parsed) {
+        localStorage.removeItem(COLLECTION_CACHE_KEY);
+      }
+    } catch { /* corrupt entry — ignore */ }
+  }
+
+  function persistCollectionCache(entry) {
+    try {
+      localStorage.setItem(COLLECTION_CACHE_KEY, JSON.stringify(entry));
+    } catch { /* quota or serialization — drop silently */ }
+  }
 
   async function loadLibrary() {
     hideLibraryGroupOverlay();
+    hydrateCollectionCache();
     dom.libraryContent.innerHTML = '';
     dom.libraryEmpty.classList.add('hidden');
 
@@ -3315,7 +3342,8 @@
             _collectionInflight = true;
             api.enrichWithCollections(movieImdbIds, movieNames)
               .then((data) => {
-                _collectionCache = { key: cacheKey, data, expiresAt: Date.now() + 5 * 60 * 1000 };
+                _collectionCache = { key: cacheKey, data, expiresAt: Date.now() + COLLECTION_CACHE_TTL_MS };
+                persistCollectionCache(_collectionCache);
                 // Re-render to pick up the grouping. The next call hits
                 // the cache branch above so it's cheap.
                 loadLibrary();

@@ -5644,14 +5644,6 @@
         <button class="download-action-btn cancel" data-pack-id="${escapeHTML(pack.packId)}" data-action="remove-pack" title="Remove All">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
         </button>`;
-    } else if (pack.status === 'converting') {
-      // Conversion runs on the server's CPU/GPU — pausing mid-transcode isn't
-      // exposed as a first-class action, so we only surface Remove-All (which
-      // clears the entry without killing the conversion pipeline).
-      actions = `
-        <button class="download-action-btn cancel" data-pack-id="${escapeHTML(pack.packId)}" data-action="remove-pack" title="Remove All">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
-        </button>`;
     } else if (pack.status === 'failed') {
       actions = `
         <button class="download-action-btn resume" data-pack-id="${escapeHTML(pack.packId)}" data-action="retry-pack" title="Retry All">
@@ -5800,13 +5792,6 @@
         <button class="download-action-btn resume" data-id="${escapeHTML(item.id)}" data-action="retry" title="Retry">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
         </button>
-        <button class="download-action-btn cancel" data-id="${escapeHTML(item.id)}" data-action="remove" title="Remove">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
-        </button>`;
-    } else if (item.status === 'converting') {
-      // Conversion pause/cancel aren't surfaced as first-class actions —
-      // only Remove (clears the entry but doesn't kill the transcode).
-      actions = `
         <button class="download-action-btn cancel" data-id="${escapeHTML(item.id)}" data-action="remove" title="Remove">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
         </button>`;

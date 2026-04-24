@@ -72,11 +72,24 @@ RUN git clone --depth 1 --branch ${NV_CODEC_HEADERS_TAG} \
 #    /usr/lib/aarch64-linux-gnu/{tegra,nvidia} dirs which aren't on the
 #    default linker path. Without CMAKE_LIBRARY_PATH the configure step
 #    fails with "LIB_NVBUFSURFACE NOTFOUND" and friends.
+#
+#    The diagnostic block dumps the relevant lib directories BEFORE cmake
+#    runs so any future "NOTFOUND" error shows exactly what was available
+#    to search — if a lib ships only as a versioned .so.N, find_library()
+#    misses it and we need to symlink the unversioned name back in.
 RUN git clone ${JETSON_FFMPEG_REPO} /src/jetson-ffmpeg \
  && git -C /src/jetson-ffmpeg checkout ${JETSON_FFMPEG_REF} \
+ && echo "=====  libs available at build time  =====" \
+ && (ls -la /usr/lib/aarch64-linux-gnu/libv4l2* 2>&1 || true) \
+ && echo "----- /usr/lib/aarch64-linux-gnu/nvidia/ -----" \
+ && (ls -la /usr/lib/aarch64-linux-gnu/nvidia/ 2>&1 | head -60 || true) \
+ && echo "----- /usr/lib/aarch64-linux-gnu/tegra/  -----" \
+ && (ls -la /usr/lib/aarch64-linux-gnu/tegra/ 2>&1 | head -60 || true) \
+ && echo "----- nvbufsurface / nvjpeg anywhere on /usr -----" \
+ && (find /usr -name 'libnvbufsurface*' -o -name 'libnvbufsurftransform*' -o -name 'libnvjpeg*' 2>/dev/null || true) \
+ && echo "==========================================" \
  && cmake -S /src/jetson-ffmpeg -B /src/jetson-ffmpeg/build \
       -DCMAKE_LIBRARY_PATH="/usr/lib/aarch64-linux-gnu/tegra;/usr/lib/aarch64-linux-gnu/nvidia" \
-      -DCMAKE_INCLUDE_PATH="/usr/src/jetson_multimedia_api/include" \
  && cmake --build /src/jetson-ffmpeg/build -j"$(nproc)" \
  && cmake --install /src/jetson-ffmpeg/build \
  && ldconfig

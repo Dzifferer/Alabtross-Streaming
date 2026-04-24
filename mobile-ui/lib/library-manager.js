@@ -213,6 +213,24 @@ class LibraryManager {
     this._maxConcurrentRemoteConversions = typeof opts.maxConcurrentRemoteConversions === 'number'
       ? Math.max(1, opts.maxConcurrentRemoteConversions)
       : 3;
+    // Task priority: which background work to give right-of-way when
+    // downloads and local conversions would contend for CPU. Read at each
+    // decision point, never cached, so setTaskPriority() takes effect on
+    // the next schedule without a restart.
+    //
+    //   'downloads-first'  (default) — starting a download pauses running
+    //     local conversions; new local conversions wait until downloads
+    //     idle. Matches the old behavior.
+    //   'conversions-first' — active local conversions block new downloads
+    //     from starting (they queue); conversions never get paused for a
+    //     download.
+    //   'both' — no mutual pausing; downloads and conversions run
+    //     concurrently. Good for the GPU-worker case or boxes with CPU
+    //     headroom.
+    //
+    // Remote (GPU) conversions never compete with Orin-side downloads and
+    // are unaffected by this setting.
+    this._taskPriority = opts.taskPriority || 'downloads-first';
     // Count of live transcode / HLS sessions currently running libx264
     // on the Orin CPU. Live playback is user-visible; background jobs are
     // not; so when this is >0 we defer starting new LOCAL transcodes to
@@ -3422,6 +3440,59 @@ class LibraryManager {
     };
   }
 
+  getTaskPriority() {
+    return this._taskPriority;
+  }
+
+  setTaskPriority(priority) {
+    const valid = ['downloads-first', 'conversions-first', 'both'];
+    if (!valid.includes(priority)) {
+      throw new Error(`invalid task priority: ${priority} (expected one of ${valid.join(', ')})`);
+    }
+    const prev = this._taskPriority;
+    this._taskPriority = priority;
+    if (prev !== priority) {
+      console.log(`[Library] Task priority changed: ${prev} → ${priority}`);
+      // Switching to 'both' or 'conversions-first' may unblock the
+      // conversion queue that was previously waiting on downloads.
+      if (priority !== 'downloads-first') this._processConversionQueue();
+    }
+    return this._taskPriority;
+  }
+
+  /**
+   * True when new downloads should wait for active conversions to finish.
+   * Only 'conversions-first' enforces this; the other modes never block a
+   * download on a conversion. Caller is responsible for queuing vs. failing.
+   */
+  _downloadsBlockedByConversions() {
+    if (this._taskPriority !== 'conversions-first') return false;
+    const { local, remote } = this._countActiveConversions();
+    return local + remote > 0;
+  }
+
+  /**
+   * Serializable snapshot of the GPU-worker state for the status endpoint.
+   * Returns:
+   *   - { enabled: false }                          — no WORKER_URL configured
+   *   - { enabled: true, online: false }            — configured but health probe failed
+   *   - { enabled: true, online: true, encoder, gpu, preset } — reachable
+   */
+  getWorkerStatus() {
+    if (!this._workerClient || !this._workerClient.enabled()) {
+      return { enabled: false };
+    }
+    const h = this._workerHealth;
+    if (!h) return { enabled: true, online: false };
+    return {
+      enabled: true,
+      online: true,
+      encoder: h.encoder || null,
+      gpu: h.gpu || null,
+      preset: h.preset || null,
+    };
+  }
+
   destroy() {
     console.log('[Library] Shutting down — saving download state for resumption...');
     if (this._metadataSaveTimer) {
@@ -3509,6 +3580,17 @@ class LibraryManager {
   _startDownload(id) {
     const item = this._items.get(id);
     if (!item) return;
+
+    // Task-priority gate: in 'conversions-first' mode, active conversions
+    // have right-of-way. Park this download as queued so the existing
+    // dequeue path picks it up once conversions finish (or the user flips
+    // the priority back). Returning here avoids spinning up the engine.
+    if (this._downloadsBlockedByConversions()) {
+      console.log(`[Library] Download queued (conversions-first): "${item.name}" — ${this._countActiveConversions().local + this._countActiveConversions().remote} conversion(s) active`);
+      item.status = 'queued';
+      item.error = null;
+      return;
+    }
 
     console.log(`[Library] Starting download: "${item.name}" (${item.infoHash.slice(0, 8)}...)`);
 
@@ -5759,6 +5841,10 @@ class LibraryManager {
     if (this._workerClient && this._workerClient.enabled() && this._workerHealth) {
       return true;
     }
+    // Task-priority override: only 'downloads-first' makes conversions
+    // yield to downloads. In 'conversions-first' and 'both' modes, local
+    // conversions start regardless of whether downloads are running.
+    if (this._taskPriority !== 'downloads-first') return true;
     return !this._hasActiveDownloads();
   }
 
@@ -6095,6 +6181,14 @@ class LibraryManager {
       // Check if there are pending conversions waiting for a slot
       this._processConversionQueue();
 
+      // 'conversions-first' mode parks new downloads as 'queued' while any
+      // conversion is running. Give the download queue a nudge now that this
+      // conversion finished so those items can start if the last slot
+      // cleared.
+      if (this._taskPriority === 'conversions-first') {
+        this._processQueue();
+      }
+
       // Stop periodic save if nothing active
       if (this._engines.size === 0 && this._convertProcesses.size === 0) {
         this._stopPeriodicSave();
@@ -6140,6 +6234,11 @@ class LibraryManager {
 
     this._saveMetadata();
     this._processConversionQueue();
+    // Same nudge as _onConversionSuccess: a queued download may have been
+    // parked behind this conversion.
+    if (this._taskPriority === 'conversions-first') {
+      this._processQueue();
+    }
 
     if (this._engines.size === 0 && this._convertProcesses.size === 0) {
       this._stopPeriodicSave();
@@ -6301,6 +6400,10 @@ class LibraryManager {
    */
   _pauseRunningConversionsForDownloads() {
     if (this._convertProcesses.size === 0) return;
+    // Only 'downloads-first' pauses running conversions when a download
+    // starts. 'conversions-first' and 'both' never kill a live transcode
+    // for a download.
+    if (this._taskPriority !== 'downloads-first') return;
     for (const [id, handle] of this._convertProcesses) {
       // Remote conversions run on the GPU worker, not on the Orin's CPU.
       // The only Orin-side cost is reading the source file off disk and

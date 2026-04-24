@@ -83,16 +83,21 @@ let MAX_CONCURRENT_STREAMS = parseInt(process.env.MAX_CONCURRENT_STREAMS, 10) ||
 const VALID_TASK_PRIORITIES = ['downloads-first', 'conversions-first', 'both'];
 let TASK_PRIORITY = 'downloads-first';
 
-// Hardware protection — pause conversions when host CPU pins. Defaults
-// are tuned for Jetson-class hardware: 90% pause / 70% resume gives
-// enough hysteresis that libx264's startup spike doesn't immediately
-// trigger a pause+requeue loop, while still catching sustained overload
-// before thermal throttling kicks in. Persisted across restarts so the
-// operator doesn't have to re-tune after every container rebuild.
+// Hardware protection — primary protection is a hard core cap on local
+// ffmpeg so it can't pin every core. CPU-% auto-pause is secondary
+// (sustained window + cooldown) because on Jetson-class hardware the
+// encode itself saturates CPU, so a naive "pause at 90%" would fire on
+// the workload we're trying to protect.
 const DEFAULT_CPU_PROTECTION = {
   enabled: true,
-  pauseThreshold: 90,
+  pauseThreshold: 95,       // only catches TRUE runaway — thread cap keeps the normal encode under this
   resumeThreshold: 70,
+  sustainedMs: 20000,       // CPU must stay above pauseThreshold for 20s before firing
+  cooldownMs: 5 * 60 * 1000, // 5 min after a pause before we'll retry
+  // maxConversionCores default is "cores - 2" and is computed inside
+  // LibraryManager since it needs os.cpus() anyway. Leave it unset here
+  // so a fresh install gets the hardware-aware default.
+  niceLevel: 10,
 };
 let CPU_PROTECTION = { ...DEFAULT_CPU_PROTECTION };
 
@@ -100,6 +105,11 @@ function _clampPct(n, fallback) {
   const v = parseInt(n, 10);
   if (!Number.isFinite(v)) return fallback;
   return Math.max(1, Math.min(100, v));
+}
+function _clampInt(n, min, max, fallback) {
+  const v = parseInt(n, 10);
+  if (!Number.isFinite(v)) return fallback;
+  return Math.max(min, Math.min(max, v));
 }
 
 // Load persisted settings from disk
@@ -113,11 +123,22 @@ try {
       TASK_PRIORITY = saved.taskPriority;
     }
     if (saved.cpuProtection && typeof saved.cpuProtection === 'object') {
+      const s = saved.cpuProtection;
       CPU_PROTECTION = {
-        enabled: saved.cpuProtection.enabled !== false,
-        pauseThreshold:  _clampPct(saved.cpuProtection.pauseThreshold,  DEFAULT_CPU_PROTECTION.pauseThreshold),
-        resumeThreshold: _clampPct(saved.cpuProtection.resumeThreshold, DEFAULT_CPU_PROTECTION.resumeThreshold),
+        enabled: s.enabled !== false,
+        pauseThreshold:  _clampPct(s.pauseThreshold,  DEFAULT_CPU_PROTECTION.pauseThreshold),
+        resumeThreshold: _clampPct(s.resumeThreshold, DEFAULT_CPU_PROTECTION.resumeThreshold),
+        sustainedMs:     _clampInt(s.sustainedMs, 0, 600000, DEFAULT_CPU_PROTECTION.sustainedMs),
+        cooldownMs:      _clampInt(s.cooldownMs,  0, 60 * 60 * 1000, DEFAULT_CPU_PROTECTION.cooldownMs),
+        niceLevel:       _clampInt(s.niceLevel,   0, 19, DEFAULT_CPU_PROTECTION.niceLevel),
       };
+      // Only persist maxConversionCores if the operator has actually set
+      // one; otherwise fall back to the hardware-aware default computed
+      // inside LibraryManager.
+      if (s.maxConversionCores != null) {
+        const n = _clampInt(s.maxConversionCores, 1, 128, null);
+        if (n != null) CPU_PROTECTION.maxConversionCores = n;
+      }
       // Enforce hysteresis at load time too so a hand-edited settings file
       // with pause=70,resume=80 doesn't flap the conversion queue.
       if (CPU_PROTECTION.resumeThreshold >= CPU_PROTECTION.pauseThreshold) {
@@ -4853,17 +4874,25 @@ app.post('/api/settings/cpu-protection', (req, res) => {
   const body = req.body || {};
   const update = {};
   if (typeof body.enabled === 'boolean') update.enabled = body.enabled;
-  if (body.pauseThreshold != null)  update.pauseThreshold  = _clampPct(body.pauseThreshold,  CPU_PROTECTION.pauseThreshold);
+  if (body.pauseThreshold  != null) update.pauseThreshold  = _clampPct(body.pauseThreshold,  CPU_PROTECTION.pauseThreshold);
   if (body.resumeThreshold != null) update.resumeThreshold = _clampPct(body.resumeThreshold, CPU_PROTECTION.resumeThreshold);
+  if (body.sustainedMs != null)        update.sustainedMs        = _clampInt(body.sustainedMs, 0, 600000, CPU_PROTECTION.sustainedMs);
+  if (body.cooldownMs != null)         update.cooldownMs         = _clampInt(body.cooldownMs,  0, 60 * 60 * 1000, CPU_PROTECTION.cooldownMs);
+  if (body.niceLevel != null)          update.niceLevel          = _clampInt(body.niceLevel,   0, 19, CPU_PROTECTION.niceLevel);
+  if (body.maxConversionCores != null) update.maxConversionCores = _clampInt(body.maxConversionCores, 1, 128, null);
 
   try {
     const applied = library.setCpuProtection(update);
     // Mirror monitor state back to the persisted config so a restart picks
     // up the operator's tuned thresholds. Manual pause is skipped on purpose.
     CPU_PROTECTION = {
-      enabled:         applied.enabled,
-      pauseThreshold:  applied.pauseThreshold,
-      resumeThreshold: applied.resumeThreshold,
+      enabled:            applied.enabled,
+      pauseThreshold:     applied.pauseThreshold,
+      resumeThreshold:    applied.resumeThreshold,
+      sustainedMs:        applied.sustainedMs,
+      cooldownMs:         applied.cooldownMs,
+      niceLevel:          applied.niceLevel,
+      maxConversionCores: applied.maxConversionCores,
     };
     // Also apply to the music LibraryManager so a manual pause covers
     // album downloads as well (music workloads are lighter but still

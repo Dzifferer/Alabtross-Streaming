@@ -5437,22 +5437,32 @@
   let _cpuProtectionState = null;
 
   function initCpuProtectionSettings() {
-    const enabledInput     = $('#setting-cpu-protection-enabled');
-    const pauseSlider      = $('#setting-cpu-pause-threshold');
-    const resumeSlider     = $('#setting-cpu-resume-threshold');
-    const pauseLabel       = $('#cpu-pause-threshold-value');
-    const resumeLabel      = $('#cpu-resume-threshold-value');
-    const pauseBtn         = $('#cpu-pause-btn');
-    const gaugeFill        = $('#cpu-gauge-fill');
-    const gaugeValue       = $('#cpu-gauge-value');
-    const gaugeStatus      = $('#cpu-gauge-status');
-    const protectionStatus = $('#cpu-protection-status');
+    const enabledInput      = $('#setting-cpu-protection-enabled');
+    const pauseSlider       = $('#setting-cpu-pause-threshold');
+    const resumeSlider      = $('#setting-cpu-resume-threshold');
+    const sustainedSlider   = $('#setting-cpu-sustained-sec');
+    const cooldownSlider    = $('#setting-cpu-cooldown-min');
+    const maxCoresSlider    = $('#setting-cpu-max-cores');
+    const pauseLabel        = $('#cpu-pause-threshold-value');
+    const resumeLabel       = $('#cpu-resume-threshold-value');
+    const sustainedLabel    = $('#cpu-sustained-sec-value');
+    const cooldownLabel     = $('#cpu-cooldown-min-value');
+    const maxCoresLabel     = $('#cpu-max-cores-value');
+    const pauseBtn          = $('#cpu-pause-btn');
+    const gaugeFill         = $('#cpu-gauge-fill');
+    const gaugeValue        = $('#cpu-gauge-value');
+    const gaugeStatus       = $('#cpu-gauge-status');
+    const protectionStatus  = $('#cpu-protection-status');
+    const suppressionBanner = $('#cpu-suppression-banner');
 
     if (!enabledInput || !pauseBtn) return;
 
     function renderThresholdLabels() {
-      if (pauseLabel)  pauseLabel.textContent  = pauseSlider.value + '%';
-      if (resumeLabel) resumeLabel.textContent = resumeSlider.value + '%';
+      if (pauseLabel)     pauseLabel.textContent     = pauseSlider.value + '%';
+      if (resumeLabel)    resumeLabel.textContent    = resumeSlider.value + '%';
+      if (sustainedLabel) sustainedLabel.textContent = sustainedSlider.value + 's';
+      if (cooldownLabel)  cooldownLabel.textContent  = cooldownSlider.value + 'm';
+      if (maxCoresLabel)  maxCoresLabel.textContent  = maxCoresSlider.value;
     }
 
     function renderGauge(state) {
@@ -5461,23 +5471,39 @@
       if (gaugeFill)  gaugeFill.style.width = pct + '%';
       if (gaugeValue) gaugeValue.textContent = pct + '%';
 
+      if (suppressionBanner) {
+        suppressionBanner.hidden = !state.autoPauseSuppressed;
+      }
+
+      const cooldownSec = Math.ceil((Number(state.cooldownMsRemaining) || 0) / 1000);
+
       if (state.manualPaused) {
         gaugeStatus.textContent = 'Conversions manually paused';
         gaugeStatus.style.color = 'var(--danger, #ff6b6b)';
         pauseBtn.textContent = 'Resume Conversions';
         pauseBtn.classList.add('active');
+      } else if (state.autoPauseSuppressed) {
+        gaugeStatus.textContent = 'Auto-retry suppressed — adjust core cap then tap Resume';
+        gaugeStatus.style.color = 'var(--danger, #ff6b6b)';
+        pauseBtn.textContent = 'Resume Conversions';
+        pauseBtn.classList.add('active');
       } else if (state.overloaded) {
-        gaugeStatus.textContent = `Paused — CPU over ${state.pauseThreshold}% safe threshold`;
+        gaugeStatus.textContent = `Paused — CPU over ${state.pauseThreshold}%`;
         gaugeStatus.style.color = 'var(--danger, #ff6b6b)';
         pauseBtn.textContent = 'Pause Conversions';
         pauseBtn.classList.remove('active');
+      } else if (cooldownSec > 0) {
+        gaugeStatus.textContent = `Cooldown — conversions resume in ${cooldownSec}s`;
+        gaugeStatus.style.color = 'var(--warning, #ffd43b)';
+        pauseBtn.textContent = 'Pause Conversions';
+        pauseBtn.classList.remove('active');
       } else if (!state.enabled) {
-        gaugeStatus.textContent = 'Auto-protection disabled';
+        gaugeStatus.textContent = `Auto-pause off — ffmpeg capped at ${state.maxConversionCores}/${state.totalCores} cores`;
         gaugeStatus.style.color = 'var(--text-dim, #888)';
         pauseBtn.textContent = 'Pause Conversions';
         pauseBtn.classList.remove('active');
       } else {
-        gaugeStatus.textContent = `Running — auto-pause at ${state.pauseThreshold}%`;
+        gaugeStatus.textContent = `Running — ffmpeg capped at ${state.maxConversionCores}/${state.totalCores} cores`;
         gaugeStatus.style.color = 'var(--success, #51cf66)';
         pauseBtn.textContent = 'Pause Conversions';
         pauseBtn.classList.remove('active');
@@ -5487,9 +5513,15 @@
     function applyState(state, { syncInputs = false } = {}) {
       _cpuProtectionState = state;
       if (syncInputs) {
-        enabledInput.checked = !!state.enabled;
-        pauseSlider.value    = String(state.pauseThreshold);
-        resumeSlider.value   = String(state.resumeThreshold);
+        enabledInput.checked      = !!state.enabled;
+        pauseSlider.value         = String(state.pauseThreshold);
+        resumeSlider.value        = String(state.resumeThreshold);
+        sustainedSlider.value     = String(Math.round((state.sustainedMs || 0) / 1000));
+        cooldownSlider.value      = String(Math.round((state.cooldownMs || 0) / 60000));
+        // The core slider's max must reflect the actual CPU count on
+        // the server, not the static 8 from the HTML default.
+        if (state.totalCores) maxCoresSlider.max = String(state.totalCores);
+        maxCoresSlider.value      = String(state.maxConversionCores || 1);
         renderThresholdLabels();
       }
       renderGauge(state);
@@ -5548,14 +5580,20 @@
           resumeSlider.value = String(resume);
           renderThresholdLabels();
         }
-        postUpdate({ pauseThreshold: pause, resumeThreshold: resume });
+        postUpdate({
+          pauseThreshold:     pause,
+          resumeThreshold:    resume,
+          sustainedMs:        parseInt(sustainedSlider.value, 10) * 1000,
+          cooldownMs:         parseInt(cooldownSlider.value, 10) * 60 * 1000,
+          maxConversionCores: parseInt(maxCoresSlider.value, 10),
+        });
       }, 250);
     }
 
-    pauseSlider.addEventListener('input', renderThresholdLabels);
-    resumeSlider.addEventListener('input', renderThresholdLabels);
-    pauseSlider.addEventListener('change', scheduleSliderCommit);
-    resumeSlider.addEventListener('change', scheduleSliderCommit);
+    for (const slider of [pauseSlider, resumeSlider, sustainedSlider, cooldownSlider, maxCoresSlider]) {
+      slider.addEventListener('input', renderThresholdLabels);
+      slider.addEventListener('change', scheduleSliderCommit);
+    }
 
     enabledInput.addEventListener('change', () => {
       postUpdate({ enabled: enabledInput.checked });

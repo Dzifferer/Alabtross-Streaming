@@ -693,6 +693,42 @@ if ! docker info &>/dev/null; then
 fi
 
 # ---------------------------------------------------------------
+# NVIDIA container runtime — gives the mobile-ui container access to
+# NVDEC / NVENC / CUDA so ffmpeg can decode and (on Orin NX / AGX)
+# encode on the GPU. Without this, --runtime=nvidia in deploy.sh is
+# a no-op and every transcode falls back to libx264 on the CPU.
+# JetPack ships nvidia-container-toolkit preinstalled; all we have
+# to do is point Docker's daemon.json at it.
+# ---------------------------------------------------------------
+if docker info 2>/dev/null | grep -qi 'Runtimes:.*nvidia'; then
+  ok "NVIDIA container runtime already configured"
+elif command -v nvidia-ctk &>/dev/null; then
+  info "Configuring Docker to use the NVIDIA container runtime..."
+  nvidia-ctk runtime configure --runtime=docker --set-as-default=false \
+    && systemctl restart docker \
+    && ok "NVIDIA container runtime enabled (restart docker containers to pick it up)" \
+    || err "Failed to configure NVIDIA runtime — GPU acceleration will be disabled. See /etc/docker/daemon.json"
+elif [[ -f /etc/nv_tegra_release ]]; then
+  # JetPack without nvidia-ctk — install the toolkit from NVIDIA's repo
+  info "Installing nvidia-container-toolkit..."
+  curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+    | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null || true
+  curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+    | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+    > /etc/apt/sources.list.d/nvidia-container-toolkit.list
+  apt-get update && apt-get install -y nvidia-container-toolkit
+  if command -v nvidia-ctk &>/dev/null; then
+    nvidia-ctk runtime configure --runtime=docker --set-as-default=false \
+      && systemctl restart docker \
+      && ok "NVIDIA container runtime installed and enabled"
+  else
+    err "nvidia-container-toolkit install did not surface nvidia-ctk — GPU acceleration will be disabled"
+  fi
+else
+  info "Non-Jetson host — skipping NVIDIA runtime setup (GPU acceleration unavailable)"
+fi
+
+# ---------------------------------------------------------------
 # STEP 6/9 — Firewall rules
 # ---------------------------------------------------------------
 step "Configuring firewall"

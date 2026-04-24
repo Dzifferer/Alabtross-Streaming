@@ -5587,6 +5587,7 @@
       if (downloading.length === 0 && converting.length === 0 && paused.length === 0 && queued.length === 0 && completed.length === 0 && failed.length === 0) {
         panel.innerHTML = '<div class="downloads-empty"><span class="setting-hint">No downloads</span></div>';
         renderSourceStats(items);
+        renderSystemStatus();
         return;
       }
 
@@ -5645,6 +5646,7 @@
       renderSystemStatus();
     } catch {
       panel.innerHTML = '<div class="downloads-empty"><span class="setting-hint">Could not load downloads</span></div>';
+      renderSystemStatus();
     }
   }
 

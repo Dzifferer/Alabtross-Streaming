@@ -43,7 +43,11 @@ sudo docker stop alabtross-mobile 2>/dev/null || true
 sudo docker rm   alabtross-mobile 2>/dev/null || true
 
 echo "==> Building..."
-sudo docker build $BUILD_FLAGS -t alabtross-mobile ./mobile-ui
+# --progress=plain shows every RUN step's full stdout/stderr, not just the
+# step header. Matters for debugging — the default TTY progress view hides
+# output from successful steps, which makes diagnostic `echo` / `ls` output
+# inside a layer invisible unless the layer itself fails.
+sudo docker build --progress=plain $BUILD_FLAGS -t alabtross-mobile ./mobile-ui
 
 BIND_IP=$(ip route get 8.8.8.8 | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')
 

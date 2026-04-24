@@ -90,7 +90,9 @@ RUN git clone ${JETSON_FFMPEG_REPO} /src/jetson-ffmpeg \
       -DCMAKE_LIBRARY_PATH="/src/jetson-ffmpeg/stubs;/usr/lib/aarch64-linux-gnu;/usr/lib/aarch64-linux-gnu/tegra;/usr/lib/aarch64-linux-gnu/nvidia" \
  && cmake --build /src/jetson-ffmpeg/build -j"$(nproc)" \
  && cmake --install /src/jetson-ffmpeg/build \
- && ldconfig
+ && ldconfig \
+ && echo "==> libnvmpi install results:" \
+ && find /usr/local -name 'libnvmpi*' -o -name 'nvmpi.pc' -o -name 'nvmpi.h' 2>/dev/null | sort
 
 # 3) ffmpeg source — clone upstream at the pinned tag.
 RUN git clone --depth 1 --branch ${FFMPEG_VERSION} \
@@ -112,7 +114,9 @@ RUN if [ ! -f "/src/jetson-ffmpeg/${FFMPEG_PATCH_PATH}" ]; then \
 # 5) Configure + build ffmpeg. --enable-nvmpi is added by Keylost's patch.
 #    The cuvid / nvenc flags stay enabled so desktop NVIDIA hosts and
 #    future Orin NX / AGX deploys of the same image get GPU encode too.
-RUN PATH="/usr/local/cuda/bin:${PATH}" ./configure \
+RUN PATH="/usr/local/cuda/bin:${PATH}" \
+    PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib/aarch64-linux-gnu/pkgconfig:/usr/lib/aarch64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH}" \
+    ./configure \
       --prefix=/opt/ffmpeg \
       --extra-cflags="-I/usr/local/cuda/include -I/usr/local/include" \
       --extra-ldflags="-L/usr/local/cuda/lib64 -L/usr/local/lib" \

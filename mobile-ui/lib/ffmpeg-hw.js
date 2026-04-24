@@ -69,6 +69,14 @@ const NVMPI_DECODERS = {
   mpeg4:      'mpeg4_nvmpi',
 };
 
+// Pixel formats Keylost's libnvmpi can actually ingest. Orin Nano's NVDEC
+// hardware supports Main 10 HEVC (yuv420p10le) just fine, but libnvmpi only
+// wires up 8-bit 4:2:0 — attempting 10-bit produces
+// "Invalid Pix_FMT for NVMPI: Only YUV420P and YUVJ420P are supported" and
+// the whole decode hard-fails. When the probed pix_fmt isn't in this set we
+// fall through to software decode so 10-bit x265 rips still play.
+const NVMPI_PIX_FMTS = new Set(['yuv420p', 'yuvj420p']);
+
 function _isNvmpi() {
   return FFMPEG_HWACCEL === 'nvmpi';
 }
@@ -90,9 +98,17 @@ function _cuvidFor(sourceCodec) {
   return CUVID_DECODERS[String(sourceCodec).toLowerCase()] || null;
 }
 
-function _nvmpiFor(sourceCodec) {
+function _nvmpiFor(sourceCodec, sourcePixFmt) {
   if (!sourceCodec || !_isNvmpi()) return null;
-  return NVMPI_DECODERS[String(sourceCodec).toLowerCase()] || null;
+  const decoder = NVMPI_DECODERS[String(sourceCodec).toLowerCase()] || null;
+  if (!decoder) return null;
+  // When the pix_fmt is known, require it to be one libnvmpi accepts.
+  // Unknown pix_fmt (null/undefined) means "live transcode, no probe" —
+  // optimistically let the decoder try and fall back at runtime.
+  if (sourcePixFmt && !NVMPI_PIX_FMTS.has(String(sourcePixFmt).toLowerCase())) {
+    return null;
+  }
+  return decoder;
 }
 
 /**
@@ -112,11 +128,11 @@ function _nvmpiFor(sourceCodec) {
  * software decode rather than blindly guessing, because nvmpi is strictly
  * per-codec (no generic "-hwaccel nvmpi" flag exists in the patch).
  */
-function buildDecodeArgs(sourceCodec) {
+function buildDecodeArgs(sourceCodec, sourcePixFmt) {
   if (!FFMPEG_HWACCEL) return [];
 
   if (_isNvmpi()) {
-    const nvmpi = _nvmpiFor(sourceCodec);
+    const nvmpi = _nvmpiFor(sourceCodec, sourcePixFmt);
     return nvmpi ? ['-c:v', nvmpi] : [];
   }
 
@@ -142,7 +158,10 @@ function buildDecodeArgs(sourceCodec) {
  * as a fully-GPU pipeline but the decode win is still large — and on Orin
  * Nano it's the only hardware decode path that works at all.
  */
-function buildScaleFilter(maxWidth, sourceCodec) {
+function buildScaleFilter(maxWidth, sourceCodec, sourcePixFmt) {
+  // sourcePixFmt currently only narrows the NVMPI decision; the CUDA/cuvid
+  // scale path doesn't change on 10-bit sources (scale_cuda handles both).
+  void sourcePixFmt;
   const cuvid = _cuvidFor(sourceCodec);
   if (cuvid) {
     const pixfmt = _useNvenc() ? 'nv12' : 'yuv420p';

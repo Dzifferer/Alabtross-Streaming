@@ -171,7 +171,7 @@ RUN echo "=====  pkg-config diagnostic for nvmpi  =====" \
      ./configure \
        --prefix=/opt/ffmpeg \
        --extra-cflags="-I/usr/local/cuda/include -I/usr/local/include" \
-       --extra-ldflags="-L/usr/local/cuda/lib64 -L/usr/local/lib" \
+       --extra-ldflags="-L/usr/local/cuda/lib64 -L/usr/local/lib -L/src/jetson-ffmpeg/stubs -Wl,-rpath-link=/src/jetson-ffmpeg/stubs" \
        --extra-libs="-lpthread -lm -lnvmpi" \
        --enable-gpl --enable-nonfree --enable-version3 \
        --enable-libx264 --enable-libx265 --enable-libvpx \

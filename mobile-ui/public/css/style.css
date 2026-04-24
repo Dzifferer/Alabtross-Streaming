@@ -1045,6 +1045,24 @@ html, body {
   color: var(--danger, #ef4444);
 }
 
+.library-episode-repair {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  padding: 6px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.library-episode-repair:active {
+  background: rgba(255,255,255,0.08);
+  color: var(--accent, #4ade80);
+}
+
 /* ===== Library Categorize Button ===== */
 .library-card-categorize {
   position: absolute;
@@ -3350,6 +3368,40 @@ select.manual-import-input {
 
 @media (hover: hover) {
   .card:hover .library-card-relink { opacity: 1; }
+}
+
+/* Repair button on poster — sits below relink, above remove stack.
+   Only rendered when server reports canRepair (has magnet, not currently
+   downloading), so not every card has one. */
+.library-card-repair {
+  position: absolute;
+  top: 66px;
+  right: 6px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: rgba(0,0,0,0.6);
+  border: none;
+  color: rgba(255,255,255,0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 3;
+  opacity: 0;
+  transition: opacity 0.2s, color 0.2s;
+}
+
+.library-card-repair:active {
+  color: var(--accent);
+}
+
+@media (hover: none) {
+  .library-card-repair { opacity: 1; }
+}
+
+@media (hover: hover) {
+  .card:hover .library-card-repair { opacity: 1; }
 }
 
 /* Status text below card */

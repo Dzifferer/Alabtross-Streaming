@@ -3604,6 +3604,20 @@ app.post('/api/library/:id/repair', rateLimit, (req, res) => {
   res.json({ success: true, queued: !!result.queued });
 });
 
+// POST /api/library/repair-all-incomplete — scan every 'complete' item and
+// queue a repair re-download for the sparse ones. Returns counts so the UI
+// can surface a meaningful toast ("Re-downloading 12 items") instead of a
+// silent success.
+app.post('/api/library/repair-all-incomplete', rateLimit, async (req, res) => {
+  try {
+    const summary = await library.repairAllIncomplete();
+    res.json({ success: true, ...summary });
+  } catch (err) {
+    console.error('[Server] repairAllIncomplete failed:', err);
+    res.status(500).json({ error: err.message || 'bulk repair failed' });
+  }
+});
+
 // POST /api/library/:id/start — force-start a queued item (if slots available)
 app.post('/api/library/:id/start', rateLimit, (req, res) => {
   const started = library.startQueuedItem(req.params.id);

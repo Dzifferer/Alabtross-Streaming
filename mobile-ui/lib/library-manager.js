@@ -2768,6 +2768,60 @@ class LibraryManager {
     return { ok: true, queued: !!queued };
   }
 
+  /**
+   * Scan every 'complete' item, flag the sparse ones (blocks*512/size < 90%),
+   * and kick off repair re-downloads for anything that still has a magnet
+   * on file. Runs serially with small yields so the HTTP loop stays
+   * responsive during a bulk operation on a large library.
+   *
+   * Returns { scanned, incomplete, triggered, noMagnet, details[] } — the
+   * UI uses `triggered` for the toast, `details` is there for logging.
+   */
+  async repairAllIncomplete() {
+    const scannedIds = [];
+    for (const item of this._items.values()) {
+      if (item.status !== 'complete') continue;
+      if (!item.filePath) continue;
+      scannedIds.push(item.id);
+    }
+
+    let incomplete = 0;
+    let triggered = 0;
+    let noMagnet  = 0;
+    const details = [];
+
+    for (const id of scannedIds) {
+      const item = this._items.get(id);
+      if (!item) continue;
+      const fullPath = path.join(this._libraryPath, item.filePath);
+      let st;
+      try { st = fs.statSync(fullPath); } catch { continue; }
+      if (!st || st.size <= 1024 * 1024) continue;
+      const actualBytes = (st.blocks || 0) * 512;
+      const ratio = actualBytes / st.size;
+      if (ratio >= 0.90) continue; // healthy-looking file, leave alone
+      incomplete++;
+
+      if (!item.magnetUri || !item.infoHash) {
+        noMagnet++;
+        details.push({ id, name: item.name, ratio, status: 'no-magnet' });
+        continue;
+      }
+      const r = this.repairItem(id);
+      if (r.ok) {
+        triggered++;
+        details.push({ id, name: item.name, ratio, status: 'queued' });
+      } else {
+        details.push({ id, name: item.name, ratio, status: `failed: ${r.reason}` });
+      }
+      // Yield so a large library scan doesn't block the HTTP loop.
+      await new Promise(resolve => setImmediate(resolve));
+    }
+
+    console.log(`[Library] Bulk repair: scanned=${scannedIds.length} incomplete=${incomplete} triggered=${triggered} noMagnet=${noMagnet}`);
+    return { scanned: scannedIds.length, incomplete, triggered, noMagnet, details };
+  }
+
   retryItem(id) {
     const item = this._items.get(id);
     if (!item) return false;
@@ -6821,6 +6875,13 @@ class LibraryManager {
       convertKind: item.convertKind || null,
       convertProgress: item.convertProgress || null,
       convertError: item.convertError || null,
+      // canRepair gates the "Repair" UI button. Only items whose torrent
+      // metadata is still on file can be refetched (imported/discovered
+      // files don't have a magnet, so we couldn't re-download their pieces
+      // even if we wanted to). We also hide the button while the torrent
+      // is already downloading — the user can't "repair" something that's
+      // actively being fetched.
+      canRepair: !!(item.magnetUri && item.infoHash && item.status !== 'downloading'),
       packId: item.packId || null,
       showName: item.showName || null,
       matchState,

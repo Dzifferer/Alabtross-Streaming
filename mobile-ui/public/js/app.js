@@ -3684,6 +3684,10 @@
           <button class="library-card-relink" data-id="${escapeHTML(item.id)}" title="Re-link to correct IMDB">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>
           </button>
+          ${item.canRepair ? `
+          <button class="library-card-repair" data-id="${escapeHTML(item.id)}" title="Repair / re-download">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10"/><path d="M20.49 15a9 9 0 01-14.85 3.36L1 14"/></svg>
+          </button>` : ''}
           <button class="library-card-remove" data-id="${escapeHTML(item.id)}" title="Remove">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
           </button>
@@ -3883,6 +3887,10 @@
           ${subText ? `<div class="library-episode-sub">${escapeHTML(subText)}</div>` : ''}
           ${statusHtml}
         </div>
+        ${item.canRepair ? `
+        <button class="library-episode-repair" data-id="${escapeHTML(item.id)}" title="Repair / re-download">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10"/><path d="M20.49 15a9 9 0 01-14.85 3.36L1 14"/></svg>
+        </button>` : ''}
         <button class="library-episode-remove" data-id="${escapeHTML(item.id)}" title="Remove">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
         </button>
@@ -3892,8 +3900,9 @@
 
   function attachEpisodeRowHandlers(row) {
     row.addEventListener('click', async (e) => {
-      // Ignore clicks on the remove button
+      // Ignore clicks on the per-episode action buttons
       if (e.target.closest('.library-episode-remove')) return;
+      if (e.target.closest('.library-episode-repair')) return;
       const id = row.dataset.id;
       const status = row.dataset.status;
       if (status === 'complete' || status === 'converting') {
@@ -3918,6 +3927,24 @@
       removeBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         removeLibraryItem(removeBtn.dataset.id);
+      });
+    }
+
+    const repairBtn = row.querySelector('.library-episode-repair');
+    if (repairBtn) {
+      repairBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = repairBtn.dataset.id;
+        try {
+          const r = await fetch(`/api/library/${encodeURIComponent(id)}/repair`, { method: 'POST' });
+          if (!r.ok) {
+            const j = await r.json().catch(() => ({}));
+            showToast(j.error ? `Repair failed: ${j.error}` : 'Repair failed');
+            return;
+          }
+          showToast('Repair queued — re-downloading missing pieces…');
+          loadLibrary();
+        } catch { showToast('Repair request failed'); }
       });
     }
   }
@@ -4533,6 +4560,27 @@
           showToast('Retrying download...');
           loadLibrary();
         } catch { showToast('Failed to retry'); }
+      });
+    });
+
+    // Repair buttons on library cards. Unlike Retry this works on a
+    // 'complete' item whose bytes are actually missing on disk — flips
+    // the item back through the download state machine so torrent-stream
+    // refills the missing pieces.
+    container.querySelectorAll('.library-card-repair').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = btn.dataset.id;
+        try {
+          const r = await fetch(`/api/library/${encodeURIComponent(id)}/repair`, { method: 'POST' });
+          if (!r.ok) {
+            const j = await r.json().catch(() => ({}));
+            showToast(j.error ? `Repair failed: ${j.error}` : 'Repair failed');
+            return;
+          }
+          showToast('Repair queued — re-downloading missing pieces…');
+          loadLibrary();
+        } catch { showToast('Repair request failed'); }
       });
     });
 
@@ -7018,6 +7066,44 @@
         runAutoMatch(true);
       }
     });
+
+    // Library toolbar: bulk repair. Scans every 'complete' item server-side,
+    // identifies the ones whose on-disk bytes are < 90% of expected size
+    // (abandoned torrent downloads), and queues a re-download for each.
+    const repairAllBtn = document.getElementById('library-repair-all-btn');
+    if (repairAllBtn) {
+      repairAllBtn.addEventListener('click', async () => {
+        if (repairAllBtn.disabled) return;
+        if (!confirm('Scan the whole library and re-download any item whose on-disk bytes are incomplete?\nItems without a stored magnet URI (manual imports) will be skipped.')) {
+          return;
+        }
+        const label = repairAllBtn.querySelector('.library-automatch-label');
+        const orig = label ? label.textContent : null;
+        repairAllBtn.disabled = true;
+        if (label) label.textContent = 'Scanning…';
+        try {
+          const resp = await fetch('/api/library/repair-all-incomplete', { method: 'POST' });
+          if (!resp.ok) {
+            const j = await resp.json().catch(() => ({}));
+            showToast(j.error ? `Repair failed: ${j.error}` : 'Bulk repair failed');
+            return;
+          }
+          const data = await resp.json();
+          if (data.triggered === 0 && data.incomplete === 0) {
+            showToast(`Scanned ${data.scanned} items — all intact`);
+          } else if (data.triggered === 0) {
+            showToast(`${data.incomplete} incomplete, but none have a magnet to re-download`);
+          } else {
+            showToast(`Queued ${data.triggered} repair${data.triggered === 1 ? '' : 's'}${data.noMagnet ? ` (${data.noMagnet} skipped — no magnet)` : ''}`);
+          }
+          loadLibrary();
+        } catch { showToast('Bulk repair request failed'); }
+        finally {
+          repairAllBtn.disabled = false;
+          if (label && orig) label.textContent = orig;
+        }
+      });
+    }
 
     // Player back button — navigate back (goBack handles video cleanup after hiding view)
     dom.playerBackBtn.addEventListener('click', () => {

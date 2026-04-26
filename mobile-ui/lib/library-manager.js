@@ -3572,14 +3572,16 @@ class LibraryManager {
 
     const fullPath = path.join(this._libraryPath, item.filePath);
     if (!this._isPathSafe(fullPath)) return null;
-    if (!fs.existsSync(fullPath)) {
-      // File was deleted externally
-      item.status = 'failed';
-      item.error = 'File not found on disk';
-      this._saveMetadata();
-      return null;
-    }
 
+    // Intentionally NO fs.existsSync() here — every HTTP stream handler
+    // already does fs.promises.stat() right after this returns, which
+    // catches missing files with a clean 404. The previous synchronous
+    // check fired on every Range request and blocked the event loop on
+    // slow storage; multiplied across the dozens of range requests a
+    // browser issues per video, that was a non-trivial fraction of
+    // mid-playback rebuffering. Detection of externally-deleted files
+    // moves to the periodic integrity sweep, which doesn't sit on the
+    // hot path.
     return fullPath;
   }
 
@@ -7073,7 +7075,16 @@ class LibraryManager {
       //     (we inherit it at repair time via _findRecoveryMagnet).
       // Hidden while the item is already downloading — the user can't
       // "repair" something that's actively being fetched.
-      canRepair: item.status !== 'downloading' && !!this._findRecoveryMagnet(item),
+      //
+      // Healthy complete items never render the Repair button (the UI
+      // only shows it for incomplete-on-disk items), so the expensive
+      // sibling-magnet scan is skipped for them. Without this guard,
+      // every getItem() call from the stream hot path triggered an
+      // O(n) recovery-index rebuild every 2s, which dominates the
+      // event loop on large libraries and surfaces as buffering.
+      canRepair: item.status !== 'downloading' &&
+        (!!(item.magnetUri && item.infoHash) ||
+          (!!item.incompleteOnDisk && !!this._findRecoveryMagnet(item))),
       // Broken-state flag + ratio, set by the probe sweep when stat.blocks
       // says < 90% of the file is actually on disk. Used by the UI to show
       // an "Incomplete" badge so the user knows what to act on.

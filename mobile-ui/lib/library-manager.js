@@ -3809,8 +3809,11 @@ class LibraryManager {
     this._stopAutoRetryDaemon();
     // Flush cross-torrent peer reputation before we destroy engines
     // (engine destruction triggers peer-cache writes which may create
-    // more reputation updates via their wire-close paths).
-    try { if (this._peerReputation) this._peerReputation.stop(); } catch { /* ignore */ }
+    // more reputation updates via their wire-close paths). stop() is
+    // now async — await it so the final save lands before we exit.
+    try {
+      if (this._peerReputation) await this._peerReputation.stop();
+    } catch { /* ignore */ }
     for (const id of [...this._engines.keys()]) {
       this._stopDownload(id);
     }

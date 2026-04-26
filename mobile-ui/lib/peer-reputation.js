@@ -122,26 +122,54 @@ class PeerReputation {
   }
 
   /**
-   * Flush the in-memory map to disk. Called on shutdown and by the
-   * periodic timer. Atomic: write to .tmp, rename over. An abrupt crash
-   * during the write leaves the previous snapshot intact.
+   * Flush the in-memory map to disk. Returns a Promise that resolves
+   * once the bytes are durable. Atomic: write to .tmp, rename over.
+   * An abrupt crash during the write leaves the previous snapshot
+   * intact. Concurrent callers coalesce: a save in flight + new
+   * mutations marks a single follow-up so we don't queue up multiple
+   * full writes back-to-back.
+   *
+   * Now async (fs.promises) so the write runs on the libuv threadpool
+   * instead of blocking the event loop. The previous sync writeFile +
+   * rename interleaved with library metadata writes and the HTTP
+   * stream handlers' fs.promises.stat calls, which is enough to
+   * cause sub-second event-loop pauses on slow storage.
    */
-  save() {
+  async save() {
     if (!this._dirty) return;
-    this._expireStale();
-    try {
-      if (!fs.existsSync(this._cacheDir)) {
-        fs.mkdirSync(this._cacheDir, { recursive: true });
-      }
-      const out = { version: 1, savedAt: Date.now(), entries: {} };
-      for (const [addr, entry] of this._entries) out.entries[addr] = entry;
-      const tmp = this._file + '.tmp';
-      fs.writeFileSync(tmp, JSON.stringify(out));
-      fs.renameSync(tmp, this._file);
-      this._dirty = false;
-    } catch (err) {
-      console.warn(`[PeerReputation] save failed: ${err.message}`);
+    if (this._saveInFlight) {
+      this._saveQueued = true;
+      return this._saveInFlight;
     }
+
+    const doSave = async () => {
+      this._dirty = false;
+      this._expireStale();
+      try {
+        await fs.promises.mkdir(this._cacheDir, { recursive: true });
+        const out = { version: 1, savedAt: Date.now(), entries: {} };
+        for (const [addr, entry] of this._entries) out.entries[addr] = entry;
+        const tmp = this._file + '.tmp';
+        await fs.promises.writeFile(tmp, JSON.stringify(out));
+        await fs.promises.rename(tmp, this._file);
+      } catch (err) {
+        // A failed write means the in-memory state is still ahead of
+        // disk; mark dirty so the next tick retries instead of dropping
+        // updates silently.
+        this._dirty = true;
+        console.warn(`[PeerReputation] save failed: ${err.message}`);
+      }
+    };
+
+    const promise = doSave().then(() => {
+      this._saveInFlight = null;
+      if (this._saveQueued) {
+        this._saveQueued = false;
+        return this.save();
+      }
+    });
+    this._saveInFlight = promise;
+    return promise;
   }
 
   /**
@@ -150,16 +178,23 @@ class PeerReputation {
    */
   startPersistTimer() {
     if (this._persistTimer) return;
-    this._persistTimer = setInterval(() => this.save(), PERSIST_INTERVAL_MS);
+    this._persistTimer = setInterval(() => {
+      // Fire-and-forget; the caller is the timer, no one is awaiting.
+      this.save().catch(() => { /* logged inside save() */ });
+    }, PERSIST_INTERVAL_MS);
     if (this._persistTimer.unref) this._persistTimer.unref();
   }
 
-  stop() {
+  /**
+   * Stop the periodic timer and flush. Returns a Promise; shutdown
+   * paths must await it so the final save reaches disk before exit.
+   */
+  async stop() {
     if (this._persistTimer) {
       clearInterval(this._persistTimer);
       this._persistTimer = null;
     }
-    this.save();
+    await this.save();
   }
 
   _touch(addr) {

@@ -3683,14 +3683,22 @@ class LibraryManager {
   }
 
   /**
-   * Signal that a live transcode / HLS session has started.  Background
-   * local libx264 conversions will defer themselves until the count goes
-   * back to zero, so live playback gets the whole CPU budget. Remote
-   * (NVENC) conversions are unaffected — they don't touch the Orin CPU.
+   * Signal that a live playback session has started — direct disk stream,
+   * remux, fMP4 transcode, or HLS. Background local libx264 conversions
+   * defer until the count goes back to zero so playback gets the whole
+   * CPU + disk-IO budget. Remote (NVENC) conversions are unaffected —
+   * they don't touch the Orin CPU. The 0→1 transition also kills any
+   * already-running local conversion: even a remux (stream-copy) job
+   * contends for the same disk that direct playback is reading from,
+   * which is the dominant cause of mid-playback rebuffering on eMMC/SD.
    * Paired with decrementLiveTranscodes(); the two MUST balance.
    */
   incrementLiveTranscodes() {
-    this._liveTranscodeCount = (this._liveTranscodeCount || 0) + 1;
+    const prev = this._liveTranscodeCount || 0;
+    this._liveTranscodeCount = prev + 1;
+    if (prev === 0) {
+      this._pauseRunningLocalConversions('playback');
+    }
   }
 
   /**
@@ -3790,7 +3798,7 @@ class LibraryManager {
     };
   }
 
-  destroy() {
+  async destroy() {
     console.log('[Library] Shutting down — saving download state for resumption...');
     if (this._metadataSaveTimer) {
       clearInterval(this._metadataSaveTimer);
@@ -3810,9 +3818,9 @@ class LibraryManager {
     }
     this._convertProcesses.clear();
     // Downloads keep status='downloading' so they auto-resume on next startup.
-    // Use the immediate write path — we can't count on the debounce timer
-    // firing before the process exits.
-    this._writeMetadataNow();
+    // _writeMetadataNow is async (libuv threadpool) so the caller MUST
+    // await us before exiting the process or the bytes won't hit disk.
+    await this._writeMetadataNow();
     console.log('[Library] State saved — downloads and conversions will resume on next start');
   }
 
@@ -5205,6 +5213,13 @@ class LibraryManager {
     }, 500);
   }
 
+  /**
+   * Returns a Promise that resolves when the on-disk metadata reflects
+   * the current in-memory state (or the next coalesced state, if a
+   * follow-up was queued while we were writing). Most callers can
+   * ignore the return value; shutdown paths must await it so the
+   * process doesn't exit before the bytes hit disk.
+   */
   _writeMetadataNow() {
     // Any pending debounce is about to be superseded by this immediate
     // write; clear it so the scheduled callback doesn't double-write.
@@ -5212,64 +5227,105 @@ class LibraryManager {
       clearTimeout(this._metadataSaveDebounce);
       this._metadataSaveDebounce = null;
     }
-    try {
-      const data = [...this._items.values()].map(item => {
-        const {
-          _needsResume,
-          _needsConversion,
-          _pendingConversion,
-          _pendingConvertKind,
-          _probeDuration,
-          _probeVideoCodec,
-          _probeAudioCodec,
-          _probeAudioProfile,
-          _probeAudioChannels,
-          _probeAudioSampleRate,
-          _probeHasAudio,
-          _workerFailed,
-          _nearCompleteSince,
-          ...clean
-        } = item;
-        return clean;
-      });
-      const json = JSON.stringify(data, null, 2);
-      const tmpFile = this._metadataFile + '.tmp.' + process.pid;
-      const backupFile = this._metadataFile + '.bak';
-
-      // Rotate current -> backup before writing new version
-      try {
-        if (fs.existsSync(this._metadataFile)) {
-          fs.copyFileSync(this._metadataFile, backupFile);
-        }
-      } catch {
-        // Non-critical — proceed without backup
-      }
-
-      // Atomic + durable write: write to temp file, fsync contents to disk,
-      // then rename. Without fsync a power loss between writeFileSync and
-      // rename can leave the tmp file with zero bytes — the rename then
-      // publishes an empty metadata.json even though `renameSync` itself is
-      // atomic. fsync-then-rename is the classic POSIX pattern for durable
-      // small-file updates.
-      const fd = fs.openSync(tmpFile, 'w');
-      try {
-        fs.writeSync(fd, json, 0, 'utf8');
-        try { fs.fsyncSync(fd); } catch { /* fsync unsupported on some FS */ }
-      } finally {
-        fs.closeSync(fd);
-      }
-      fs.renameSync(tmpFile, this._metadataFile);
-      // Also fsync the parent directory so the rename itself survives power
-      // loss. Opening a directory for fsync is a no-op on Windows (EISDIR);
-      // swallow the error there — NTFS metadata ops are already journaled.
-      try {
-        const dirFd = fs.openSync(path.dirname(this._metadataFile), 'r');
-        try { fs.fsyncSync(dirFd); } catch { /* ignore */ }
-        finally { fs.closeSync(dirFd); }
-      } catch { /* ignore */ }
-    } catch (err) {
-      console.error(`[Library] Failed to save metadata: ${err.message}`);
+    // Serialize concurrent saves: a periodic-timer tick can race with a
+    // call-site-triggered save, and the kernel's tmp→final rename is not
+    // safe to interleave (the second writer can clobber the first's fd).
+    // Coalesce: if a write is already in flight, mark a follow-up so the
+    // current write's `finally` re-fires once. Callers awaiting the
+    // returned promise will resolve once their snapshot's data (or a
+    // newer one) is durably on disk.
+    if (this._metadataWriteInFlight) {
+      this._metadataWriteQueued = true;
+      // Chain onto whatever's currently in-flight so awaiters see a
+      // resolution that includes the queued follow-up.
+      return this._metadataWriteInFlight;
     }
+
+    // Snapshot the items synchronously RIGHT NOW. The async write below
+    // can take 100+ ms on a large library / slow disk, and we don't want
+    // mutations made during that window to leak into the JSON we're
+    // about to publish (or, conversely, get lost when the next call
+    // overwrites our partial snapshot).
+    const data = [...this._items.values()].map(item => {
+      const {
+        _needsResume,
+        _needsConversion,
+        _pendingConversion,
+        _pendingConvertKind,
+        _probeDuration,
+        _probeVideoCodec,
+        _probeAudioCodec,
+        _probeAudioProfile,
+        _probeAudioChannels,
+        _probeAudioSampleRate,
+        _probeHasAudio,
+        _workerFailed,
+        _nearCompleteSince,
+        ...clean
+      } = item;
+      return clean;
+    });
+    // No pretty-print: the file isn't human-edited, and indented JSON
+    // ~2× the byte count of the file we have to fsync. On a multi-MB
+    // metadata.json this measurably reduces event-loop occupancy.
+    const json = JSON.stringify(data);
+    const tmpFile = this._metadataFile + '.tmp.' + process.pid;
+    const backupFile = this._metadataFile + '.bak';
+
+    // All disk work goes through fs.promises so it runs on the libuv
+    // threadpool instead of blocking the event loop. With sync calls
+    // (the previous implementation) a multi-MB write + fsync paused
+    // every concurrent request — including in-flight video bytes —
+    // for the duration of the I/O, which surfaced to the player as
+    // mid-playback rebuffering scaling with library size.
+    const doWrite = async () => {
+      try {
+        // Rotate current -> backup before writing new version. Best-effort.
+        try {
+          if (fs.existsSync(this._metadataFile)) {
+            await fs.promises.copyFile(this._metadataFile, backupFile);
+          }
+        } catch { /* non-critical */ }
+
+        // Atomic + durable write: write to temp file, fsync, rename.
+        // Without fsync a power loss between write and rename can leave
+        // the tmp file with zero bytes — the rename then publishes an
+        // empty metadata.json. fsync-then-rename is the classic POSIX
+        // pattern for durable small-file updates.
+        const fh = await fs.promises.open(tmpFile, 'w');
+        try {
+          await fh.writeFile(json, 'utf8');
+          try { await fh.sync(); } catch { /* fsync unsupported on some FS */ }
+        } finally {
+          await fh.close();
+        }
+        await fs.promises.rename(tmpFile, this._metadataFile);
+        // Also fsync the parent directory so the rename survives power
+        // loss. Opening a directory for fsync is a no-op on Windows
+        // (EISDIR); swallow the error there — NTFS metadata ops are
+        // already journaled.
+        try {
+          const dirFh = await fs.promises.open(path.dirname(this._metadataFile), 'r');
+          try { await dirFh.sync(); } catch { /* ignore */ }
+          finally { await dirFh.close(); }
+        } catch { /* ignore */ }
+      } catch (err) {
+        console.error(`[Library] Failed to save metadata: ${err.message}`);
+      }
+    };
+
+    // Run this write, then if a follow-up was queued during it, chain
+    // a fresh _writeMetadataNow() so awaiters of the original promise
+    // also see the queued snapshot reach disk.
+    const promise = doWrite().then(() => {
+      this._metadataWriteInFlight = null;
+      if (this._metadataWriteQueued) {
+        this._metadataWriteQueued = false;
+        return this._writeMetadataNow();
+      }
+    });
+    this._metadataWriteInFlight = promise;
+    return promise;
   }
 
   /**

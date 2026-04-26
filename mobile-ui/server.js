@@ -3912,6 +3912,26 @@ app.get('/api/library/:id/stream', async (req, res) => {
   const mimeType = library.getMimeType(filePath);
   const safeFilename = path.basename(filePath).replace(/[^\w\s.\-()[\]]/g, '_').replace(/["\\]/g, '_').substring(0, 200);
 
+  // Even though direct play doesn't spawn ffmpeg, claim a live-playback
+  // slot so any background conversion pauses for the duration of the
+  // session. Conversions and direct-disk reads contend for the same
+  // disk IOPS — on eMMC / SD / USB this contention is the #1 cause of
+  // rebuffering. Released once the response closes.
+  library.incrementLiveTranscodes();
+  let liveSlotReleased = false;
+  const releaseLiveSlot = () => {
+    if (liveSlotReleased) return;
+    liveSlotReleased = true;
+    try { library.decrementLiveTranscodes(); } catch { /* shutting down */ }
+  };
+  res.on('close', releaseLiveSlot);
+
+  // 4 MB read buffer instead of Node's 64 KB default. On slow storage
+  // (eMMC, SD, USB), 64 KB drains faster than the disk can refill it
+  // when other I/O is in flight (background conversion, torrent piece
+  // writes), which surfaces to the player as mid-playback buffering.
+  const READ_HWM = 4 * 1024 * 1024;
+
   const headers = {
     'Content-Type': mimeType,
     'X-Content-Type-Options': 'nosniff',
@@ -3937,16 +3957,14 @@ app.get('/api/library/:id/stream', async (req, res) => {
       'Content-Length': end - start + 1,
     });
 
-    const stream = fs.createReadStream(filePath, { start, end });
+    const stream = fs.createReadStream(filePath, { start, end, highWaterMark: READ_HWM });
     stream.pipe(res);
     stream.on('error', () => res.end());
-    res.on('close', () => stream.destroy());
   } else {
     res.status(200).set({ ...headers, 'Content-Length': fileSize });
-    const stream = fs.createReadStream(filePath);
+    const stream = fs.createReadStream(filePath, { highWaterMark: READ_HWM });
     stream.pipe(res);
     stream.on('error', () => res.end());
-    res.on('close', () => stream.destroy());
   }
 });
 
@@ -3968,6 +3986,18 @@ app.get('/api/library/:id/stream/remux', rateLimit, remuxGate, async (req, res) 
   }
 
   const safeFilename = path.basename(filePath).replace(/[^\w\s.\-()[\]]/g, '_').replace(/\.(mkv|avi|wmv|mp4)$/i, '.mp4').substring(0, 200);
+
+  // Claim a live-playback slot so any running background local conversion
+  // pauses for the duration of this remux. Even though remux is mostly
+  // stream-copy, the source-file disk reads contend with conversion I/O
+  // and CPU. Released exactly once across all exit paths via a flag.
+  library.incrementLiveTranscodes();
+  let liveSlotReleased = false;
+  const releaseLiveSlot = () => {
+    if (liveSlotReleased) return;
+    liveSlotReleased = true;
+    try { library.decrementLiveTranscodes(); } catch { /* shutting down */ }
+  };
 
   // Read the file directly (not via stdin pipe) so ffmpeg can seek within
   // it. MP4 sources that aren't faststart keep the moov atom at the END
@@ -4024,6 +4054,7 @@ app.get('/api/library/:id/stream/remux', rateLimit, remuxGate, async (req, res) 
 
   ffmpeg.on('error', (err) => {
     console.error(`[Library] FFmpeg spawn error: ${err.message}`);
+    releaseLiveSlot();
     if (!firstByteSent && !res.headersSent) {
       res.status(500).json({ error: 'Remux failed — FFmpeg not available' });
     } else {
@@ -4035,6 +4066,7 @@ app.get('/api/library/:id/stream/remux', rateLimit, remuxGate, async (req, res) 
     if (code && code !== 0 && code !== 255) {
       console.warn(`[Library] FFmpeg exited with code ${code}`);
     }
+    releaseLiveSlot();
     if (!firstByteSent && !res.headersSent) {
       res.status(502).json({
         error: 'Remux failed',
@@ -4046,6 +4078,7 @@ app.get('/api/library/:id/stream/remux', rateLimit, remuxGate, async (req, res) 
   });
 
   res.on('close', () => {
+    releaseLiveSlot();
     try { ffmpeg.kill('SIGTERM'); } catch { /* ignore */ }
   });
 });
@@ -5156,7 +5189,7 @@ app.listen(PORT, '0.0.0.0', () => {
 
 // Graceful shutdown with timeout to ensure metadata is saved even if engines hang
 let shuttingDown = false;
-function shutdown() {
+async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log('[Server] Shutting down gracefully...');
@@ -5175,7 +5208,11 @@ function shutdown() {
   for (const id of [...hlsSessions.keys()]) {
     _stopHlsSession(id, 'server shutdown');
   }
-  try { library.destroy(); } catch (err) {
+  // library.destroy() is now async — it awaits the final metadata write
+  // (which itself is async via libuv threadpool, see _writeMetadataNow).
+  // Without the await here, process.exit would race the disk write and
+  // we'd lose the last burst of state changes.
+  try { await library.destroy(); } catch (err) {
     console.error(`[Server] Library shutdown error: ${err.message}`);
   }
   try { if (engine) engine.destroy(); } catch (err) {

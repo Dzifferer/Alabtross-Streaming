@@ -1317,13 +1317,13 @@ app.patch('/api/music/playlists/:id', requireAuth, rateLimit, express.json(), (r
   }
 });
 
-app.delete('/api/music/playlists/:id', rateLimit, (req, res) => {
+app.delete('/api/music/playlists/:id', requireAuth, rateLimit, (req, res) => {
   const ok = musicPlaylists.remove(req.params.id);
   if (!ok) return res.status(404).json({ error: 'Playlist not found' });
   res.json({ ok: true });
 });
 
-app.post('/api/music/playlists/:id/items', rateLimit, express.json(), (req, res) => {
+app.post('/api/music/playlists/:id/items', requireAuth, rateLimit, express.json(), (req, res) => {
   try {
     const { albumId, trackIndex } = req.body || {};
     const pl = musicPlaylists.addItem(req.params.id, albumId, trackIndex);
@@ -1334,7 +1334,7 @@ app.post('/api/music/playlists/:id/items', rateLimit, express.json(), (req, res)
   }
 });
 
-app.patch('/api/music/playlists/:id/items/reorder', rateLimit, express.json(), (req, res) => {
+app.patch('/api/music/playlists/:id/items/reorder', requireAuth, rateLimit, express.json(), (req, res) => {
   try {
     const { from, to } = req.body || {};
     const pl = musicPlaylists.reorderItem(req.params.id, from, to);
@@ -1345,7 +1345,7 @@ app.patch('/api/music/playlists/:id/items/reorder', rateLimit, express.json(), (
   }
 });
 
-app.delete('/api/music/playlists/:id/items/:index', rateLimit, (req, res) => {
+app.delete('/api/music/playlists/:id/items/:index', requireAuth, rateLimit, (req, res) => {
   try {
     const index = parseInt(req.params.index, 10);
     const pl = musicPlaylists.removeItem(req.params.id, index);
@@ -1676,7 +1676,7 @@ async function saveManualCategories() {
 }
 
 // POST /api/library/categorize - manually assign a genre or collection to a movie
-app.post('/api/library/categorize', rateLimit, (req, res) => {
+app.post('/api/library/categorize', requireAuth, rateLimit, (req, res) => {
   const { imdbId, genre, collectionId, collectionName } = req.body || {};
   if (!imdbId) return res.status(400).json({ error: 'imdbId is required' });
 
@@ -1704,7 +1704,7 @@ app.post('/api/library/categorize', rateLimit, (req, res) => {
 });
 
 // DELETE /api/library/categorize/:imdbId - remove manual category override
-app.delete('/api/library/categorize/:imdbId', rateLimit, (req, res) => {
+app.delete('/api/library/categorize/:imdbId', requireAuth, rateLimit, (req, res) => {
   const { imdbId } = req.params;
   delete manualCategories[imdbId];
   saveManualCategories();
@@ -2240,7 +2240,7 @@ app.get('/api/streams/diagnose', rateLimit, async (req, res) => {
 // without having to grep logs: returns peer-discovery counts,
 // handshake counts, and a plain-English reason for each failure mode.
 // Body: { magnet: "magnet:?xt=..." [, durationMs: number] }
-app.post('/api/library/diagnose', rateLimit, express.json({ limit: '4kb' }), async (req, res) => {
+app.post('/api/library/diagnose', requireAuth, rateLimit, express.json({ limit: '4kb' }), async (req, res) => {
   const magnet = req.body && typeof req.body.magnet === 'string' ? req.body.magnet : '';
   if (!/^magnet:\?/i.test(magnet)) {
     return res.status(400).json({ error: 'Missing or invalid magnet URI' });
@@ -2699,7 +2699,7 @@ app.get('/api/library/audit', async (req, res) => {
 //     deep?: bool,                       // default false (ffprobe check)
 //     dryRun?: bool                      // default false
 //   }
-app.post('/api/library/audit/remediate', rateLimit, async (req, res) => {
+app.post('/api/library/audit/remediate', requireAuth, rateLimit, async (req, res) => {
   const {
     action = 'remove',
     removeOrphanFiles = false,
@@ -2821,7 +2821,7 @@ app.get('/api/library/:id', (req, res) => {
 });
 
 // POST /api/library/add — add item to library and start download
-app.post('/api/library/add', rateLimit, (req, res) => {
+app.post('/api/library/add', requireAuth, rateLimit, (req, res) => {
   const { imdbId, type, name, poster, year, magnetUri, infoHash, quality, size, season, episode } = req.body;
 
   if (!infoHash || !/^[0-9a-f]{40}$/i.test(infoHash)) {
@@ -2844,7 +2844,7 @@ app.post('/api/library/add', rateLimit, (req, res) => {
 });
 
 // POST /api/library/add-pack — add season pack to library (downloads all episodes)
-app.post('/api/library/add-pack', rateLimit, async (req, res) => {
+app.post('/api/library/add-pack', requireAuth, rateLimit, async (req, res) => {
   const { imdbId, name, poster, year, magnetUri, infoHash, quality, size, season } = req.body;
 
   if (!infoHash || !/^[0-9a-f]{40}$/i.test(infoHash)) {
@@ -3007,7 +3007,7 @@ function fileNameLooksLikeEpisode(fileName) {
 // → paused → failed, so if something goes wrong partway through, the safest
 // groups land first.
 let _repairInProgress = false;
-app.post('/api/library/repair-metadata', rateLimit, async (req, res) => {
+app.post('/api/library/repair-metadata', requireAuth, rateLimit, async (req, res) => {
   if (_repairInProgress) return res.status(409).json({ error: 'Repair already in progress' });
   _repairInProgress = true;
   try {
@@ -3254,7 +3254,7 @@ app.post('/api/library/repair-metadata', rateLimit, async (req, res) => {
 //                          repair re-derives)
 //
 // Response: { packId, mode, dryRun, clearMetadata, reclassified[], stats, backupPath }
-app.post('/api/library/reclassify-pack', rateLimit, async (req, res) => {
+app.post('/api/library/reclassify-pack', requireAuth, rateLimit, async (req, res) => {
   const packId = (req.query.packId || '').toString();
   const mode = (req.query.mode || '').toString();
   const dryRun = req.query.dryRun === '1' || req.query.dryRun === 'true';
@@ -3387,7 +3387,7 @@ app.post('/api/library/reclassify-pack', rateLimit, async (req, res) => {
 //   ?includeAnyFailed=1    remove every 'failed' item regardless of
 //                          error string. ONLY use this if you've
 //                          verified the dry-run list looks right.
-app.post('/api/library/purge-failed', rateLimit, (req, res) => {
+app.post('/api/library/purge-failed', requireAuth, rateLimit, (req, res) => {
   const dryRun = req.query.dryRun === '1' || req.query.dryRun === 'true';
   const includeFileMissing = req.query.includeFileMissing === '1' || req.query.includeFileMissing === 'true';
   const includeAnyFailed = req.query.includeAnyFailed === '1' || req.query.includeAnyFailed === 'true';
@@ -3459,7 +3459,7 @@ app.post('/api/library/purge-failed', rateLimit, (req, res) => {
 
 // POST /api/library/add-manual — add a torrent by magnet URI or info hash.
 // Handles both single-file and multi-file (collection) torrents automatically.
-app.post('/api/library/add-manual', rateLimit, async (req, res) => {
+app.post('/api/library/add-manual', requireAuth, rateLimit, async (req, res) => {
   const { TRACKERS } = require('./lib/file-safety');
   let { magnetUri, infoHash, name, type, quality } = req.body;
 
@@ -3532,7 +3532,7 @@ app.post('/api/library/add-manual', rateLimit, async (req, res) => {
 });
 
 // POST /api/library/restart-pack — restart a pack download (re-scan torrent for all episodes)
-app.post('/api/library/restart-pack', rateLimit, async (req, res) => {
+app.post('/api/library/restart-pack', requireAuth, rateLimit, async (req, res) => {
   const { packId } = req.body;
   if (!packId) return res.status(400).json({ error: 'packId is required' });
 
@@ -3551,7 +3551,7 @@ app.post('/api/library/restart-pack', rateLimit, async (req, res) => {
 // for every season that's not fully present locally, searches for a season
 // pack torrent and adds it. addSeasonPack dedupes by (imdbId, season,
 // episode) so episodes already on disk are not re-downloaded.
-app.post('/api/library/find-missing-show', rateLimit, express.json(), async (req, res) => {
+app.post('/api/library/find-missing-show', requireAuth, rateLimit, express.json(), async (req, res) => {
   const { imdbId } = req.body || {};
   let { title, year, poster } = req.body || {};
 
@@ -3642,7 +3642,7 @@ app.post('/api/library/find-missing-show', rateLimit, express.json(), async (req
 });
 
 // DELETE /api/library/:id — remove item from library
-app.delete('/api/library/:id', rateLimit, (req, res) => {
+app.delete('/api/library/:id', requireAuth, rateLimit, (req, res) => {
   const removed = library.removeItem(req.params.id);
   if (!removed) return res.status(404).json({ error: 'Item not found' });
   _libraryVersion++;
@@ -3650,7 +3650,7 @@ app.delete('/api/library/:id', rateLimit, (req, res) => {
 });
 
 // POST /api/library/:id/pause — pause a downloading item
-app.post('/api/library/:id/pause', rateLimit, (req, res) => {
+app.post('/api/library/:id/pause', requireAuth, rateLimit, (req, res) => {
   const paused = library.pauseItem(req.params.id);
   if (!paused) return res.status(400).json({ error: 'Cannot pause this item' });
   _libraryVersion++;
@@ -3658,7 +3658,7 @@ app.post('/api/library/:id/pause', rateLimit, (req, res) => {
 });
 
 // POST /api/library/:id/resume — resume a paused item
-app.post('/api/library/:id/resume', rateLimit, (req, res) => {
+app.post('/api/library/:id/resume', requireAuth, rateLimit, (req, res) => {
   const resumed = library.resumeItem(req.params.id);
   if (!resumed) return res.status(400).json({ error: 'Cannot resume this item' });
   _libraryVersion++;
@@ -3666,7 +3666,7 @@ app.post('/api/library/:id/resume', rateLimit, (req, res) => {
 });
 
 // POST /api/library/:id/retry — retry a failed download
-app.post('/api/library/:id/retry', rateLimit, (req, res) => {
+app.post('/api/library/:id/retry', requireAuth, rateLimit, (req, res) => {
   const retried = library.retryItem(req.params.id);
   if (!retried) return res.status(400).json({ error: 'Cannot retry this item' });
   _libraryVersion++;
@@ -3678,7 +3678,7 @@ app.post('/api/library/:id/retry', rateLimit, (req, res) => {
 // back through the download state machine so torrent-stream's verify pass
 // refills the missing pieces. No-op if the stored magnet URI is missing
 // (nothing to re-download from).
-app.post('/api/library/:id/repair', rateLimit, (req, res) => {
+app.post('/api/library/:id/repair', requireAuth, rateLimit, (req, res) => {
   const result = library.repairItem(req.params.id);
   if (!result.ok) return res.status(400).json({ error: result.reason });
   _libraryVersion++;
@@ -3689,7 +3689,7 @@ app.post('/api/library/:id/repair', rateLimit, (req, res) => {
 // queue a repair re-download for the sparse ones. Returns counts so the UI
 // can surface a meaningful toast ("Re-downloading 12 items") instead of a
 // silent success.
-app.post('/api/library/repair-all-incomplete', rateLimit, async (req, res) => {
+app.post('/api/library/repair-all-incomplete', requireAuth, rateLimit, async (req, res) => {
   try {
     const summary = await library.repairAllIncomplete();
     _libraryVersion++;
@@ -3704,7 +3704,7 @@ app.post('/api/library/repair-all-incomplete', rateLimit, async (req, res) => {
 // flagged incomplete that has no recoverable magnet (own, pack sibling,
 // or directory sibling). These are the "can't auto-fix" entries — the
 // user explicitly opts in to cleaning them up.
-app.post('/api/library/remove-unfixable-broken', rateLimit, (req, res) => {
+app.post('/api/library/remove-unfixable-broken', requireAuth, rateLimit, (req, res) => {
   try {
     const summary = library.removeUnfixableBroken();
     _libraryVersion++;
@@ -3716,7 +3716,7 @@ app.post('/api/library/remove-unfixable-broken', rateLimit, (req, res) => {
 });
 
 // POST /api/library/:id/start — force-start a queued item (if slots available)
-app.post('/api/library/:id/start', rateLimit, (req, res) => {
+app.post('/api/library/:id/start', requireAuth, rateLimit, (req, res) => {
   const started = library.startQueuedItem(req.params.id);
   if (!started) return res.status(400).json({ error: 'Cannot start this item (no available slots or not queued)' });
   _libraryVersion++;
@@ -3724,7 +3724,7 @@ app.post('/api/library/:id/start', rateLimit, (req, res) => {
 });
 
 // POST /api/library/:id/reorder — reorder a queued item
-app.post('/api/library/:id/reorder', rateLimit, (req, res) => {
+app.post('/api/library/:id/reorder', requireAuth, rateLimit, (req, res) => {
   const position = parseInt(req.body.position, 10);
   if (isNaN(position) || position < 0) {
     return res.status(400).json({ error: 'Invalid position' });
@@ -3736,7 +3736,7 @@ app.post('/api/library/:id/reorder', rateLimit, (req, res) => {
 });
 
 // POST /api/library/pause-pack — atomically pause every item in a pack
-app.post('/api/library/pause-pack', rateLimit, (req, res) => {
+app.post('/api/library/pause-pack', requireAuth, rateLimit, (req, res) => {
   const { packId } = req.body;
   if (!packId) return res.status(400).json({ error: 'packId is required' });
   const paused = library.pausePack(packId);
@@ -3746,7 +3746,7 @@ app.post('/api/library/pause-pack', rateLimit, (req, res) => {
 });
 
 // POST /api/library/resume-pack — atomically resume every paused item in a pack
-app.post('/api/library/resume-pack', rateLimit, (req, res) => {
+app.post('/api/library/resume-pack', requireAuth, rateLimit, (req, res) => {
   const { packId } = req.body;
   if (!packId) return res.status(400).json({ error: 'packId is required' });
   const resumed = library.resumePack(packId);
@@ -3756,7 +3756,7 @@ app.post('/api/library/resume-pack', rateLimit, (req, res) => {
 });
 
 // POST /api/library/retry-pack — atomically retry every failed item in a pack
-app.post('/api/library/retry-pack', rateLimit, (req, res) => {
+app.post('/api/library/retry-pack', requireAuth, rateLimit, (req, res) => {
   const { packId } = req.body;
   if (!packId) return res.status(400).json({ error: 'packId is required' });
   const retried = library.retryPack(packId);
@@ -3766,7 +3766,7 @@ app.post('/api/library/retry-pack', rateLimit, (req, res) => {
 });
 
 // POST /api/library/start-pack — force-start a queued pack (if slots available)
-app.post('/api/library/start-pack', rateLimit, (req, res) => {
+app.post('/api/library/start-pack', requireAuth, rateLimit, (req, res) => {
   const { packId } = req.body;
   if (!packId) return res.status(400).json({ error: 'packId is required' });
   const started = library.startPack(packId);
@@ -3776,7 +3776,7 @@ app.post('/api/library/start-pack', rateLimit, (req, res) => {
 });
 
 // DELETE /api/library/pack/:packId — atomically remove every item in a pack
-app.delete('/api/library/pack/:packId', rateLimit, (req, res) => {
+app.delete('/api/library/pack/:packId', requireAuth, rateLimit, (req, res) => {
   const removed = library.removePack(req.params.packId);
   if (!removed) return res.status(404).json({ error: 'Pack not found' });
   _libraryVersion++;
@@ -3784,7 +3784,7 @@ app.delete('/api/library/pack/:packId', rateLimit, (req, res) => {
 });
 
 // POST /api/library/reorder-pack — reorder a queued pack in the queue
-app.post('/api/library/reorder-pack', rateLimit, (req, res) => {
+app.post('/api/library/reorder-pack', requireAuth, rateLimit, (req, res) => {
   const { packId, position } = req.body;
   if (!packId) return res.status(400).json({ error: 'packId is required' });
   const pos = parseInt(position, 10);
@@ -3796,7 +3796,7 @@ app.post('/api/library/reorder-pack', rateLimit, (req, res) => {
 
 // POST /api/library/bulk-relink — re-link all episodes matching a showName to a new IMDB entry.
 // Auto-fetches poster from TMDB if not provided.
-app.post('/api/library/bulk-relink', rateLimit, async (req, res) => {
+app.post('/api/library/bulk-relink', requireAuth, rateLimit, async (req, res) => {
   const { matchShowName, imdbId, showName, year } = req.body || {};
   if (!matchShowName) return res.status(400).json({ error: 'matchShowName is required' });
   if (!imdbId || !/^tt\d{1,10}$/.test(imdbId)) return res.status(400).json({ error: 'Valid imdbId is required' });
@@ -3838,7 +3838,7 @@ app.post('/api/library/bulk-relink', rateLimit, async (req, res) => {
 });
 
 // POST /api/library/:id/relink — manually re-link a library item to a different IMDB entry
-app.post('/api/library/:id/relink', rateLimit, (req, res) => {
+app.post('/api/library/:id/relink', requireAuth, rateLimit, (req, res) => {
   const { imdbId, name, poster, year, type, showName } = req.body || {};
   if (!imdbId) return res.status(400).json({ error: 'imdbId is required' });
   if (!/^tt\d{1,10}$/.test(imdbId)) return res.status(400).json({ error: 'Invalid IMDB ID format' });
@@ -3864,7 +3864,7 @@ app.post('/api/library/:id/relink', rateLimit, (req, res) => {
 
 // POST /api/library/:id/auto-match — run the auto-matcher on a single item.
 // Use this after editing the parsed query or after adding new torrents.
-app.post('/api/library/:id/auto-match', rateLimit, async (req, res) => {
+app.post('/api/library/:id/auto-match', requireAuth, rateLimit, async (req, res) => {
   if (!TMDB_API_KEY) return res.status(503).json({ error: 'TMDB API key not configured' });
 
   let targetId = req.params.id;
@@ -3904,7 +3904,7 @@ app.post('/api/library/:id/auto-match', rateLimit, async (req, res) => {
 // dropped everything beyond the first `limit` items, so "total recheck"
 // never actually rechecked libraries with more than 100 entries).
 let _autoMatchInProgress = false;
-app.post('/api/library/auto-match-all', rateLimit, async (req, res) => {
+app.post('/api/library/auto-match-all', requireAuth, rateLimit, async (req, res) => {
   if (_autoMatchInProgress) return res.status(409).json({ error: 'Repair already in progress' });
   _autoMatchInProgress = true;
   try {
@@ -3968,7 +3968,7 @@ app.post('/api/library/auto-match-all', rateLimit, async (req, res) => {
 // POST /api/library/:id/mark-manual — mark an item as manually curated so
 // subsequent auto-match passes leave it alone. Useful when the user accepts
 // the current metadata even if no imdbId is attached.
-app.post('/api/library/:id/mark-manual', rateLimit, (req, res) => {
+app.post('/api/library/:id/mark-manual', requireAuth, rateLimit, (req, res) => {
   const item = library.getItem(req.params.id);
   if (!item) return res.status(404).json({ error: 'Item not found' });
   // Re-use relinkItem so matchState flips to manual. Pass current metadata
@@ -5039,7 +5039,7 @@ app.get('/api/settings/max-streams', (req, res) => {
   res.json({ maxConcurrentStreams: MAX_CONCURRENT_STREAMS });
 });
 
-app.post('/api/settings/max-streams', (req, res) => {
+app.post('/api/settings/max-streams', requireAuth, (req, res) => {
   const value = parseInt(req.body.maxConcurrentStreams, 10);
   if (!value || value < 1 || value > 20) {
     return res.status(400).json({ error: 'maxConcurrentStreams must be between 1 and 20' });
@@ -5061,7 +5061,7 @@ app.get('/api/settings/task-priority', (req, res) => {
   });
 });
 
-app.post('/api/settings/task-priority', (req, res) => {
+app.post('/api/settings/task-priority', requireAuth, (req, res) => {
   const value = String(req.body.taskPriority || '');
   if (!VALID_TASK_PRIORITIES.includes(value)) {
     return res.status(400).json({
@@ -5090,7 +5090,7 @@ app.get('/api/settings/cpu-protection', (req, res) => {
   res.json(library.getCpuProtection());
 });
 
-app.post('/api/settings/cpu-protection', (req, res) => {
+app.post('/api/settings/cpu-protection', requireAuth, (req, res) => {
   const body = req.body || {};
   const update = {};
   if (typeof body.enabled === 'boolean') update.enabled = body.enabled;
@@ -5137,7 +5137,7 @@ app.post('/api/settings/cpu-protection', (req, res) => {
 // Dedicated manual pause/resume endpoint — simpler shape for the "big red
 // button" UI control. Accepts { paused: true|false } or a toggle if no
 // body is provided.
-app.post('/api/settings/cpu-protection/pause', (req, res) => {
+app.post('/api/settings/cpu-protection/pause', requireAuth, (req, res) => {
   const body = req.body || {};
   let paused;
   if (typeof body.paused === 'boolean') {
@@ -5197,7 +5197,7 @@ app.get('/api/cast/devices', rateLimit, async (req, res) => {
 //   - streamUrl: the path to the stream (e.g. /api/play/<hash> or /api/library/<id>/stream)
 //   - title: display title
 //   - mimeType: optional, defaults to video/mp4
-app.post('/api/cast/play', rateLimit, async (req, res) => {
+app.post('/api/cast/play', requireAuth, rateLimit, async (req, res) => {
   const { device, streamPath, title, mimeType } = req.body;
 
   if (!device || !device.id || !device.type) {
@@ -5224,7 +5224,7 @@ app.post('/api/cast/play', rateLimit, async (req, res) => {
 });
 
 // POST /api/cast/stop — stop casting on a device
-app.post('/api/cast/stop', rateLimit, async (req, res) => {
+app.post('/api/cast/stop', requireAuth, rateLimit, async (req, res) => {
   const { deviceId } = req.body;
   if (!deviceId) return res.status(400).json({ error: 'Missing deviceId' });
 
@@ -5237,7 +5237,7 @@ app.post('/api/cast/stop', rateLimit, async (req, res) => {
 });
 
 // POST /api/cast/pause — toggle pause on a device
-app.post('/api/cast/pause', rateLimit, async (req, res) => {
+app.post('/api/cast/pause', requireAuth, rateLimit, async (req, res) => {
   const { deviceId } = req.body;
   if (!deviceId) return res.status(400).json({ error: 'Missing deviceId' });
 

@@ -2569,7 +2569,8 @@ app.get('/api/diagnostics/system', async (req, res) => {
 // GET /api/library — list all library items
 app.get('/api/library', (req, res) => {
   try {
-    const etag = `"lib-${_libraryVersion}"`;
+    const epoch = Math.floor(Date.now() / 2000);
+    const etag = `"lib-${_libraryVersion}-${epoch}"`;
     if (req.headers['if-none-match'] === etag) {
       return res.status(304).end();
     }

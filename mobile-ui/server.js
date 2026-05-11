@@ -3626,6 +3626,7 @@ app.post('/api/library/:id/retry', rateLimit, (req, res) => {
 app.post('/api/library/:id/repair', rateLimit, (req, res) => {
   const result = library.repairItem(req.params.id);
   if (!result.ok) return res.status(400).json({ error: result.reason });
+  _libraryVersion++;
   res.json({ success: true, queued: !!result.queued });
 });
 
@@ -3636,6 +3637,7 @@ app.post('/api/library/:id/repair', rateLimit, (req, res) => {
 app.post('/api/library/repair-all-incomplete', rateLimit, async (req, res) => {
   try {
     const summary = await library.repairAllIncomplete();
+    _libraryVersion++;
     res.json({ success: true, ...summary });
   } catch (err) {
     console.error('[Server] repairAllIncomplete failed:', err);
@@ -3650,6 +3652,7 @@ app.post('/api/library/repair-all-incomplete', rateLimit, async (req, res) => {
 app.post('/api/library/remove-unfixable-broken', rateLimit, (req, res) => {
   try {
     const summary = library.removeUnfixableBroken();
+    _libraryVersion++;
     res.json({ success: true, ...summary });
   } catch (err) {
     console.error('[Server] removeUnfixableBroken failed:', err);
@@ -3661,6 +3664,7 @@ app.post('/api/library/remove-unfixable-broken', rateLimit, (req, res) => {
 app.post('/api/library/:id/start', rateLimit, (req, res) => {
   const started = library.startQueuedItem(req.params.id);
   if (!started) return res.status(400).json({ error: 'Cannot start this item (no available slots or not queued)' });
+  _libraryVersion++;
   res.json({ success: true });
 });
 
@@ -3672,6 +3676,7 @@ app.post('/api/library/:id/reorder', rateLimit, (req, res) => {
   }
   const reordered = library.reorderQueue(req.params.id, position);
   if (!reordered) return res.status(400).json({ error: 'Cannot reorder this item' });
+  _libraryVersion++;
   res.json({ success: true });
 });
 
@@ -3681,6 +3686,7 @@ app.post('/api/library/pause-pack', rateLimit, (req, res) => {
   if (!packId) return res.status(400).json({ error: 'packId is required' });
   const paused = library.pausePack(packId);
   if (!paused) return res.status(400).json({ error: 'Cannot pause this pack' });
+  _libraryVersion++;
   res.json({ success: true });
 });
 
@@ -3690,6 +3696,7 @@ app.post('/api/library/resume-pack', rateLimit, (req, res) => {
   if (!packId) return res.status(400).json({ error: 'packId is required' });
   const resumed = library.resumePack(packId);
   if (!resumed) return res.status(400).json({ error: 'Cannot resume this pack' });
+  _libraryVersion++;
   res.json({ success: true });
 });
 
@@ -3699,6 +3706,7 @@ app.post('/api/library/retry-pack', rateLimit, (req, res) => {
   if (!packId) return res.status(400).json({ error: 'packId is required' });
   const retried = library.retryPack(packId);
   if (!retried) return res.status(400).json({ error: 'Cannot retry this pack' });
+  _libraryVersion++;
   res.json({ success: true });
 });
 
@@ -3708,6 +3716,7 @@ app.post('/api/library/start-pack', rateLimit, (req, res) => {
   if (!packId) return res.status(400).json({ error: 'packId is required' });
   const started = library.startPack(packId);
   if (!started) return res.status(400).json({ error: 'Cannot start this pack (no free slots or no queued items)' });
+  _libraryVersion++;
   res.json({ success: true });
 });
 
@@ -3715,6 +3724,7 @@ app.post('/api/library/start-pack', rateLimit, (req, res) => {
 app.delete('/api/library/pack/:packId', rateLimit, (req, res) => {
   const removed = library.removePack(req.params.packId);
   if (!removed) return res.status(404).json({ error: 'Pack not found' });
+  _libraryVersion++;
   res.json({ success: true });
 });
 

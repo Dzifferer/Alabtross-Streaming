@@ -2860,10 +2860,11 @@ class LibraryManager {
       return { magnetUri: brokenItem.magnetUri, infoHash: brokenItem.infoHash, source: 'self' };
     }
     // Build an index of {packId|rootDir} -> first matching sibling with a
-    // magnet, cached briefly. Without this cache, _sanitizeItem would be
-    // O(n) per call and sanitize-all would be O(n²) on library load (big
-    // libraries go from milliseconds to multi-hundred-ms). TTL is short
-    // so new torrent adds become visible to the repair flow quickly.
+    // magnet, cached with a 30s TTL. Without this cache, _sanitizeItem
+    // would be O(n) per call and sanitize-all would be O(n²) on library
+    // load (big libraries go from milliseconds to multi-hundred-ms).
+    // Mutation-based invalidation (_invalidateRecoveryIndex) ensures new
+    // torrent adds become visible immediately; the TTL is just a backstop.
     const now = Date.now();
     if (!this._recoveryIndex || now - this._recoveryIndexBuiltAt > 30000) {
       const byPackId  = new Map();

@@ -4611,6 +4611,11 @@ class LibraryManager {
       const oldest = set.values().next().value;
       set.delete(oldest);
     }
+    // Evict oldest infoHash entries to prevent unbounded Map growth.
+    if (this._goodPeers.size > 500) {
+      const oldest = this._goodPeers.keys().next().value;
+      this._goodPeers.delete(oldest);
+    }
   }
 
   _loadPeerCache(infoHash) {
@@ -4639,7 +4644,12 @@ class LibraryManager {
     try {
       const p = this._peerCachePath(infoHash);
       const data = { infoHash, peers: [...set], savedAt: Date.now() };
-      fs.writeFileSync(p, JSON.stringify(data));
+      const tmp = p + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(data));
+      const fd = fs.openSync(tmp, 'r');
+      fs.fsyncSync(fd);
+      fs.closeSync(fd);
+      fs.renameSync(tmp, p);
     } catch (err) {
       console.warn(`[Library] Failed to save peer cache for ${infoHash.slice(0, 8)}: ${err.message}`);
     }
@@ -4665,7 +4675,8 @@ class LibraryManager {
     if (!engine || !infoHash) return;
     if (!this._engineInfoHash) this._engineInfoHash = new WeakMap();
     this._engineInfoHash.set(engine, infoHash);
-    engine.on('wire', (wire, addr) => {
+    engine.on('wire', (wire) => {
+      const addr = wire.peerAddress;
       if (addr) this._recordGoodPeer(infoHash, addr);
     });
   }
@@ -4980,7 +4991,13 @@ class LibraryManager {
   _savePackCatalog() {
     try {
       const data = [...this._packCatalog.values()];
-      fs.writeFileSync(this._packCatalogFile, JSON.stringify(data, null, 2), 'utf8');
+      const catalogPath = this._packCatalogFile;
+      const tmp = catalogPath + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+      const fd = fs.openSync(tmp, 'r');
+      fs.fsyncSync(fd);
+      fs.closeSync(fd);
+      fs.renameSync(tmp, catalogPath);
     } catch (err) {
       console.error(`[Library] Pack catalog save failed: ${err.message}`);
     }
@@ -7123,7 +7140,8 @@ class LibraryManager {
 
   _safeDirectoryName(item) {
     const base = (item.name || 'unknown').replace(/[^\w\s.\-()[\]]/g, '_').substring(0, 100);
-    return `${base}_${item.infoHash.slice(0, 8)}`;
+    const hashPrefix = item.infoHash ? item.infoHash.slice(0, 8) : '';
+    return `${base}_${hashPrefix}`;
   }
 }
 

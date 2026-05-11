@@ -14,6 +14,9 @@
   //   { kind: 'torrent'|'youtube', src, infoHash?, fileIdx?, videoId?,
   //     albumId?, trackIndex?, title, artist, album, coverUrl, duration }
 
+  let consecutiveErrors = 0;
+  const MAX_CONSECUTIVE_ERRORS = 3;
+
   const listeners = new Set();
   function emit() {
     for (const fn of listeners) {
@@ -120,8 +123,16 @@
 
   function enqueueNext(item) {
     if (state.currentIndex < 0) return playQueue([item], 0);
-    state.queue.splice(state.currentIndex + 1, 0, item);
-    if (state.shuffleOrder) state.shuffleOrder.splice(state.shuffleOrder.indexOf(state.currentIndex) + 1, 0, state.queue.length - 1);
+    // After the splice, increment any shuffleOrder entries that are >= the insertion point
+    const insertIdx = state.currentIndex + 1;
+    state.queue.splice(insertIdx, 0, item);
+    if (state.shuffleOrder) {
+      state.shuffleOrder = state.shuffleOrder.map(i => i >= insertIdx ? i + 1 : i);
+      // Insert the new index at a random position in shuffleOrder (after current position)
+      const currentShufflePos = state.shuffleOrder.indexOf(state.currentIndex);
+      const randPos = currentShufflePos + 1 + Math.floor(Math.random() * (state.shuffleOrder.length - currentShufflePos));
+      state.shuffleOrder.splice(Math.min(randPos, state.shuffleOrder.length), 0, insertIdx);
+    }
     save(); emit();
   }
 
@@ -253,6 +264,7 @@
   });
   audio.addEventListener('play', () => {
     state.paused = false;
+    consecutiveErrors = 0;
     setMediaPlaybackState('playing');
     emit();
   });
@@ -265,8 +277,11 @@
   audio.addEventListener('ended', () => { next(); });
   audio.addEventListener('error', (e) => {
     console.warn('[MusicQueue] audio error', e);
-    // Try next track instead of hanging.
-    setTimeout(() => next(), 500);
+    consecutiveErrors++;
+    if (consecutiveErrors < MAX_CONSECUTIVE_ERRORS) {
+      // Try next track instead of hanging.
+      setTimeout(() => next(), 500);
+    }
   });
 
   // ─── MediaSession integration ────────────

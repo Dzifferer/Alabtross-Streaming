@@ -285,6 +285,7 @@ try {
 } catch { /* dir might not exist on very first boot */ }
 
 const hlsSessions = new Map(); // itemId -> { dir, ffmpeg, playlistPath, lastAccessMs, startedAt, firstSegmentPromise, ended }
+const _hlsLocks = new Map(); // itemId -> Promise — prevents duplicate session creation during async gaps
 
 function _hlsSessionDirFor(itemId) {
   // Sanitize the id into a filesystem-safe directory name. The id usually
@@ -2524,6 +2525,11 @@ app.get('/api/library', (req, res) => {
 
 // GET /api/library/debug — diagnostic endpoint for troubleshooting
 app.get('/api/library/debug', (req, res) => {
+  // Only allow access from localhost
+  const src = req.socket.remoteAddress;
+  if (src !== '127.0.0.1' && src !== '::1' && src !== '::ffff:127.0.0.1') {
+    return res.writeHead(403).end('Forbidden');
+  }
   const { VIDEO_EXTENSIONS } = require('./lib/file-safety');
   const diag = {};
 
@@ -4595,8 +4601,8 @@ app.get('/api/addon-proxy', rateLimit, async (req, res) => {
   }
 
   try {
-    await validateUrlNotSSRF(targetUrl);
-    const body = await fetchUrl(targetUrl);
+    const ssrfCheck = await validateUrlNotSSRF(targetUrl);
+    const body = await fetchUrl(targetUrl, 0, ssrfCheck && ssrfCheck.resolvedIp);
     const data = JSON.parse(body);
     if (_addonProxyCache.size >= ADDON_PROXY_CACHE_MAX) {
       const oldest = _addonProxyCache.keys().next().value;
@@ -4622,6 +4628,11 @@ const BLOCKED_IP_RANGES = [
   /^127\./, /^10\./, /^172\.(1[6-9]|2\d|3[01])\./, /^192\.168\./,
   /^169\.254\./, /^0\./, /^100\.(6[4-9]|[7-9]\d|1[0-2]\d)\./, /^::1$/,
   /^fc00:/, /^fe80:/, /^fd/, /^localhost$/i,
+  // IPv4-mapped IPv6 addresses
+  /^::ffff:127\./, /^::ffff:10\./, /^::ffff:192\.168\./,
+  /^::ffff:172\.(1[6-9]|2\d|3[01])\./,
+  /^::ffff:169\.254\./, /^::ffff:0\./,
+  /^::ffff:100\.(6[4-9]|[7-9]\d|1[0-2]\d)\./,
 ];
 
 function isBlockedHost(hostname) {
@@ -4636,16 +4647,20 @@ async function validateUrlNotSSRF(urlStr) {
   if (isBlockedHost(parsed.hostname)) {
     throw new Error('Blocked host');
   }
-  // Resolve DNS to check the actual IP
+  // Resolve DNS to check the actual IP and return it so callers can
+  // connect to the validated IP directly (prevents TOCTOU re-resolution).
+  let resolvedIp = null;
   try {
     const { address } = await dns.promises.lookup(parsed.hostname);
     if (isBlockedHost(address)) {
       throw new Error('Blocked host (resolved IP)');
     }
+    resolvedIp = address;
   } catch (err) {
     if (err.message.includes('Blocked')) throw err;
     // DNS resolution failure — allow the request to fail naturally
   }
+  return { hostname: parsed.hostname, resolvedIp };
 }
 
 const MAX_REDIRECTS = 5;
@@ -4681,7 +4696,7 @@ function fetchUrlDirect(url, redirectCount = 0, resolvedIp = null) {
         const redirectUrl = res.headers.location;
         res.resume();
         return validateUrlNotSSRF(redirectUrl)
-          .then(() => fetchUrl(redirectUrl, redirectCount + 1))
+          .then((validated) => fetchUrl(redirectUrl, redirectCount + 1, validated && validated.resolvedIp))
           .then(resolve, reject);
       }
       if (res.statusCode !== 200) { clearTimeout(deadline); res.resume(); return reject(new Error(`HTTP ${res.statusCode}`)); }
@@ -4698,9 +4713,9 @@ function fetchUrlDirect(url, redirectCount = 0, resolvedIp = null) {
   });
 }
 
-async function fetchUrl(url, redirectCount = 0) {
+async function fetchUrl(url, redirectCount = 0, resolvedIp = null) {
   try {
-    return await fetchUrlDirect(url, redirectCount);
+    return await fetchUrlDirect(url, redirectCount, resolvedIp);
   } catch (e) {
     if (e.message && (e.message.includes('ENOTFOUND') || e.message.includes('EAI_AGAIN'))) {
       const parsedUrl = new URL(url);
@@ -4759,8 +4774,9 @@ app.get('/api/iptv/channels', rateLimit, async (req, res) => {
   const playlistUrl = req.query.url;
   if (!playlistUrl) return res.status(400).json({ error: 'Missing url parameter' });
 
+  let ssrfCheck;
   try {
-    await validateUrlNotSSRF(playlistUrl);
+    ssrfCheck = await validateUrlNotSSRF(playlistUrl);
   } catch {
     return res.status(400).json({ error: 'Invalid or blocked URL' });
   }
@@ -4772,7 +4788,7 @@ app.get('/api/iptv/channels', rateLimit, async (req, res) => {
     channels = cached.channels;
   } else {
     try {
-      const body = await fetchUrl(playlistUrl);
+      const body = await fetchUrl(playlistUrl, 0, ssrfCheck && ssrfCheck.resolvedIp);
       channels = parseM3U(body);
       if (playlistCache.size >= PLAYLIST_CACHE_MAX) {
         const oldest = playlistCache.keys().next().value;
@@ -4824,17 +4840,26 @@ app.get('/api/iptv/stream', rateLimit, async (req, res) => {
   if (!streamUrl) return res.status(400).json({ error: 'Missing url parameter' });
 
   let parsedUrl;
+  let ssrfCheck;
   try {
     parsedUrl = new URL(streamUrl);
-    await validateUrlNotSSRF(streamUrl);
+    ssrfCheck = await validateUrlNotSSRF(streamUrl);
   } catch {
     return res.status(400).json({ error: 'Invalid or blocked URL' });
   }
 
   const mod = parsedUrl.protocol === 'https:' ? https : http;
-  const proxyReq = mod.get(streamUrl, {
-    headers: { 'User-Agent': 'Albatross/1.0' },
+  const streamResolvedIp = ssrfCheck && ssrfCheck.resolvedIp;
+  const proxyReq = mod.get({
+    hostname: streamResolvedIp || parsedUrl.hostname,
+    port: parsedUrl.port || (mod === https ? 443 : 80),
+    path: parsedUrl.pathname + parsedUrl.search,
+    headers: {
+      'User-Agent': 'Albatross/1.0',
+      ...(streamResolvedIp ? { Host: parsedUrl.hostname } : {}),
+    },
     timeout: 15000,
+    servername: parsedUrl.hostname,
   }, (upstream) => {
     if (upstream.statusCode >= 300 && upstream.statusCode < 400 && upstream.headers.location) {
       // Follow redirect through proxy (SSRF check happens on re-entry)
@@ -4871,6 +4896,20 @@ app.get('/api/iptv/stream', rateLimit, async (req, res) => {
         res.send(rewritten);
       });
     } else {
+      // Enforce a size limit on proxied streams to prevent abuse
+      const MAX_IPTV_BYTES = 500 * 1024 * 1024; // 500 MB
+      let bytes = 0;
+      upstream.on('data', (chunk) => {
+        bytes += chunk.length;
+        if (bytes > MAX_IPTV_BYTES) {
+          upstream.destroy();
+          if (!res.headersSent) {
+            res.status(502).json({ error: 'Stream too large' });
+          } else {
+            res.end();
+          }
+        }
+      });
       upstream.pipe(res);
     }
   });

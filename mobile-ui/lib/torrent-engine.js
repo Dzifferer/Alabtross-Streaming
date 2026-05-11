@@ -357,7 +357,7 @@ class TorrentEngine {
       const stream = file.createReadStream({ start, end });
       const meter = this._createMeter(hash, 'direct');
       stream.pipe(meter).pipe(res);
-      stream.on('error', (err) => { console.error(`[TorrentEngine] Stream error: ${err.message}`); meter.destroy(); if (!res.destroyed) res.end(); });
+      stream.on('error', (err) => { console.error(`[TorrentEngine] Stream error: ${err.message}`); stream.destroy(); meter.destroy(); if (!res.destroyed) res.end(); });
       res.on('close', () => { stream.destroy(); meter.destroy(); });
     } else {
       res.status(200);
@@ -370,7 +370,7 @@ class TorrentEngine {
       const stream = file.createReadStream();
       const meter = this._createMeter(hash, 'direct');
       stream.pipe(meter).pipe(res);
-      stream.on('error', (err) => { console.error(`[TorrentEngine] Stream error: ${err.message}`); meter.destroy(); if (!res.destroyed) res.end(); });
+      stream.on('error', (err) => { console.error(`[TorrentEngine] Stream error: ${err.message}`); stream.destroy(); meter.destroy(); if (!res.destroyed) res.end(); });
       res.on('close', () => { stream.destroy(); meter.destroy(); });
     }
   }
@@ -466,7 +466,6 @@ class TorrentEngine {
       'X-Content-Type-Options': 'nosniff',
       'Content-Disposition': `inline; filename="${safeFilename}"`,
       'Cache-Control': 'no-store',
-      'Transfer-Encoding': 'chunked',
     });
 
     // Pipe torrent file through FFmpeg: copy video, transcode audio to AAC,
@@ -495,6 +494,7 @@ class TorrentEngine {
 
     source.on('error', (err) => {
       console.error(`[TorrentEngine] Source stream error during remux: ${err.message}`);
+      try { ffmpeg.stdin.end(); } catch(e) {}
       ffmpeg.kill('SIGTERM');
     });
 
@@ -757,10 +757,8 @@ class TorrentEngine {
     // Support Base32-encoded info hashes (32 chars)
     const b32Match = input.match(/btih:([A-Za-z2-7]{32})/);
     if (b32Match) {
-      try {
-        const hex = Buffer.from(b32Match[1], 'base32').toString('hex').toLowerCase();
-        if (hex.length === 40) return hex;
-      } catch {}
+      const hex = base32ToHex(b32Match[1]);
+      if (hex) return hex;
     }
     return null;
   }
@@ -835,6 +833,21 @@ class TorrentEngine {
     if (oldestHash) this._removeTorrent(oldestHash);
   }
 
+}
+
+function base32ToHex(str) {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  let bits = '';
+  for (const c of str.toUpperCase()) {
+    const val = alphabet.indexOf(c);
+    if (val === -1) return null;
+    bits += val.toString(2).padStart(5, '0');
+  }
+  let hex = '';
+  for (let i = 0; i + 4 <= bits.length; i += 4) {
+    hex += parseInt(bits.substring(i, i + 4), 2).toString(16);
+  }
+  return hex.length === 40 ? hex : null;
 }
 
 function matchesVideoSignature(header) {

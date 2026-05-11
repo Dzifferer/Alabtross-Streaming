@@ -175,7 +175,7 @@ async function seekDLNA(deviceId, position) {
   await soapAction(session.controlUrl, 'Seek', [
     '<InstanceID>0</InstanceID>',
     '<Unit>REL_TIME</Unit>',
-    `<Target>${position}</Target>`,
+    `<Target>${escapeXml(position)}</Target>`,
   ].join(''));
 }
 
@@ -284,10 +284,19 @@ async function castToChromecast(device, mediaUrl, title = 'Albatross', mimeType 
           };
           activeSessions.set(device.id, session);
 
+          // Periodic health-check: clean up stale sessions
+          session._healthCheck = setInterval(() => {
+            if (!session._client || session._client.destroyed) {
+              clearInterval(session._healthCheck);
+              activeSessions.delete(device.id);
+            }
+          }, 60000);
+
           // Listen for status updates
           player.on('status', (status) => {
             if (status.playerState === 'IDLE' && status.idleReason === 'FINISHED') {
               session.status = 'finished';
+              if (session._healthCheck) clearInterval(session._healthCheck);
               activeSessions.delete(device.id);
               client.close();
             } else if (status.playerState) {
@@ -304,6 +313,8 @@ async function castToChromecast(device, mediaUrl, title = 'Albatross', mimeType 
     client.on('error', (err) => {
       clearTimeout(connectTimeout);
       console.error(`[Cast] Chromecast error: ${err.message}`);
+      const existingSession = activeSessions.get(device.id);
+      if (existingSession && existingSession._healthCheck) clearInterval(existingSession._healthCheck);
       activeSessions.delete(device.id);
       client.close();
       reject(err);
@@ -322,6 +333,7 @@ async function stopChromecast(deviceId) {
 
   return new Promise((resolve) => {
     try {
+      if (session._healthCheck) clearInterval(session._healthCheck);
       session._player.stop(() => {
         session._client.close();
         session.status = 'stopped';
@@ -329,6 +341,7 @@ async function stopChromecast(deviceId) {
         resolve();
       });
     } catch {
+      if (session._healthCheck) clearInterval(session._healthCheck);
       activeSessions.delete(deviceId);
       resolve();
     }
@@ -346,12 +359,18 @@ async function pauseChromecast(deviceId) {
 
   return new Promise((resolve, reject) => {
     if (session.status === 'playing') {
-      session._player.pause(() => {
+      const timeout = setTimeout(() => reject(new Error('Chromecast pause timed out')), 10000);
+      session._player.pause((err) => {
+        clearTimeout(timeout);
+        if (err) return reject(err);
         session.status = 'paused';
         resolve('paused');
       });
     } else {
-      session._player.play(() => {
+      const timeout = setTimeout(() => reject(new Error('Chromecast play timed out')), 10000);
+      session._player.play((err) => {
+        clearTimeout(timeout);
+        if (err) return reject(err);
         session.status = 'playing';
         resolve('playing');
       });

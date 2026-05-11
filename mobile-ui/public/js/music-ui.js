@@ -38,6 +38,11 @@
     return String(s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
 
+  /** Sanitize a URL for use in CSS `url(...)` to prevent injection. */
+  function safeBgUrl(url) {
+    return `url(${String(url).replace(/[)"']/g, '')})`;
+  }
+
   // ─── State ─────────────────────────────
 
   let currentTab = 'home';
@@ -110,7 +115,7 @@
   function renderCard(item, source) {
     const card = el('div', { class: 'music-card', 'data-id': item.id || '' });
     const cover = el('div', { class: 'music-card__cover' });
-    if (item.poster) cover.style.backgroundImage = `url(${item.poster})`;
+    if (item.poster) cover.style.backgroundImage = safeBgUrl(item.poster);
     card.appendChild(cover);
     card.appendChild(el('div', { class: 'music-card__title' }, item.name || ''));
     if (item.artist) card.appendChild(el('div', { class: 'music-card__subtitle' }, item.artist));
@@ -256,7 +261,7 @@
     container.innerHTML = '';
     const hero = el('div', { class: 'album-hero' });
     const coverDiv = el('div', { class: 'album-hero__cover' });
-    if (cover) coverDiv.style.backgroundImage = `url(${cover})`;
+    if (cover) coverDiv.style.backgroundImage = safeBgUrl(cover);
     hero.appendChild(coverDiv);
     const info = el('div', { class: 'album-hero__info' });
     info.appendChild(el('h2', {}, title));
@@ -501,7 +506,7 @@
         if (!album) return null;
         const track = (album.tracks || [])[it.trackIndex] || {};
         return {
-          kind: 'library',
+          kind: 'music-library',
           libraryId: album.id,
           fileIdx: track.fileIdx !== undefined ? track.fileIdx : it.trackIndex,
           albumId: album.id,
@@ -615,7 +620,7 @@
   function renderSongRow(item) {
     const row = el('div', { class: 'music-song-row', 'data-id': item.id || '' });
     const cover = el('div', { class: 'music-song-row__cover' });
-    if (item.poster) cover.style.backgroundImage = `url(${item.poster})`;
+    if (item.poster) cover.style.backgroundImage = safeBgUrl(item.poster);
     row.appendChild(cover);
     const meta = el('div', { class: 'music-song-row__meta' });
     meta.appendChild(el('div', { class: 'music-song-row__title' }, item.name || ''));
@@ -662,7 +667,7 @@
     if (!item) { bar.classList.add('hidden'); return; }
     bar.classList.remove('hidden');
     const cover = $('#mpb-cover');
-    if (item.coverUrl) cover.style.backgroundImage = `url(${item.coverUrl})`;
+    if (item.coverUrl) cover.style.backgroundImage = safeBgUrl(item.coverUrl);
     else cover.style.backgroundImage = '';
     $('#mpb-title').textContent = item.title || '—';
     $('#mpb-artist').textContent = [item.artist, item.album].filter(Boolean).join(' — ');
@@ -678,7 +683,7 @@
     const item = window.MusicQueue.currentItem();
     if (!item) return;
     const cover = $('#mpf-cover');
-    if (item.coverUrl) cover.style.backgroundImage = `url(${item.coverUrl})`;
+    if (item.coverUrl) cover.style.backgroundImage = safeBgUrl(item.coverUrl);
     else cover.style.backgroundImage = '';
     $('#mpf-title').textContent = item.title || '—';
     $('#mpf-artist').textContent = item.artist || '';
@@ -848,7 +853,7 @@
     for (const item of items) {
       const card = el('div', { class: 'music-card music-lib-card', 'data-id': item.id, 'data-status': item.status || '' });
       const cover = el('div', { class: 'music-card__cover' });
-      if (item.coverUrl) cover.style.backgroundImage = `url(${item.coverUrl})`;
+      if (item.coverUrl) cover.style.backgroundImage = safeBgUrl(item.coverUrl);
       card.appendChild(cover);
       card.appendChild(el('div', { class: 'music-card__title' }, item.title || item.name));
       if (item.artist) card.appendChild(el('div', { class: 'music-card__subtitle' }, item.artist));

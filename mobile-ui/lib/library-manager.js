@@ -267,7 +267,7 @@ class LibraryManager {
     this._discoveryCache = null;      // cached result of _discoverUntrackedFiles
     this._discoveryCacheTs = 0;       // timestamp of last discovery scan
     this._getAllCache = null;          // cached result of getAll()
-    this._getAllCacheDirty = true;     // dirty flag — set true on any item mutation
+    this._getAllCacheTs = 0;           // timestamp of last getAll() cache build
 
     // Optional remote GPU conversion worker. When configured AND reachable
     // we route full transcodes to a Windows PC with NVENC instead of
@@ -2247,7 +2247,8 @@ class LibraryManager {
    * Get all library items, including untracked video files found on disk.
    */
   getAll() {
-    if (!this._getAllCacheDirty && this._getAllCache) return this._getAllCache;
+    const cacheNow = Date.now();
+    if (this._getAllCache && cacheNow - this._getAllCacheTs < 2000) return this._getAllCache;
     const tracked = [...this._items.values()];
     const now = Date.now();
     // Every mutation path (add/remove/convert/music/manual) already sets
@@ -2265,7 +2266,7 @@ class LibraryManager {
     const all = [...tracked, ...this._discoveryCache].sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
     const result = all.map(i => this._sanitizeItem(i));
     this._getAllCache = result;
-    this._getAllCacheDirty = false;
+    this._getAllCacheTs = cacheNow;
     return result;
   }
 
@@ -5249,7 +5250,7 @@ class LibraryManager {
   _saveMetadata() {
     // Invalidate the getAll() cache eagerly so the next read sees fresh data,
     // even before the debounced write fires.
-    this._getAllCacheDirty = true;
+    this._getAllCache = null;
     if (this._metadataSaveDebounce) return;
     this._metadataSaveDebounce = setTimeout(() => {
       this._metadataSaveDebounce = null;

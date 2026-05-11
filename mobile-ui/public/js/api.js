@@ -54,6 +54,7 @@ class StremioAPI {
 
   _saveAddons(addons) {
     localStorage.setItem('stremio_addons', JSON.stringify(addons));
+    localStorage.removeItem('home_catalog_cache');
     this.addons = addons;
   }
 

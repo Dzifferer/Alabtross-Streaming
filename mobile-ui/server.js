@@ -2862,15 +2862,15 @@ app.post('/api/library/add-pack', rateLimit, async (req, res) => {
 const MOVIE_EXTRAS_PATTERN = new RegExp(
   '\\b(' +
   [
-    'making[\\s._-]*of',
-    'behind[\\s._-]*the[\\s._-]*scenes',
-    'beyond[\\s._-]*the[\\s._-]*movie',
-    'deleted[\\s._-]*scenes?',
-    'greatest[\\s._-]*moments',
-    'gag[\\s._-]*reels?',
-    'sneak[\\s._-]*peeks?',
-    'live[\\s._-]*tour',
-    'bonus[\\s._-]*(?:features?|material|disc|episodes?|dvd)',
+    'making[\\s._-]{0,20}of',
+    'behind[\\s._-]{0,20}the[\\s._-]{0,20}scenes',
+    'beyond[\\s._-]{0,20}the[\\s._-]{0,20}movie',
+    'deleted[\\s._-]{0,20}scenes?',
+    'greatest[\\s._-]{0,20}moments',
+    'gag[\\s._-]{0,20}reels?',
+    'sneak[\\s._-]{0,20}peeks?',
+    'live[\\s._-]{0,20}tour',
+    'bonus[\\s._-]{0,20}(?:features?|material|disc|episodes?|dvd)',
     'bts',
     'featurettes?',
     'bloopers',
@@ -4338,6 +4338,13 @@ app.get('/api/library/:id/stream/hls/playlist.m3u8', rateLimit, async (req, res)
     return res.status(404).json({ error: 'File not found on disk' });
   }
 
+  // If another request is already creating a session for this item,
+  // wait for it to finish instead of racing into a duplicate spawn.
+  const existingLock = _hlsLocks.get(req.params.id);
+  if (existingLock) {
+    try { await existingLock; } catch { /* the creator handled its own error */ }
+  }
+
   // Look up the session AFTER the awaits above — if we looked earlier
   // two simultaneous playlist requests for the same item could both race
   // past `if (!session)` during the fs.stat await and both spawn ffmpeg.
@@ -4368,20 +4375,33 @@ app.get('/api/library/:id/stream/hls/playlist.m3u8', rateLimit, async (req, res)
         convertProgress: convState.progress,
       });
     }
-    // Disk preflight. HLS writes .ts segments to a per-session dir and
-    // a full disk lets ffmpeg hang silently on ENOSPC. Fail fast.
-    const diskCheck = await library.hasLiveTranscodeDiskSpace();
-    if (!diskCheck.ok) {
-      return res.status(507).set('Retry-After', '300').json({
-        error: 'Insufficient disk space',
-        reason: diskCheck.reason,
-      });
-    }
+    // Acquire a lock so concurrent requests for the same item wait
+    // rather than both proceeding through the async disk check below.
+    let lockResolve, lockReject;
+    const lockPromise = new Promise((resolve, reject) => { lockResolve = resolve; lockReject = reject; });
+    _hlsLocks.set(req.params.id, lockPromise);
     try {
-      session = _startHlsSession(req.params.id, filePath);
+      // Disk preflight. HLS writes .ts segments to a per-session dir and
+      // a full disk lets ffmpeg hang silently on ENOSPC. Fail fast.
+      const diskCheck = await library.hasLiveTranscodeDiskSpace();
+      if (!diskCheck.ok) {
+        return res.status(507).set('Retry-After', '300').json({
+          error: 'Insufficient disk space',
+          reason: diskCheck.reason,
+        });
+      }
+      try {
+        session = _startHlsSession(req.params.id, filePath);
+      } catch (err) {
+        console.error(`[HLS] Could not start session for ${req.params.id}: ${err.message}`);
+        return res.status(500).json({ error: 'Could not start HLS transcode', reason: err.message });
+      }
+      lockResolve();
     } catch (err) {
-      console.error(`[HLS] Could not start session for ${req.params.id}: ${err.message}`);
-      return res.status(500).json({ error: 'Could not start HLS transcode', reason: err.message });
+      lockReject(err);
+      throw err;
+    } finally {
+      _hlsLocks.delete(req.params.id);
     }
   }
 

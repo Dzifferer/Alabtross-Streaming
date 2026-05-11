@@ -134,9 +134,16 @@ function httpGetDirect(url, timeoutMs = 10000, _redirectCount = 0, resolvedIp = 
         resolve({ ok: false, status: res.statusCode, body: '' });
         return;
       }
+      const MAX_RESPONSE_BODY = 10 * 1024 * 1024; // 10MB
       let body = '';
       res.setEncoding('utf8');
-      res.on('data', chunk => body += chunk);
+      res.on('data', chunk => {
+        body += chunk;
+        if (body.length > MAX_RESPONSE_BODY) {
+          req.destroy();
+          reject(new Error('Response body too large'));
+        }
+      });
       res.on('end', () => { clearTimeout(deadline); resolve({ ok: true, status: 200, body }); });
     });
     req.on('error', (e) => { clearTimeout(deadline); reject(e); });
@@ -1499,7 +1506,7 @@ async function searchYoutubeAudio(query) {
   return new Promise((resolve) => {
     const results = [];
     // ytsearch5: returns up to 5 results. --flat-playlist skips per-video metadata fetches.
-    const args = ['--dump-single-json', '--flat-playlist', '--no-warnings', `ytsearch5:${query}`];
+    const args = ['--dump-single-json', '--flat-playlist', '--no-warnings', '--', `ytsearch5:${query}`];
     const proc = spawn('yt-dlp', args);
     let out = '';
     proc.stdout.on('data', (d) => { out += d.toString(); });

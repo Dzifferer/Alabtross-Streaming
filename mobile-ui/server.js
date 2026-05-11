@@ -204,6 +204,36 @@ const rateLimitCleanupTimer = setInterval(() => {
   }
 }, RATE_LIMIT_WINDOW);
 
+// ─── Optional API Key Authentication ─────────────────────────────────
+const API_KEY = process.env.API_KEY || '';
+if (API_KEY) {
+  console.log('[Security] API_KEY is set — all state-changing endpoints require authentication');
+} else {
+  console.warn('[Security] API_KEY is not set — server is open to all network clients');
+}
+
+function requireAuth(req, res, next) {
+  if (!API_KEY) return next();
+  const provided = req.headers['x-api-key'] || req.query.apikey;
+  if (provided === API_KEY) return next();
+  return res.status(401).json({ error: 'Unauthorized' });
+}
+
+// ─── CSRF Origin Header Validation ───────────────────────────────────
+function checkOrigin(req, res, next) {
+  if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return next();
+  const origin = req.headers['origin'];
+  if (!origin) return next(); // non-browser clients don't send Origin
+  const allowed = [`http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`, `https://localhost:${PORT}`];
+  // Also allow the Tailscale hostname if set
+  const hostname = req.headers['host'];
+  if (hostname) allowed.push(`http://${hostname}`, `https://${hostname}`);
+  if (allowed.some(a => origin === a)) return next();
+  return res.status(403).json({ error: 'Forbidden: cross-origin request' });
+}
+
+app.use(checkOrigin);
+
 // ─── Concurrency Gate (per-IP + global) ──────────────────────────────
 // Caps how many ffmpeg-backed streaming sessions can run at once. The
 // per-IP `rateLimit` above throttles request *rate*, but a client can
@@ -1110,7 +1140,7 @@ app.get('/api/library/music/genres', (req, res) => {
 });
 
 // POST /api/library/music/:id/genre  body: { genre: "..." }
-app.post('/api/library/music/:id/genre', rateLimit, express.json(), (req, res) => {
+app.post('/api/library/music/:id/genre', requireAuth, rateLimit, express.json(), (req, res) => {
   const { id } = req.params;
   const genre = (req.body && req.body.genre) || '';
   const ok = musicLibrary.setMusicGenre(id, genre);
@@ -1119,7 +1149,7 @@ app.post('/api/library/music/:id/genre', rateLimit, express.json(), (req, res) =
 });
 
 // POST /api/library/music/:id/favorite — toggle favorite
-app.post('/api/library/music/:id/favorite', rateLimit, (req, res) => {
+app.post('/api/library/music/:id/favorite', requireAuth, rateLimit, (req, res) => {
   const { id } = req.params;
   const result = musicLibrary.toggleMusicFavorite(id);
   if (result === null) return res.status(404).json({ error: 'Album not found' });
@@ -1127,7 +1157,7 @@ app.post('/api/library/music/:id/favorite', rateLimit, (req, res) => {
 });
 
 // POST /api/library/music/:id/played — increment playCount, update lastPlayedAt
-app.post('/api/library/music/:id/played', rateLimit, (req, res) => {
+app.post('/api/library/music/:id/played', requireAuth, rateLimit, (req, res) => {
   const { id } = req.params;
   const ok = musicLibrary.markMusicPlayed(id);
   if (!ok) return res.status(404).json({ error: 'Album not found' });
@@ -1153,7 +1183,7 @@ app.get('/api/music-library/:id', (req, res) => {
 
 // POST /api/music-library/add — add an album from a torrent to the music library
 // body: { magnetUri, infoHash, mbid, title, artist, coverUrl, year, genres? }
-app.post('/api/music-library/add', rateLimit, express.json(), (req, res) => {
+app.post('/api/music-library/add', requireAuth, rateLimit, express.json(), (req, res) => {
   const b = req.body || {};
   if (!b.infoHash || !b.magnetUri) {
     return res.status(400).json({ error: 'infoHash and magnetUri are required' });
@@ -1183,22 +1213,22 @@ app.post('/api/music-library/add', rateLimit, express.json(), (req, res) => {
 });
 
 // DELETE /api/music-library/:id
-app.delete('/api/music-library/:id', rateLimit, (req, res) => {
+app.delete('/api/music-library/:id', requireAuth, rateLimit, (req, res) => {
   const ok = musicLibrary.removeItem(req.params.id);
   if (!ok) return res.status(404).json({ error: 'Item not found' });
   res.json({ ok: true });
 });
 
 // POST /api/music-library/:id/pause | /resume | /retry
-app.post('/api/music-library/:id/pause', rateLimit, (req, res) => {
+app.post('/api/music-library/:id/pause', requireAuth, rateLimit, (req, res) => {
   const ok = musicLibrary.pauseItem(req.params.id);
   res.json({ ok });
 });
-app.post('/api/music-library/:id/resume', rateLimit, (req, res) => {
+app.post('/api/music-library/:id/resume', requireAuth, rateLimit, (req, res) => {
   const ok = musicLibrary.resumeItem(req.params.id);
   res.json({ ok });
 });
-app.post('/api/music-library/:id/retry', rateLimit, (req, res) => {
+app.post('/api/music-library/:id/retry', requireAuth, rateLimit, (req, res) => {
   const ok = musicLibrary.retryItem(req.params.id);
   res.json({ ok });
 });
@@ -1268,7 +1298,7 @@ app.get('/api/music/playlists', (req, res) => {
   res.json({ playlists: musicPlaylists.list() });
 });
 
-app.post('/api/music/playlists', rateLimit, express.json(), (req, res) => {
+app.post('/api/music/playlists', requireAuth, rateLimit, express.json(), (req, res) => {
   try {
     const pl = musicPlaylists.create((req.body && req.body.name) || '');
     res.json({ playlist: pl });
@@ -1277,7 +1307,7 @@ app.post('/api/music/playlists', rateLimit, express.json(), (req, res) => {
   }
 });
 
-app.patch('/api/music/playlists/:id', rateLimit, express.json(), (req, res) => {
+app.patch('/api/music/playlists/:id', requireAuth, rateLimit, express.json(), (req, res) => {
   try {
     const pl = musicPlaylists.rename(req.params.id, (req.body && req.body.name) || '');
     if (!pl) return res.status(404).json({ error: 'Playlist not found' });
@@ -2397,6 +2427,11 @@ app.get('/api/torrent-status/:infoHash/bottleneck', (req, res) => {
 // whether slow downloads are bottlenecked on the host (CPU / disk / network
 // saturated) or on the BT swarm (torrent speeds low but host is idle).
 app.get('/api/diagnostics/system', async (req, res) => {
+  // Only allow access from localhost
+  const src = req.socket.remoteAddress;
+  if (src !== '127.0.0.1' && src !== '::1' && src !== '::ffff:127.0.0.1') {
+    return res.writeHead(403).end('Forbidden');
+  }
   try {
     const sampleMs = Math.min(5000, Math.max(200, parseInt(req.query.ms, 10) || 1000));
     const sys = await getSystemDiag(sampleMs);
@@ -2971,7 +3006,11 @@ function fileNameLooksLikeEpisode(fileName) {
 // Items are processed in this order within each run: complete → converting
 // → paused → failed, so if something goes wrong partway through, the safest
 // groups land first.
+let _repairInProgress = false;
 app.post('/api/library/repair-metadata', rateLimit, async (req, res) => {
+  if (_repairInProgress) return res.status(409).json({ error: 'Repair already in progress' });
+  _repairInProgress = true;
+  try {
   if (!TMDB_API_KEY) {
     return res.status(400).json({ error: 'TMDB API key not configured' });
   }
@@ -3193,6 +3232,7 @@ app.post('/api/library/repair-metadata', rateLimit, async (req, res) => {
     console.error('[API] Repair metadata error:', err.message);
     res.status(500).json({ error: err.message });
   }
+  } finally { _repairInProgress = false; }
 });
 
 // POST /api/library/reclassify-pack — flip a pack's items between movie and
@@ -3863,7 +3903,11 @@ app.post('/api/library/:id/auto-match', rateLimit, async (req, res) => {
 // until every target has been processed (previously the server silently
 // dropped everything beyond the first `limit` items, so "total recheck"
 // never actually rechecked libraries with more than 100 entries).
+let _autoMatchInProgress = false;
 app.post('/api/library/auto-match-all', rateLimit, async (req, res) => {
+  if (_autoMatchInProgress) return res.status(409).json({ error: 'Repair already in progress' });
+  _autoMatchInProgress = true;
+  try {
   if (!TMDB_API_KEY) return res.status(503).json({ error: 'TMDB API key not configured' });
 
   const { force = false, limit = 100, offset = 0 } = req.body || {};
@@ -3918,6 +3962,7 @@ app.post('/api/library/auto-match-all', rateLimit, async (req, res) => {
 
   console.log(`[AutoMatch] done: ${summary.matched} matched, ${summary.needsReview} needReview, ${summary.skipped} skipped, ${summary.errors} errors`);
   res.json(summary);
+  } finally { _autoMatchInProgress = false; }
 });
 
 // POST /api/library/:id/mark-manual — mark an item as manually curated so
@@ -4785,6 +4830,7 @@ async function fetchUrl(url, redirectCount = 0, resolvedIp = null) {
       const parsedUrl = new URL(url);
       try {
         const ip = await resolveWithFallback(parsedUrl.hostname);
+        if (isBlockedHost(ip)) throw new Error('Blocked host (fallback-resolved IP)');
         return await fetchUrlDirect(url, redirectCount, ip);
       } catch (_) {
         throw e;

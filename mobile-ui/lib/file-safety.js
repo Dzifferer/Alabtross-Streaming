@@ -118,7 +118,7 @@ function getMimeType(filename) {
  * Sanitize a filename for use in Content-Disposition headers.
  */
 function sanitizeFilename(filename) {
-  return path.basename(filename).replace(/[^\w\s.\-()[\]]/g, '_').replace(/["\\]/g, '_').substring(0, 200);
+  return path.basename(filename).replace(/[^\w .\-()[\]]/g, '_').replace(/["\\]/g, '_').substring(0, 200);
 }
 
 module.exports = {

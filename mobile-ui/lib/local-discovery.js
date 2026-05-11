@@ -144,6 +144,25 @@ function getLocalIP() {
 }
 
 /**
+ * Validate that an SSDP LOCATION URL is safe to fetch (not loopback, metadata, etc.)
+ */
+function isLocationSafe(locationUrl) {
+  try {
+    const u = new URL(locationUrl);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    const host = u.hostname;
+    // Block loopback and metadata endpoints
+    if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return false;
+    if (host === '169.254.169.254') return false;
+    if (host.startsWith('::ffff:127.')) return false;
+    // Only allow ports commonly used by UPnP devices (above 1024)
+    const port = parseInt(u.port || (u.protocol === 'https:' ? '443' : '80'), 10);
+    if (port < 1024 && port !== 80 && port !== 443) return false;
+    return true;
+  } catch { return false; }
+}
+
+/**
  * Discover media devices on the local network via SSDP
  * Returns a Map of unique devices keyed by UDN or host:port
  */
@@ -169,6 +188,12 @@ function discoverDevices(timeout = SEARCH_TIMEOUT) {
       const headers = parseSSDPResponse(msg);
       const location = headers['location'];
       if (!location) return;
+
+      // Validate location URL to prevent SSRF via crafted SSDP responses
+      if (!isLocationSafe(location)) {
+        console.warn(`[Discovery] Blocked unsafe SSDP location: ${location}`);
+        return;
+      }
 
       // Deduplicate by location URL
       if (devices.has(location)) return;
@@ -307,6 +332,13 @@ async function getAVTransportControlURL(locationUrl) {
           // Resolve relative path
           if (!controlPath.startsWith('http')) {
             controlPath = `http://${parsed.hostname}:${parsed.port || 80}${controlPath.startsWith('/') ? '' : '/'}${controlPath}`;
+          }
+          // Validate that control URL hostname matches the device's location hostname
+          const locHost = new URL(locationUrl).hostname;
+          const ctrlHost = new URL(controlPath).hostname;
+          if (locHost !== ctrlHost) {
+            reject(new Error(`Control URL hostname mismatch: ${ctrlHost} vs ${locHost}`));
+            return;
           }
           resolve(controlPath);
         } else {

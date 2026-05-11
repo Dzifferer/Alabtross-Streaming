@@ -328,6 +328,32 @@
     localStorage.setItem('recently_played', JSON.stringify(filtered.slice(0, 20)));
   }
 
+  // ─── Home Catalog Cache ────────────────────────────
+
+  const HOME_CACHE_KEY = 'home_catalog_cache';
+  const HOME_CACHE_TTL = 24 * 60 * 60 * 1000; // 24h staleness ceiling
+
+  function saveHomeCache(data) {
+    try {
+      const slim = {
+        movies: (data.movies || []).slice(0, 20).map(i => ({ id: i.id, imdb_id: i.imdb_id, name: i.name, poster: i.poster, releaseInfo: i.releaseInfo, year: i.year })),
+        series: (data.series || []).slice(0, 20).map(i => ({ id: i.id, imdb_id: i.imdb_id, name: i.name, poster: i.poster, releaseInfo: i.releaseInfo, year: i.year })),
+        ts: Date.now(),
+      };
+      localStorage.setItem(HOME_CACHE_KEY, JSON.stringify(slim));
+    } catch {}
+  }
+
+  function loadHomeCache() {
+    try {
+      const raw = localStorage.getItem(HOME_CACHE_KEY);
+      if (!raw) return null;
+      const data = JSON.parse(raw);
+      if (!data || Date.now() - data.ts > HOME_CACHE_TTL) return null;
+      return data;
+    } catch { return null; }
+  }
+
   // ─── VPN Safety Check ───────────────────────────
 
   async function checkVPNStatus() {
@@ -572,15 +598,32 @@
 
     if (allCatalogs.length === 0) {
       dom.homeCatalogs.innerHTML = `
-        <div class="empty-state">
-          <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
-            <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/>
-            <path d="M7 2v20M17 2v20M2 12h20"/>
-          </svg>
-          <p>No catalogs available</p>
-          <p style="font-size:13px;color:var(--text-muted)">Add addons in Settings to browse content</p>
+        <div class="onboarding-welcome">
+          <div class="onboarding-icon">
+            <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/>
+              <path d="M7 2v20M17 2v20M2 12h20"/>
+            </svg>
+          </div>
+          <h2>No Catalogs Available</h2>
+          <p>Add a streaming addon in Settings to browse content, or search for something directly.</p>
+          <div class="onboarding-actions">
+            <button class="onboarding-btn" id="empty-addon-btn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v8M8 12h8"/></svg>
+              Add Streaming Addon
+            </button>
+            <button class="onboarding-btn" id="empty-search-btn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+              Search for Content
+            </button>
+          </div>
         </div>
       `;
+      document.getElementById('empty-addon-btn')?.addEventListener('click', () => navigateTo('settings'));
+      document.getElementById('empty-search-btn')?.addEventListener('click', () => {
+        dom.searchInput.focus();
+        dom.searchBar?.classList.remove('search-bar--hidden');
+      });
       return;
     }
 
@@ -675,6 +718,33 @@
       attachCardListeners(recentRow);
     }
 
+    // Render cached catalogs instantly (will be replaced by fresh data)
+    const cachedHome = loadHomeCache();
+    if (cachedHome) {
+      if (cachedHome.movies && cachedHome.movies.length > 0) {
+        const cachedMovieRow = document.createElement('div');
+        cachedMovieRow.className = 'catalog-row';
+        cachedMovieRow.dataset.cachedSection = 'movies';
+        cachedMovieRow.innerHTML = `
+          <div class="catalog-row-header"><h3 class="catalog-row-title">Movies</h3></div>
+          <div class="catalog-scroll">${cachedHome.movies.map(item => cardHTML(item, 'movie')).join('')}</div>
+        `;
+        dom.homeCatalogs.appendChild(cachedMovieRow);
+        attachCardListeners(cachedMovieRow);
+      }
+      if (cachedHome.series && cachedHome.series.length > 0) {
+        const cachedSeriesRow = document.createElement('div');
+        cachedSeriesRow.className = 'catalog-row';
+        cachedSeriesRow.dataset.cachedSection = 'series';
+        cachedSeriesRow.innerHTML = `
+          <div class="catalog-row-header"><h3 class="catalog-row-title">Shows</h3></div>
+          <div class="catalog-scroll">${cachedHome.series.map(item => cardHTML(item, 'series')).join('')}</div>
+        `;
+        dom.homeCatalogs.appendChild(cachedSeriesRow);
+        attachCardListeners(cachedSeriesRow);
+      }
+    }
+
     // Show Live TV section FIRST (right after Recently Played) so it's always visible.
     // Render a placeholder immediately, then fill it when data arrives.
     const tvContainer = document.createElement('div');
@@ -685,26 +755,36 @@
         <h3 class="catalog-row-title">Live TV</h3>
         <span class="catalog-row-badge">LIVE</span>
       </div>
-      <div class="catalog-scroll"><div class="row-loading"><div class="spinner-sm"></div> Loading channels...</div></div>
+      ${skeletonChannels(5)}
     `;
     dom.homeCatalogs.appendChild(tvContainer);
 
-    // Movie and Series placeholders below Live TV
-    const moviePlaceholder = document.createElement('div');
-    moviePlaceholder.className = 'catalog-row';
-    moviePlaceholder.innerHTML = `
-      <div class="catalog-row-header"><h3 class="catalog-row-title">Movies</h3></div>
-      <div class="catalog-scroll"><div class="row-loading"><div class="spinner-sm"></div> Loading...</div></div>
-    `;
-    dom.homeCatalogs.appendChild(moviePlaceholder);
+    // Movie and Series placeholders below Live TV (only when no cache)
+    let moviePlaceholder;
+    let seriesPlaceholder;
+    if (!cachedHome) {
+      moviePlaceholder = document.createElement('div');
+      moviePlaceholder.className = 'catalog-row';
+      moviePlaceholder.innerHTML = `
+        <div class="catalog-row-header"><h3 class="catalog-row-title">Movies</h3></div>
+        ${skeletonCards(6)}
+      `;
+      dom.homeCatalogs.appendChild(moviePlaceholder);
 
-    const seriesPlaceholder = document.createElement('div');
-    seriesPlaceholder.className = 'catalog-row';
-    seriesPlaceholder.innerHTML = `
-      <div class="catalog-row-header"><h3 class="catalog-row-title">Shows</h3></div>
-      <div class="catalog-scroll"><div class="row-loading"><div class="spinner-sm"></div> Loading...</div></div>
-    `;
-    dom.homeCatalogs.appendChild(seriesPlaceholder);
+      seriesPlaceholder = document.createElement('div');
+      seriesPlaceholder.className = 'catalog-row';
+      seriesPlaceholder.innerHTML = `
+        <div class="catalog-row-header"><h3 class="catalog-row-title">Shows</h3></div>
+        ${skeletonCards(6)}
+      `;
+      dom.homeCatalogs.appendChild(seriesPlaceholder);
+    } else {
+      // Create detached placeholders so downstream code can still reference them
+      moviePlaceholder = document.createElement('div');
+      moviePlaceholder.className = 'catalog-row';
+      seriesPlaceholder = document.createElement('div');
+      seriesPlaceholder.className = 'catalog-row';
+    }
 
     // Fetch movies, series, and Live TV in parallel
     const [movieResult, seriesResult, tvResult] = await Promise.allSettled([
@@ -726,6 +806,9 @@
       api.getAllLiveTVChannels(),
     ]);
 
+    // Remove cached rows now that fresh data is available
+    document.querySelectorAll('[data-cached-section]').forEach(el => el.remove());
+
     // Render Movies row (replace placeholder) — then enrich with collections
     const movieItems = movieResult.status === 'fulfilled' ? movieResult.value : [];
     if (movieItems.length > 0) {
@@ -735,6 +818,7 @@
         <div class="catalog-row-header"><h3 class="catalog-row-title">Movies</h3></div>
         <div class="catalog-scroll">${movieSlice.map(item => cardHTML(item, 'movie')).join('')}</div>
       `;
+      if (!moviePlaceholder.parentNode) dom.homeCatalogs.appendChild(moviePlaceholder);
       attachCardListeners(moviePlaceholder);
 
       // Asynchronously enrich with collection data and re-render with grouping
@@ -778,6 +862,7 @@
         <div class="catalog-row-header"><h3 class="catalog-row-title">Movies</h3></div>
         <div class="catalog-scroll"><div class="row-loading" style="color:var(--text-muted)">Unable to load — check connection or try searching</div></div>
       `;
+      if (!moviePlaceholder.parentNode) dom.homeCatalogs.appendChild(moviePlaceholder);
     }
 
     // Render Series row (replace placeholder)
@@ -787,12 +872,14 @@
         <div class="catalog-row-header"><h3 class="catalog-row-title">Shows</h3></div>
         <div class="catalog-scroll">${seriesItems.slice(0, 20).map(item => cardHTML(item, 'series')).join('')}</div>
       `;
+      if (!seriesPlaceholder.parentNode) dom.homeCatalogs.appendChild(seriesPlaceholder);
       attachCardListeners(seriesPlaceholder);
     } else {
       seriesPlaceholder.innerHTML = `
         <div class="catalog-row-header"><h3 class="catalog-row-title">Shows</h3></div>
         <div class="catalog-scroll"><div class="row-loading" style="color:var(--text-muted)">Unable to load — check connection or try searching</div></div>
       `;
+      if (!seriesPlaceholder.parentNode) dom.homeCatalogs.appendChild(seriesPlaceholder);
     }
 
     // Render Live TV section (replace placeholder content in tvContainer)
@@ -888,20 +975,49 @@
     // If nothing meaningful loaded, show a retry option
     const hasContent = movieItems.length > 0 || seriesItems.length > 0 || recent.length > 0;
     if (!hasContent) {
-      const retryRow = document.createElement('div');
-      retryRow.className = 'catalog-row';
-      retryRow.innerHTML = `
-        <div class="empty-state" style="padding:24px 16px;text-align:center">
-          <p style="margin:0 0 8px">Unable to load catalogs</p>
-          <p style="font-size:13px;color:var(--text-muted);margin:0 0 16px">The catalog server may be unreachable. You can still search for content directly.</p>
-          <button class="btn-sm" id="home-retry-btn" style="margin:0 auto">Retry</button>
+      const welcomeRow = document.createElement('div');
+      welcomeRow.innerHTML = `
+        <div class="onboarding-welcome">
+          <div class="onboarding-icon">
+            <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+              <path d="M2 17l10 5 10-5"/>
+              <path d="M2 12l10 5 10-5"/>
+            </svg>
+          </div>
+          <h2>Welcome to Albatross</h2>
+          <p>Get started by adding a streaming addon, searching for content, or importing a torrent directly.</p>
+          <div class="onboarding-actions">
+            <button class="onboarding-btn" id="onboard-addon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v8M8 12h8"/></svg>
+              Add Streaming Addon
+            </button>
+            <button class="onboarding-btn" id="onboard-search">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+              Search for Content
+            </button>
+            <button class="onboarding-btn" id="onboard-import">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              Import Torrent
+            </button>
+            <button class="onboarding-btn onboarding-btn--secondary" id="onboard-retry">
+              Retry Loading
+            </button>
+          </div>
         </div>
       `;
-      dom.homeCatalogs.appendChild(retryRow);
-      retryRow.querySelector('#home-retry-btn')?.addEventListener('click', () => {
-        loadHome();
+      dom.homeCatalogs.appendChild(welcomeRow);
+      welcomeRow.querySelector('#onboard-addon')?.addEventListener('click', () => navigateTo('settings'));
+      welcomeRow.querySelector('#onboard-search')?.addEventListener('click', () => {
+        dom.searchInput.focus();
+        dom.searchBar?.classList.remove('search-bar--hidden');
       });
+      welcomeRow.querySelector('#onboard-import')?.addEventListener('click', () => showManualImportModal());
+      welcomeRow.querySelector('#onboard-retry')?.addEventListener('click', () => loadHome());
     }
+
+    // Save fresh data to cache for next visit
+    saveHomeCache({ movies: movieItems, series: seriesItems });
   }
 
   async function loadCatalogRow(catalog, placeholder) {
@@ -952,7 +1068,7 @@
       <div class="card" data-type="${type}" data-id="${id}" data-name="${rawName}">
         <div class="card-poster">
           ${poster
-            ? `<img src="${escapeHTML(poster)}" alt="${title}" loading="lazy" class="loading">`
+            ? `<img src="${escapeHTML(poster)}" alt="${title}" loading="lazy" width="130" height="195" class="loading">`
             : ''}
           <div class="poster-placeholder">${!poster ? title : ''}</div>
         </div>
@@ -1038,7 +1154,7 @@
       <div class="card card-collection" data-collection-id="${escapeHTML(collection.id)}">
         <div class="card-poster collection-poster-stack">
           ${poster
-            ? `<img src="${escapeHTML(poster)}" alt="${name}" loading="lazy" class="loading">`
+            ? `<img src="${escapeHTML(poster)}" alt="${name}" loading="lazy" width="130" height="195" class="loading">`
             : ''}
           <div class="poster-placeholder">${!poster ? name : ''}</div>
           <div class="collection-badge">${count} movies</div>
@@ -1062,7 +1178,7 @@
     return `
       <div class="card library-group-tile" data-group-id="${escapeHTML(group.id)}" data-group-type="${group.type}">
         <div class="card-poster collection-poster-stack">
-          ${poster ? `<img src="${escapeHTML(poster)}" alt="${name}" loading="lazy" class="loading">` : ''}
+          ${poster ? `<img src="${escapeHTML(poster)}" alt="${name}" loading="lazy" width="130" height="195" class="loading">` : ''}
           <div class="poster-placeholder">${!poster ? name : ''}</div>
           <div class="collection-badge">${count} ${typeLabel}</div>
         </div>
@@ -6694,6 +6810,16 @@
   function escapeHTML(str) {
     if (!str) return '';
     return str.replace(/[&<>"']/g, ch => _escapeMap[ch]);
+  }
+
+  function skeletonCards(count = 6) {
+    const card = '<div class="skeleton-card"><div class="skeleton-poster"></div><div class="skeleton-title"></div><div class="skeleton-year"></div></div>';
+    return `<div class="catalog-scroll skeleton-row">${card.repeat(count)}</div>`;
+  }
+
+  function skeletonChannels(count = 5) {
+    const card = '<div class="skeleton-channel"></div>';
+    return `<div class="catalog-scroll skeleton-row">${card.repeat(count)}</div>`;
   }
 
   // ─── Casting ─────────────────────────────────────

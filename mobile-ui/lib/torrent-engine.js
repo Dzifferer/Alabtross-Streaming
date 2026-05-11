@@ -53,6 +53,7 @@ class TorrentEngine {
     this._downloadPath = opts.downloadPath || path.join(process.cwd(), '.torrent-cache');
     this._maxFileSize = opts.maxFileSize || MAX_FILE_SIZE;
     this._maxConcurrent = opts.maxConcurrent || DEFAULT_MAX_CONCURRENT;
+    this._maxConcurrentRemux = 3;
   }
 
   /**
@@ -384,6 +385,12 @@ class TorrentEngine {
     const hash = this._extractHash(magnetOrHash);
     console.log(`[TorrentEngine] serveRemuxedStream: hash=${hash}, fileIdx=${fileIdx}`);
 
+    // Enforce global concurrency limit on remux pipelines
+    if (this._remuxInFlight.size >= this._maxConcurrentRemux) {
+      res.writeHead(503, { 'Retry-After': '5' });
+      return res.end(JSON.stringify({ error: 'Too many concurrent remuxes' }));
+    }
+
     // Reject duplicate concurrent remuxes for the same hash+fileIdx. Browser
     // video players typically probe the URL and then issue a real GET; without
     // this guard both requests spawn ffmpeg, doubling CPU and torrent reads.
@@ -637,6 +644,7 @@ class TorrentEngine {
     if (videoFile) {
       try {
         const fullPath = path.join(this._downloadPath, videoFile.path);
+        if (!fullPath.startsWith(this._downloadPath)) return null;
         const diskSize = fs.existsSync(fullPath) ? fs.statSync(fullPath).size : 0;
         progress = { downloaded: diskSize, total: videoFile.length, pct: +(diskSize / videoFile.length * 100).toFixed(1) };
       } catch {}
@@ -791,6 +799,7 @@ class TorrentEngine {
         // but we can check via the on-disk file size vs declared length
         try {
           const fullPath = path.join(this._downloadPath, f.path);
+          if (!fullPath.startsWith(this._downloadPath + path.sep) && fullPath !== this._downloadPath) return false;
           if (!fs.existsSync(fullPath)) return true; // not even started
           const stat = fs.statSync(fullPath);
           return stat.size < f.length;

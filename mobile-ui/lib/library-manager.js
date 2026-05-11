@@ -3571,6 +3571,10 @@ class LibraryManager {
       const relPath = id.slice(5); // strip 'disk_' prefix
       const fullPath = path.join(this._libraryPath, relPath);
       if (!this._isPathSafe(fullPath)) return null;
+      try {
+        const realPath = fs.realpathSync(fullPath);
+        if (!this._isPathSafe(realPath)) return null;
+      } catch { /* file may not exist yet, let caller handle */ }
       if (fs.existsSync(fullPath)) return fullPath;
       return null;
     }
@@ -3579,6 +3583,10 @@ class LibraryManager {
 
     const fullPath = path.join(this._libraryPath, item.filePath);
     if (!this._isPathSafe(fullPath)) return null;
+    try {
+      const realPath = fs.realpathSync(fullPath);
+      if (!this._isPathSafe(realPath)) return null;
+    } catch { /* file may not exist yet, let caller handle */ }
 
     // Intentionally NO fs.existsSync() here — every HTTP stream handler
     // already does fs.promises.stat() right after this returns, which
@@ -3610,6 +3618,10 @@ class LibraryManager {
     if (!item.filePath) return null;
     const fullPath = path.join(this._libraryPath, item.filePath, track.file);
     if (!this._isPathSafe(fullPath)) return null;
+    try {
+      const realPath = fs.realpathSync(fullPath);
+      if (!this._isPathSafe(realPath)) return null;
+    } catch { /* file may not exist yet, let caller handle */ }
     if (!fs.existsSync(fullPath)) return null;
     return fullPath;
   }
@@ -5472,6 +5484,7 @@ class LibraryManager {
 
       for (const entry of entries) {
         if (discovered.length >= MAX_DISCOVERED) return;
+        if (entry.isSymbolicLink()) continue;
 
         // Skip internal bookkeeping at the library root.
         if (depth === 0) {

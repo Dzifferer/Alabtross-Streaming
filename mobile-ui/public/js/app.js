@@ -936,7 +936,7 @@
     if (!url) return false;
     try {
       const u = new URL(url, window.location.origin);
-      return u.protocol === 'https:' || u.protocol === 'http:' || u.pathname.startsWith('/');
+      return u.protocol === 'https:' || u.pathname.startsWith('/');
     } catch { return false; }
   }
 
@@ -1875,18 +1875,18 @@
                 for (const [name, info] of providers) {
                   const icon = info.ok && info.count > 0 ? '&#9989;' : (info.ok ? '&#9888;' : '&#10060;');
                   const detail = info.ok
-                    ? `${info.count} results (${info.ms}ms)`
-                    : `${info.error} (${info.ms}ms)`;
-                  html += `<div style="margin:4px 0">${icon} <strong>${name}</strong>: ${detail}</div>`;
+                    ? `${escapeHTML(String(info.count))} results (${escapeHTML(String(info.ms))}ms)`
+                    : `${escapeHTML(String(info.error))} (${escapeHTML(String(info.ms))}ms)`;
+                  html += `<div style="margin:4px 0">${icon} <strong>${escapeHTML(name)}</strong>: ${detail}</div>`;
                 }
                 if (data._torrentioConfig) {
-                  html += `<div style="margin:4px 0;color:var(--text-dim)">Torrentio config: ${data._torrentioConfig}</div>`;
+                  html += `<div style="margin:4px 0;color:var(--text-dim)">Torrentio config: ${escapeHTML(data._torrentioConfig)}</div>`;
                 }
                 const summary = data._summary || {};
                 html += `<div style="margin-top:8px;color:${summary.allDown ? 'var(--accent-red)' : 'var(--text-dim)'}">`;
                 html += summary.allDown
                   ? 'All providers unreachable — check server network/DNS'
-                  : `${summary.working.length}/${summary.total} providers working`;
+                  : `${escapeHTML(String(summary.working.length))}/${escapeHTML(String(summary.total))} providers working`;
                 html += '</div></div>';
                 resultsDiv.innerHTML = html;
               }

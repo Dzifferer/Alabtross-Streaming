@@ -49,7 +49,8 @@ const crypto = require('crypto');
 
 // ─── Config ───────────────────────────────────────────────────────────
 const PORT          = parseInt(process.env.WORKER_PORT || '8090', 10);
-const HOST          = process.env.WORKER_HOST || '0.0.0.0';
+const BIND_HOST     = SECRET ? '0.0.0.0' : '127.0.0.1';
+const HOST          = process.env.WORKER_HOST || BIND_HOST;
 const TEMP_DIR      = process.env.WORKER_TEMP || path.join(os.tmpdir(), 'alabtross-worker');
 const SECRET        = process.env.WORKER_SECRET || '';
 if (!SECRET) {
@@ -506,7 +507,8 @@ server.headersTimeout   = 0;
 server.requestTimeout   = 0;
 
 server.listen(PORT, HOST, () => {
-  console.log(`[worker] albatross GPU worker listening on http://${HOST}:${PORT}`);
+  console.log(`[worker] Listening on ${HOST}:${PORT}`);
+  if (!SECRET) console.warn('[worker] No WORKER_SECRET — bound to localhost only. Set WORKER_SECRET to accept remote connections.');
   console.log(`[worker] preset=${NVENC_PRESET} cq=${NVENC_CQ} maxWidth=${MAX_WIDTH} maxInput=${(MAX_INPUT_SIZE / 1e9).toFixed(0)}GB secret=${SECRET ? 'set' : 'none'}`);
   console.log(`[worker] temp=${TEMP_DIR}`);
 });

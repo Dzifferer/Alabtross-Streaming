@@ -224,11 +224,15 @@ if (API_KEY) {
 // ─── CSRF Origin Header Validation ───────────────────────────────────
 app.use('/api', (req, res, next) => {
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
-  const origin = req.headers['origin'] || req.headers['referer'] || '';
-  if (origin && !origin.startsWith(`http://localhost`) && !origin.startsWith(`http://127.0.0.1`) && !origin.startsWith(`https://`)) {
-    return res.status(403).json({ error: 'Forbidden: invalid origin' });
+  const origin = req.headers['origin'];
+  if (!origin) return next();
+  const host = req.headers['host'] || '';
+  if (origin === `http://${host}` || origin === `https://${host}`
+      || origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1')
+      || origin.startsWith('https://localhost') || origin.startsWith('https://127.0.0.1')) {
+    return next();
   }
-  next();
+  return res.status(403).json({ error: 'Forbidden: cross-origin request' });
 });
 
 // ─── Concurrency Gate (per-IP + global) ──────────────────────────────

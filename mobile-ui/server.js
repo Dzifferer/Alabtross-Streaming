@@ -79,6 +79,11 @@ console.log(`[FFmpeg] Pipeline: ${ffmpegHw.describeMode()}`);
 // Override with the MAX_CONCURRENT_STREAMS env var or the in-app setting.
 let MAX_CONCURRENT_STREAMS = parseInt(process.env.MAX_CONCURRENT_STREAMS, 10) || 2;
 
+// Monotonic version counter bumped on every library mutation so the
+// GET /api/library endpoint can return 304 Not Modified when the
+// polling client already has the latest snapshot.
+let _libraryVersion = 0;
+
 // Which background work gets right-of-way when downloads and local
 // conversions would contend for CPU. See LibraryManager._taskPriority
 // for the semantics. Default matches the old behavior.
@@ -155,10 +160,10 @@ try {
 // Centralized writer: always persist the full known setting set so a later
 // toggle doesn't silently drop unrelated keys. Swallows errors because a
 // failed write is a logged warning, not a request failure.
-function persistSettings() {
+async function persistSettings() {
   try {
-    fs.mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true });
-    fs.writeFileSync(SETTINGS_PATH, JSON.stringify({
+    await fs.promises.mkdir(path.dirname(SETTINGS_PATH), { recursive: true });
+    await fs.promises.writeFile(SETTINGS_PATH, JSON.stringify({
       maxConcurrentStreams: MAX_CONCURRENT_STREAMS,
       taskPriority: TASK_PRIORITY,
       cpuProtection: CPU_PROTECTION,
@@ -817,24 +822,29 @@ app.get('/api/tmdb-meta/:type/:tmdbId', rateLimit, async (req, res) => {
       }
     } catch { /* keep tmdb: ID */ }
 
-    // For series, include season/episode data
+    // For series, include season/episode data (fetched in parallel)
     if (type === 'series' && data.seasons) {
       meta.videos = [];
-      for (const season of data.seasons) {
-        if (season.season_number === 0) continue; // skip specials
-        try {
-          const seasonData = await tmdbFetch(`/tv/${tmdbId}/season/${season.season_number}`);
-          for (const ep of (seasonData.episodes || [])) {
-            meta.videos.push({
-              id: `tmdb:${tmdbId}:${season.season_number}:${ep.episode_number}`,
-              season: season.season_number,
-              episode: ep.episode_number,
-              title: ep.name || `Episode ${ep.episode_number}`,
-              overview: ep.overview || '',
-              released: ep.air_date || undefined,
-            });
-          }
-        } catch { /* skip season on error */ }
+      const nonSpecials = data.seasons.filter(s => s.season_number !== 0);
+      const seasonResults = await Promise.all(
+        nonSpecials.map(season =>
+          tmdbFetch(`/tv/${tmdbId}/season/${season.season_number}`).catch(() => null)
+        )
+      );
+      for (let i = 0; i < nonSpecials.length; i++) {
+        const seasonData = seasonResults[i];
+        if (!seasonData) continue;
+        const seasonNum = nonSpecials[i].season_number;
+        for (const ep of (seasonData.episodes || [])) {
+          meta.videos.push({
+            id: `tmdb:${tmdbId}:${seasonNum}:${ep.episode_number}`,
+            season: seasonNum,
+            episode: ep.episode_number,
+            title: ep.name || `Episode ${ep.episode_number}`,
+            overview: ep.overview || '',
+            released: ep.air_date || undefined,
+          });
+        }
       }
     }
 
@@ -895,24 +905,29 @@ app.get('/api/tmdb-meta-imdb/:type/:imdbId', rateLimit, async (req, res) => {
       imdbRating: data.vote_average ? String(data.vote_average) : undefined,
     };
 
-    // For series, include season/episode data
+    // For series, include season/episode data (fetched in parallel)
     if (type === 'series' && data.seasons) {
       meta.videos = [];
-      for (const season of data.seasons) {
-        if (season.season_number === 0) continue; // skip specials
-        try {
-          const seasonData = await tmdbFetch(`/tv/${tmdbId}/season/${season.season_number}`);
-          for (const ep of (seasonData.episodes || [])) {
-            meta.videos.push({
-              id: `${imdbId}:${season.season_number}:${ep.episode_number}`,
-              season: season.season_number,
-              episode: ep.episode_number,
-              title: ep.name || `Episode ${ep.episode_number}`,
-              overview: ep.overview || '',
-              released: ep.air_date || undefined,
-            });
-          }
-        } catch { /* skip season on error */ }
+      const nonSpecials = data.seasons.filter(s => s.season_number !== 0);
+      const seasonResults = await Promise.all(
+        nonSpecials.map(season =>
+          tmdbFetch(`/tv/${tmdbId}/season/${season.season_number}`).catch(() => null)
+        )
+      );
+      for (let i = 0; i < nonSpecials.length; i++) {
+        const seasonData = seasonResults[i];
+        if (!seasonData) continue;
+        const seasonNum = nonSpecials[i].season_number;
+        for (const ep of (seasonData.episodes || [])) {
+          meta.videos.push({
+            id: `${imdbId}:${seasonNum}:${ep.episode_number}`,
+            season: seasonNum,
+            episode: ep.episode_number,
+            title: ep.name || `Episode ${ep.episode_number}`,
+            overview: ep.overview || '',
+            released: ep.air_date || undefined,
+          });
+        }
       }
     }
 
@@ -1334,9 +1349,9 @@ try {
   console.warn('[Collections] Failed to load cache:', e.message);
 }
 
-function saveCollectionCache() {
+async function saveCollectionCache() {
   try {
-    fs.writeFileSync(COLLECTION_CACHE_PATH, JSON.stringify(collectionCache), 'utf8');
+    await fs.promises.writeFile(COLLECTION_CACHE_PATH, JSON.stringify(collectionCache), 'utf8');
   } catch (e) {
     console.warn('[Collections] Failed to save cache:', e.message);
   }
@@ -1470,8 +1485,11 @@ app.get('/api/collections/enrich', rateLimit, async (req, res) => {
     const batchSize = 5;
     for (let i = 0; i < ids.length; i += batchSize) {
       const batch = ids.slice(i, i + batchSize);
+      // Check which IDs are already cached so we can skip the rate-limit
+      // sleep when the entire batch was served from memory.
+      const allCached = batch.every(id => id in collectionCache && collectionCache[id]?.genres);
       await Promise.allSettled(batch.map(id => lookupCollectionForImdbId(id)));
-      if (i + batchSize < ids.length) {
+      if (i + batchSize < ids.length && !allCached) {
         await new Promise(r => setTimeout(r, 300));
       }
     }
@@ -1619,9 +1637,9 @@ try {
   console.warn('[Categories] Failed to load manual categories:', e.message);
 }
 
-function saveManualCategories() {
+async function saveManualCategories() {
   try {
-    fs.writeFileSync(MANUAL_CATEGORIES_PATH, JSON.stringify(manualCategories), 'utf8');
+    await fs.promises.writeFile(MANUAL_CATEGORIES_PATH, JSON.stringify(manualCategories), 'utf8');
   } catch (e) {
     console.warn('[Categories] Failed to save manual categories:', e.message);
   }
@@ -2003,6 +2021,7 @@ async function autoMatchOne(item, extIdCache) {
   // uses both. setCandidates also bumps the state to needsReview.
   if (candidates.length > 0) {
     library.setCandidates(item.id, candidates, confidence);
+    _libraryVersion++;
   }
 
   if (best && confidence >= AUTO_MATCH_THRESHOLD) {
@@ -2514,8 +2533,13 @@ app.get('/api/diagnostics/system', async (req, res) => {
 // GET /api/library — list all library items
 app.get('/api/library', (req, res) => {
   try {
+    const etag = `"lib-${_libraryVersion}"`;
+    if (req.headers['if-none-match'] === etag) {
+      return res.status(304).end();
+    }
     const items = library.getAll();
     const slots = library.getDownloadSlots();
+    res.set('ETag', etag);
     res.json({ items, slots });
   } catch (err) {
     console.error('[Library] getAll() failed:', err.message);
@@ -2777,6 +2801,7 @@ app.post('/api/library/add', rateLimit, (req, res) => {
 
   try {
     const result = library.addItem({ imdbId, type, name, poster, year, magnetUri, infoHash, quality, size, season, episode });
+    _libraryVersion++;
     res.json(result);
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -2802,6 +2827,7 @@ app.post('/api/library/add-pack', rateLimit, async (req, res) => {
 
   try {
     const result = await library.addSeasonPack({ imdbId, name, poster, year, magnetUri, infoHash, quality, size, season });
+    _libraryVersion++;
 
     // After pack is created, resolve correct TMDB metadata for any episodes
     // whose filename-derived show name differs from the torrent-level name.
@@ -3364,6 +3390,7 @@ app.post('/api/library/purge-failed', rateLimit, (req, res) => {
       library._items.delete(item.id);
     }
     library._saveMetadata();
+    _libraryVersion++;
     console.log(`[Purge] Removed ${toDelete.length} dead 'failed' items`);
   }
 
@@ -3456,6 +3483,7 @@ app.post('/api/library/add-manual', rateLimit, async (req, res) => {
       quality: quality || '',
       size: '',
     });
+    _libraryVersion++;
     res.json(result);
   } catch (err) {
     console.error('[API] Manual torrent add error:', err.message);
@@ -3470,6 +3498,7 @@ app.post('/api/library/restart-pack', rateLimit, async (req, res) => {
 
   try {
     const result = await library.restartPack(packId);
+    _libraryVersion++;
     res.json(result);
   } catch (err) {
     console.error('[API] Restart pack error:', err.message);
@@ -3556,6 +3585,7 @@ app.post('/api/library/find-missing-show', rateLimit, express.json(), async (req
           size: top.size || '',
           season: s.season,
         });
+        _libraryVersion++;
         const started = (r.items || []).filter(i => i.status === 'started').length;
         totalStarted += started;
         seasonResults.push({ season: s.season, missing: s.expected - s.have, started });
@@ -3575,6 +3605,7 @@ app.post('/api/library/find-missing-show', rateLimit, express.json(), async (req
 app.delete('/api/library/:id', rateLimit, (req, res) => {
   const removed = library.removeItem(req.params.id);
   if (!removed) return res.status(404).json({ error: 'Item not found' });
+  _libraryVersion++;
   res.json({ success: true });
 });
 
@@ -3582,6 +3613,7 @@ app.delete('/api/library/:id', rateLimit, (req, res) => {
 app.post('/api/library/:id/pause', rateLimit, (req, res) => {
   const paused = library.pauseItem(req.params.id);
   if (!paused) return res.status(400).json({ error: 'Cannot pause this item' });
+  _libraryVersion++;
   res.json({ success: true });
 });
 
@@ -3589,6 +3621,7 @@ app.post('/api/library/:id/pause', rateLimit, (req, res) => {
 app.post('/api/library/:id/resume', rateLimit, (req, res) => {
   const resumed = library.resumeItem(req.params.id);
   if (!resumed) return res.status(400).json({ error: 'Cannot resume this item' });
+  _libraryVersion++;
   res.json({ success: true });
 });
 
@@ -3596,6 +3629,7 @@ app.post('/api/library/:id/resume', rateLimit, (req, res) => {
 app.post('/api/library/:id/retry', rateLimit, (req, res) => {
   const retried = library.retryItem(req.params.id);
   if (!retried) return res.status(400).json({ error: 'Cannot retry this item' });
+  _libraryVersion++;
   res.json({ success: true });
 });
 
@@ -3607,6 +3641,7 @@ app.post('/api/library/:id/retry', rateLimit, (req, res) => {
 app.post('/api/library/:id/repair', rateLimit, (req, res) => {
   const result = library.repairItem(req.params.id);
   if (!result.ok) return res.status(400).json({ error: result.reason });
+  _libraryVersion++;
   res.json({ success: true, queued: !!result.queued });
 });
 
@@ -3617,6 +3652,7 @@ app.post('/api/library/:id/repair', rateLimit, (req, res) => {
 app.post('/api/library/repair-all-incomplete', rateLimit, async (req, res) => {
   try {
     const summary = await library.repairAllIncomplete();
+    _libraryVersion++;
     res.json({ success: true, ...summary });
   } catch (err) {
     console.error('[Server] repairAllIncomplete failed:', err);
@@ -3631,6 +3667,7 @@ app.post('/api/library/repair-all-incomplete', rateLimit, async (req, res) => {
 app.post('/api/library/remove-unfixable-broken', rateLimit, (req, res) => {
   try {
     const summary = library.removeUnfixableBroken();
+    _libraryVersion++;
     res.json({ success: true, ...summary });
   } catch (err) {
     console.error('[Server] removeUnfixableBroken failed:', err);
@@ -3642,6 +3679,7 @@ app.post('/api/library/remove-unfixable-broken', rateLimit, (req, res) => {
 app.post('/api/library/:id/start', rateLimit, (req, res) => {
   const started = library.startQueuedItem(req.params.id);
   if (!started) return res.status(400).json({ error: 'Cannot start this item (no available slots or not queued)' });
+  _libraryVersion++;
   res.json({ success: true });
 });
 
@@ -3653,6 +3691,7 @@ app.post('/api/library/:id/reorder', rateLimit, (req, res) => {
   }
   const reordered = library.reorderQueue(req.params.id, position);
   if (!reordered) return res.status(400).json({ error: 'Cannot reorder this item' });
+  _libraryVersion++;
   res.json({ success: true });
 });
 
@@ -3662,6 +3701,7 @@ app.post('/api/library/pause-pack', rateLimit, (req, res) => {
   if (!packId) return res.status(400).json({ error: 'packId is required' });
   const paused = library.pausePack(packId);
   if (!paused) return res.status(400).json({ error: 'Cannot pause this pack' });
+  _libraryVersion++;
   res.json({ success: true });
 });
 
@@ -3671,6 +3711,7 @@ app.post('/api/library/resume-pack', rateLimit, (req, res) => {
   if (!packId) return res.status(400).json({ error: 'packId is required' });
   const resumed = library.resumePack(packId);
   if (!resumed) return res.status(400).json({ error: 'Cannot resume this pack' });
+  _libraryVersion++;
   res.json({ success: true });
 });
 
@@ -3680,6 +3721,7 @@ app.post('/api/library/retry-pack', rateLimit, (req, res) => {
   if (!packId) return res.status(400).json({ error: 'packId is required' });
   const retried = library.retryPack(packId);
   if (!retried) return res.status(400).json({ error: 'Cannot retry this pack' });
+  _libraryVersion++;
   res.json({ success: true });
 });
 
@@ -3689,6 +3731,7 @@ app.post('/api/library/start-pack', rateLimit, (req, res) => {
   if (!packId) return res.status(400).json({ error: 'packId is required' });
   const started = library.startPack(packId);
   if (!started) return res.status(400).json({ error: 'Cannot start this pack (no free slots or no queued items)' });
+  _libraryVersion++;
   res.json({ success: true });
 });
 
@@ -3696,6 +3739,7 @@ app.post('/api/library/start-pack', rateLimit, (req, res) => {
 app.delete('/api/library/pack/:packId', rateLimit, (req, res) => {
   const removed = library.removePack(req.params.packId);
   if (!removed) return res.status(404).json({ error: 'Pack not found' });
+  _libraryVersion++;
   res.json({ success: true });
 });
 
@@ -5206,12 +5250,20 @@ app.get('/api/stats', (req, res) => {
 // state, and counts of active streams / conversions.
 //
 // Uses a short 200 ms CPU sample so polling every few seconds doesn't starve
-// the event loop but still produces a responsive number.
+// the event loop but still produces a responsive number. The result is cached
+// for 3 seconds so rapid polls from multiple clients don't each block 200 ms.
+let _cachedStatus = null;
+let _statusCacheTime = 0;
+const STATUS_CACHE_TTL = 3000; // 3 seconds
 app.get('/api/status', async (req, res) => {
   try {
+    const now = Date.now();
+    if (_cachedStatus && (now - _statusCacheTime) < STATUS_CACHE_TTL) {
+      return res.json(_cachedStatus);
+    }
     const sys = await getSystemDiag(200);
     const conversion = library.getConversionStats();
-    res.json({
+    _cachedStatus = {
       ok: true,
       cpu: {
         usagePct: sys.cpu.usagePct,
@@ -5230,7 +5282,9 @@ app.get('/api/status', async (req, res) => {
         activeRemote: conversion.active.remote,
         pending: conversion.pending,
       },
-    });
+    };
+    _statusCacheTime = now;
+    res.json(_cachedStatus);
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }

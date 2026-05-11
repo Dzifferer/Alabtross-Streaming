@@ -215,8 +215,18 @@ function discoverDevices(timeout = SEARCH_TIMEOUT) {
       socket.send(generalMsg, 0, generalMsg.length, SSDP_PORT, SSDP_ADDRESS);
     });
 
-    // After timeout, enrich discovered devices with description data
-    setTimeout(async () => {
+    // After timeout (or early if no new responses for 1.5s), enrich discovered devices
+    let lastResponseTime = Date.now();
+    const origOnMessage = socket.listeners('message')[0];
+    if (origOnMessage) {
+      socket.removeListener('message', origOnMessage);
+      socket.on('message', (msg, rinfo) => {
+        origOnMessage(msg, rinfo);
+        lastResponseTime = Date.now();
+      });
+    }
+
+    async function enrichAndFinish() {
       const enrichPromises = [...devices.entries()].map(async ([loc, dev]) => {
         try {
           const info = await fetchDeviceDescription(loc, 3000);
@@ -255,6 +265,19 @@ function discoverDevices(timeout = SEARCH_TIMEOUT) {
       }
 
       finish();
+    }
+
+    // Early completion: if no new SSDP responses for 1.5s, proceed early
+    const checkDone = setInterval(() => {
+      if (Date.now() - lastResponseTime > 1500) {
+        clearInterval(checkDone);
+        clearTimeout(mainTimeout);
+        enrichAndFinish();
+      }
+    }, 500);
+    const mainTimeout = setTimeout(() => {
+      clearInterval(checkDone);
+      enrichAndFinish();
     }, timeout);
   });
 }

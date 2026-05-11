@@ -88,16 +88,39 @@ function httpGetJSON(url, timeoutMs = 10000, _depth = 0) {
   });
 }
 
+// In-memory TTL cache for MusicBrainz API responses
+const _mbCache = new Map();
+const MB_CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+const MB_CACHE_MAX = 200;
+
 async function mbFetch(path, params = {}) {
   const qs = new URLSearchParams({ fmt: 'json', ...params }).toString();
   const url = `${MB_BASE}${path}?${qs}`;
+
+  // Check cache first
+  const cached = _mbCache.get(url);
+  if (cached && Date.now() - cached.time < MB_CACHE_TTL) {
+    return cached.data;
+  }
+
   return schedule(async () => {
+    // Re-check cache inside the queue (another queued call may have populated it)
+    const cached2 = _mbCache.get(url);
+    if (cached2 && Date.now() - cached2.time < MB_CACHE_TTL) {
+      return cached2.data;
+    }
+
     try {
       const res = await httpGetJSON(url);
       if (!res || !res.ok) {
         console.log(`[MB] ${res && res.status} for ${url}`);
         return null;
       }
+      // Evict oldest entry if cache is full
+      if (_mbCache.size >= MB_CACHE_MAX) {
+        _mbCache.delete(_mbCache.keys().next().value);
+      }
+      _mbCache.set(url, { data: res.data, time: Date.now() });
       return res.data;
     } catch (e) {
       console.log(`[MB] error for ${url}: ${e.message}`);

@@ -198,14 +198,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # yt-dlp for the Music tab's YouTube fallback source.
 # libv4l-0 is required by libnvmpi at runtime.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl python3 python3-pip \
+      ca-certificates curl \
       libx264-163 libx265-199 libvpx7 libopus0 libmp3lame0 \
       libass9 libfreetype6 libnuma1 libv4l-0 \
  && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
- && (python3 -m pip install --no-cache-dir yt-dlp \
-     || python3 -m pip install --no-cache-dir --break-system-packages yt-dlp) \
  && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux_aarch64 \
+      -o /usr/local/bin/yt-dlp && chmod +x /usr/local/bin/yt-dlp
 
 # Compiled ffmpeg + the libnvmpi shim it loads at runtime. libnvmpi in turn
 # dlopens libnvv4l2 / libnvbuf_utils from the host (bind-mounted by
@@ -237,6 +238,6 @@ USER nodejs
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD node -e "require('http').get('http://localhost:' + (process.env.PORT || 8080) + '/health', (r) => { r.resume(); r.statusCode === 200 ? process.exit(0) : process.exit(1); }).on('error', () => process.exit(1))"
+  CMD curl -sf http://localhost:${PORT:-8080}/health || exit 1
 
 CMD ["node", "server.js"]

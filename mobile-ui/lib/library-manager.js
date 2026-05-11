@@ -266,6 +266,8 @@ class LibraryManager {
     this._metadataSaveDebounce = null;
     this._discoveryCache = null;      // cached result of _discoverUntrackedFiles
     this._discoveryCacheTs = 0;       // timestamp of last discovery scan
+    this._getAllCache = null;          // cached result of getAll()
+    this._getAllCacheDirty = true;     // dirty flag — set true on any item mutation
 
     // Optional remote GPU conversion worker. When configured AND reachable
     // we route full transcodes to a Windows PC with NVENC instead of
@@ -2245,6 +2247,7 @@ class LibraryManager {
    * Get all library items, including untracked video files found on disk.
    */
   getAll() {
+    if (!this._getAllCacheDirty && this._getAllCache) return this._getAllCache;
     const tracked = [...this._items.values()];
     const now = Date.now();
     // Every mutation path (add/remove/convert/music/manual) already sets
@@ -2260,7 +2263,10 @@ class LibraryManager {
       this._discoveryCacheTs = now;
     }
     const all = [...tracked, ...this._discoveryCache].sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
-    return all.map(i => this._sanitizeItem(i));
+    const result = all.map(i => this._sanitizeItem(i));
+    this._getAllCache = result;
+    this._getAllCacheDirty = false;
+    return result;
   }
 
   /**
@@ -2859,7 +2865,7 @@ class LibraryManager {
     // libraries go from milliseconds to multi-hundred-ms). TTL is short
     // so new torrent adds become visible to the repair flow quickly.
     const now = Date.now();
-    if (!this._recoveryIndex || now - this._recoveryIndexBuiltAt > 2000) {
+    if (!this._recoveryIndex || now - this._recoveryIndexBuiltAt > 30000) {
       const byPackId  = new Map();
       const byRootDir = new Map();
       for (const other of this._items.values()) {
@@ -4635,7 +4641,7 @@ class LibraryManager {
     } catch { return []; }
   }
 
-  _flushPeerCache(infoHash) {
+  async _flushPeerCache(infoHash) {
     if (!this._goodPeers) return;
     const set = this._goodPeers.get(infoHash);
     // Skip if we don't have enough to be useful — a single-peer cache
@@ -4645,11 +4651,11 @@ class LibraryManager {
       const p = this._peerCachePath(infoHash);
       const data = { infoHash, peers: [...set], savedAt: Date.now() };
       const tmp = p + '.tmp';
-      fs.writeFileSync(tmp, JSON.stringify(data));
-      const fd = fs.openSync(tmp, 'r');
-      fs.fsyncSync(fd);
-      fs.closeSync(fd);
-      fs.renameSync(tmp, p);
+      await fs.promises.writeFile(tmp, JSON.stringify(data));
+      const fh = await fs.promises.open(tmp, 'r');
+      await fh.sync();
+      await fh.close();
+      await fs.promises.rename(tmp, p);
     } catch (err) {
       console.warn(`[Library] Failed to save peer cache for ${infoHash.slice(0, 8)}: ${err.message}`);
     }
@@ -4988,16 +4994,16 @@ class LibraryManager {
     }
   }
 
-  _savePackCatalog() {
+  async _savePackCatalog() {
     try {
       const data = [...this._packCatalog.values()];
       const catalogPath = this._packCatalogFile;
       const tmp = catalogPath + '.tmp';
-      fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
-      const fd = fs.openSync(tmp, 'r');
-      fs.fsyncSync(fd);
-      fs.closeSync(fd);
-      fs.renameSync(tmp, catalogPath);
+      await fs.promises.writeFile(tmp, JSON.stringify(data, null, 2), 'utf8');
+      const fh = await fs.promises.open(tmp, 'r');
+      await fh.sync();
+      await fh.close();
+      await fs.promises.rename(tmp, catalogPath);
     } catch (err) {
       console.error(`[Library] Pack catalog save failed: ${err.message}`);
     }
@@ -5228,6 +5234,9 @@ class LibraryManager {
    * debounced write doesn't get dropped.
    */
   _saveMetadata() {
+    // Invalidate the getAll() cache eagerly so the next read sees fresh data,
+    // even before the debounced write fires.
+    this._getAllCacheDirty = true;
     if (this._metadataSaveDebounce) return;
     this._metadataSaveDebounce = setTimeout(() => {
       this._metadataSaveDebounce = null;

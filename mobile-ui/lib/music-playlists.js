@@ -23,6 +23,7 @@ class MusicPlaylists {
     this._file = path.join(libraryPath, '_music-playlists.json');
     this._bak = this._file + '.bak';
     this._playlists = [];
+    this._saveTimer = null;
     this._load();
   }
 
@@ -43,9 +44,14 @@ class MusicPlaylists {
   }
 
   _save() {
+    if (this._saveTimer) clearTimeout(this._saveTimer);
+    this._saveTimer = setTimeout(() => this._saveNow(), 300);
+  }
+
+  _saveNow() {
     const tmp = this._file + '.tmp';
     try {
-      const json = JSON.stringify({ playlists: this._playlists }, null, 2);
+      const json = JSON.stringify({ playlists: this._playlists });
       // Write to tmp
       fs.writeFileSync(tmp, json);
       // Atomic swap

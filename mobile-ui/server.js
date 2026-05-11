@@ -79,6 +79,11 @@ console.log(`[FFmpeg] Pipeline: ${ffmpegHw.describeMode()}`);
 // Override with the MAX_CONCURRENT_STREAMS env var or the in-app setting.
 let MAX_CONCURRENT_STREAMS = parseInt(process.env.MAX_CONCURRENT_STREAMS, 10) || 2;
 
+// Monotonic version counter bumped on every library mutation so the
+// GET /api/library endpoint can return 304 Not Modified when the
+// polling client already has the latest snapshot.
+let _libraryVersion = 0;
+
 // Which background work gets right-of-way when downloads and local
 // conversions would contend for CPU. See LibraryManager._taskPriority
 // for the semantics. Default matches the old behavior.
@@ -2514,8 +2519,13 @@ app.get('/api/diagnostics/system', async (req, res) => {
 // GET /api/library — list all library items
 app.get('/api/library', (req, res) => {
   try {
+    const etag = `"lib-${_libraryVersion}"`;
+    if (req.headers['if-none-match'] === etag) {
+      return res.status(304).end();
+    }
     const items = library.getAll();
     const slots = library.getDownloadSlots();
+    res.set('ETag', etag);
     res.json({ items, slots });
   } catch (err) {
     console.error('[Library] getAll() failed:', err.message);
@@ -2777,6 +2787,7 @@ app.post('/api/library/add', rateLimit, (req, res) => {
 
   try {
     const result = library.addItem({ imdbId, type, name, poster, year, magnetUri, infoHash, quality, size, season, episode });
+    _libraryVersion++;
     res.json(result);
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -2802,6 +2813,7 @@ app.post('/api/library/add-pack', rateLimit, async (req, res) => {
 
   try {
     const result = await library.addSeasonPack({ imdbId, name, poster, year, magnetUri, infoHash, quality, size, season });
+    _libraryVersion++;
 
     // After pack is created, resolve correct TMDB metadata for any episodes
     // whose filename-derived show name differs from the torrent-level name.
@@ -3456,6 +3468,7 @@ app.post('/api/library/add-manual', rateLimit, async (req, res) => {
       quality: quality || '',
       size: '',
     });
+    _libraryVersion++;
     res.json(result);
   } catch (err) {
     console.error('[API] Manual torrent add error:', err.message);
@@ -3470,6 +3483,7 @@ app.post('/api/library/restart-pack', rateLimit, async (req, res) => {
 
   try {
     const result = await library.restartPack(packId);
+    _libraryVersion++;
     res.json(result);
   } catch (err) {
     console.error('[API] Restart pack error:', err.message);
@@ -3556,6 +3570,7 @@ app.post('/api/library/find-missing-show', rateLimit, express.json(), async (req
           size: top.size || '',
           season: s.season,
         });
+        _libraryVersion++;
         const started = (r.items || []).filter(i => i.status === 'started').length;
         totalStarted += started;
         seasonResults.push({ season: s.season, missing: s.expected - s.have, started });
@@ -3575,6 +3590,7 @@ app.post('/api/library/find-missing-show', rateLimit, express.json(), async (req
 app.delete('/api/library/:id', rateLimit, (req, res) => {
   const removed = library.removeItem(req.params.id);
   if (!removed) return res.status(404).json({ error: 'Item not found' });
+  _libraryVersion++;
   res.json({ success: true });
 });
 
@@ -3582,6 +3598,7 @@ app.delete('/api/library/:id', rateLimit, (req, res) => {
 app.post('/api/library/:id/pause', rateLimit, (req, res) => {
   const paused = library.pauseItem(req.params.id);
   if (!paused) return res.status(400).json({ error: 'Cannot pause this item' });
+  _libraryVersion++;
   res.json({ success: true });
 });
 
@@ -3589,6 +3606,7 @@ app.post('/api/library/:id/pause', rateLimit, (req, res) => {
 app.post('/api/library/:id/resume', rateLimit, (req, res) => {
   const resumed = library.resumeItem(req.params.id);
   if (!resumed) return res.status(400).json({ error: 'Cannot resume this item' });
+  _libraryVersion++;
   res.json({ success: true });
 });
 
@@ -3596,6 +3614,7 @@ app.post('/api/library/:id/resume', rateLimit, (req, res) => {
 app.post('/api/library/:id/retry', rateLimit, (req, res) => {
   const retried = library.retryItem(req.params.id);
   if (!retried) return res.status(400).json({ error: 'Cannot retry this item' });
+  _libraryVersion++;
   res.json({ success: true });
 });
 

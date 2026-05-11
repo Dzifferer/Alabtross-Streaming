@@ -1758,12 +1758,15 @@
     attachEpisodeHandlers();
   }
 
-  // Episode click handler — uses event delegation to avoid stacking listeners
-  let _episodeDelegationAttached = false;
+  // Episode click handler — uses event delegation to avoid stacking listeners.
+  // Track the actual DOM element so we re-attach when the element is replaced
+  // (e.g. navigating away from the series detail view and back).
+  let _episodeDelegationElement = null;
   function attachEpisodeHandlers() {
     const episodeList = document.getElementById('episode-list');
-    if (!episodeList || _episodeDelegationAttached) return;
-    _episodeDelegationAttached = true;
+    if (!episodeList) return;
+    if (episodeList === _episodeDelegationElement) return;
+    _episodeDelegationElement = episodeList;
 
     episodeList.addEventListener('click', (e) => {
       const ep = e.target.closest('.episode-item');

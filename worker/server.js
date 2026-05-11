@@ -48,14 +48,14 @@ const os = require('os');
 const crypto = require('crypto');
 
 // ─── Config ───────────────────────────────────────────────────────────
+const SECRET        = process.env.WORKER_SECRET || '';
+if (!SECRET) {
+  console.warn('[worker] WORKER_SECRET is empty — bound to localhost only. Set WORKER_SECRET to accept remote connections.');
+}
 const PORT          = parseInt(process.env.WORKER_PORT || '8090', 10);
 const BIND_HOST     = SECRET ? '0.0.0.0' : '127.0.0.1';
 const HOST          = process.env.WORKER_HOST || BIND_HOST;
 const TEMP_DIR      = process.env.WORKER_TEMP || path.join(os.tmpdir(), 'alabtross-worker');
-const SECRET        = process.env.WORKER_SECRET || '';
-if (!SECRET) {
-  console.warn('[worker] WORKER_SECRET is empty — running without auth. Set WORKER_SECRET for an extra layer on top of Tailscale.');
-}
 const FFMPEG        = process.env.FFMPEG_PATH || 'ffmpeg';
 const FFPROBE       = process.env.FFPROBE_PATH || 'ffprobe';
 const NVENC_PRESET  = process.env.NVENC_PRESET || 'p6';
@@ -344,6 +344,12 @@ function handleTranscode(req, res) {
   let bytesIn = 0;
   let aborted = false;
   let ff = null;
+  let released = false;
+  function releaseSlot() {
+    if (released) return;
+    released = true;
+    activeTranscodes--;
+  }
 
   req.on('data', (chunk) => {
     bytesIn += chunk.length;
@@ -355,7 +361,7 @@ function handleTranscode(req, res) {
       try { req.unpipe(ws); } catch { /* ignore */ }
       try { req.destroy(new Error('input too large')); } catch { /* ignore */ }
       try { ws.destroy(); } catch { /* ignore */ }
-      activeTranscodes--;
+      releaseSlot();
       cleanupJob(job);
       if (!res.headersSent) {
         jsonResponse(res, 413, { error: 'input too large', limit: MAX_INPUT_SIZE });
@@ -370,14 +376,14 @@ function handleTranscode(req, res) {
       aborted = true;
       try { ws.destroy(); } catch { /* ignore */ }
       if (ff) { try { ff.kill('SIGTERM'); } catch { /* ignore */ } }
-      activeTranscodes--;
+      releaseSlot();
       cleanupJob(job);
       console.log(`${tag} client aborted upload after ${(bytesIn / 1e9).toFixed(2)} GB`);
     }
   });
 
   ws.on('error', (err) => {
-    activeTranscodes--;
+    releaseSlot();
     cleanupJob(job);
     if (!res.headersSent) jsonResponse(res, 500, { error: `upload write failed: ${err.message}` });
   });
@@ -411,7 +417,7 @@ function handleTranscode(req, res) {
     });
 
     ff.on('error', (err) => {
-      activeTranscodes--;
+      releaseSlot();
       cleanupJob(job);
       if (!res.headersSent) jsonResponse(res, 500, { error: `ffmpeg spawn failed: ${err.message}` });
     });
@@ -425,7 +431,7 @@ function handleTranscode(req, res) {
 
       if (code !== 0) {
         console.log(`${tag} ffmpeg exited ${code}`);
-        activeTranscodes--;
+        releaseSlot();
         cleanupJob(job);
         if (!res.headersSent) {
           jsonResponse(res, 500, {
@@ -440,13 +446,13 @@ function handleTranscode(req, res) {
       try {
         outStat = fs.statSync(job.outputPath);
       } catch (e) {
-        activeTranscodes--;
+        releaseSlot();
         cleanupJob(job);
         if (!res.headersSent) jsonResponse(res, 500, { error: `output missing: ${e.message}` });
         return;
       }
       if (outStat.size === 0) {
-        activeTranscodes--;
+        releaseSlot();
         cleanupJob(job);
         if (!res.headersSent) jsonResponse(res, 500, { error: 'output empty' });
         return;
@@ -467,13 +473,13 @@ function handleTranscode(req, res) {
       const rs = fs.createReadStream(job.outputPath);
       rs.pipe(res);
       rs.on('close', () => {
-        activeTranscodes--;
+        releaseSlot();
         cleanupJob(job);
         const tTotal = (Date.now() - tStart) / 1000;
         console.log(`${tag} complete in ${tTotal.toFixed(0)}s total`);
       });
       rs.on('error', () => {
-        activeTranscodes--;
+        releaseSlot();
         try { res.destroy(); } catch { /* ignore */ }
         cleanupJob(job);
       });
@@ -484,7 +490,7 @@ function handleTranscode(req, res) {
     res.on('close', () => {
       if (!res.writableFinished && ff) {
         try { ff.kill('SIGTERM'); } catch { /* ignore */ }
-        activeTranscodes--;
+        releaseSlot();
         cleanupJob(job);
         console.log(`${tag} client disconnected mid-encode`);
       }

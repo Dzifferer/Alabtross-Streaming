@@ -834,6 +834,9 @@
       }
       dragged = null;
     });
+    ol.addEventListener('dragend', () => {
+      if (dragged) { dragged.classList.remove('dragging'); dragged = null; }
+    });
   }
 
   // ─── Library selector + music library view ─────────────

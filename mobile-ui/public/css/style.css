@@ -745,6 +745,57 @@ html, body {
   100% { background-position: 200% 0; }
 }
 
+.skeleton-row {
+  display: flex;
+  gap: 12px;
+  overflow: hidden;
+  padding: 0 16px;
+}
+
+.skeleton-card {
+  flex-shrink: 0;
+  width: 130px;
+}
+
+.skeleton-poster {
+  width: 130px;
+  height: 195px;
+  border-radius: var(--radius-sm, 8px);
+  background: linear-gradient(90deg, var(--bg-card, #1a1a2e) 25%, var(--bg-elevated, #252540) 50%, var(--bg-card, #1a1a2e) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+.skeleton-title {
+  width: 80%;
+  height: 13px;
+  margin: 8px 2px 0;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--bg-card, #1a1a2e) 25%, var(--bg-elevated, #252540) 50%, var(--bg-card, #1a1a2e) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+.skeleton-year {
+  width: 40%;
+  height: 11px;
+  margin: 4px 2px 0;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--bg-card, #1a1a2e) 25%, var(--bg-elevated, #252540) 50%, var(--bg-card, #1a1a2e) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+.skeleton-channel {
+  flex-shrink: 0;
+  width: 150px;
+  height: 90px;
+  border-radius: var(--radius-sm, 8px);
+  background: linear-gradient(90deg, var(--bg-card, #1a1a2e) 25%, var(--bg-elevated, #252540) 50%, var(--bg-card, #1a1a2e) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
 .card-info {
   padding: 8px 2px 0;
 }
@@ -5062,4 +5113,88 @@ body.music-player-open .music-player-bar { display: none; }
   .btn-sm:hover { background: rgba(255, 255, 255, 0.16); }
 }
 .btn-sm:active { background: rgba(255, 255, 255, 0.16); }
+
+/* Onboarding Welcome */
+.onboarding-welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 48px 24px 32px;
+  max-width: 400px;
+  margin: 0 auto;
+}
+
+.onboarding-welcome h2 {
+  font-size: 22px;
+  font-weight: 600;
+  margin: 0 0 8px;
+  color: var(--text);
+}
+
+.onboarding-welcome p {
+  font-size: 14px;
+  color: var(--text-muted);
+  margin: 0 0 28px;
+  line-height: 1.5;
+}
+
+.onboarding-welcome .onboarding-icon {
+  width: 64px;
+  height: 64px;
+  margin-bottom: 20px;
+  opacity: 0.7;
+  color: var(--accent, #7c5cfc);
+}
+
+.onboarding-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+}
+
+.onboarding-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  padding: 14px 20px;
+  border-radius: var(--radius, 12px);
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  background: var(--bg-card, #1a1a2e);
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.onboarding-btn:hover,
+.onboarding-btn:active {
+  background: var(--bg-elevated, #252540);
+  border-color: var(--accent, #7c5cfc);
+}
+
+.onboarding-btn svg {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+.onboarding-btn--secondary {
+  background: transparent;
+  border-color: transparent;
+  font-size: 13px;
+  color: var(--text-muted);
+  padding: 10px 20px;
+}
+
+.onboarding-btn--secondary:hover {
+  color: var(--text);
+  background: transparent;
+  border-color: transparent;
+}
 

@@ -5041,7 +5041,7 @@ app.get('/api/settings/max-streams', (req, res) => {
   res.json({ maxConcurrentStreams: MAX_CONCURRENT_STREAMS });
 });
 
-app.post('/api/settings/max-streams', (req, res) => {
+app.post('/api/settings/max-streams', rateLimit, (req, res) => {
   const value = parseInt(req.body.maxConcurrentStreams, 10);
   if (!value || value < 1 || value > 20) {
     return res.status(400).json({ error: 'maxConcurrentStreams must be between 1 and 20' });
@@ -5092,7 +5092,7 @@ app.get('/api/settings/cpu-protection', (req, res) => {
   res.json(library.getCpuProtection());
 });
 
-app.post('/api/settings/cpu-protection', (req, res) => {
+app.post('/api/settings/cpu-protection', rateLimit, (req, res) => {
   const body = req.body || {};
   const update = {};
   if (typeof body.enabled === 'boolean') update.enabled = body.enabled;
@@ -5139,7 +5139,7 @@ app.post('/api/settings/cpu-protection', (req, res) => {
 // Dedicated manual pause/resume endpoint — simpler shape for the "big red
 // button" UI control. Accepts { paused: true|false } or a toggle if no
 // body is provided.
-app.post('/api/settings/cpu-protection/pause', (req, res) => {
+app.post('/api/settings/cpu-protection/pause', rateLimit, (req, res) => {
   const body = req.body || {};
   let paused;
   if (typeof body.paused === 'boolean') {

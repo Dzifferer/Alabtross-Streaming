@@ -219,10 +219,11 @@ async function fetchHTML(url, timeoutMs = 10000, retries = 1) {
   return null;
 }
 
+const TRACKER_PARAMS = TRACKERS.map(t => `&tr=${encodeURIComponent(t)}`).join('');
+
 function buildMagnet(infoHash, name) {
   const encoded = encodeURIComponent(name || 'Unknown');
-  const tr = TRACKERS.map(t => `&tr=${encodeURIComponent(t)}`).join('');
-  return `magnet:?xt=urn:btih:${infoHash}&dn=${encoded}${tr}`;
+  return `magnet:?xt=urn:btih:${infoHash}&dn=${encoded}${TRACKER_PARAMS}`;
 }
 
 // ─── Torrentio Provider (Primary) ───────────────────
@@ -529,11 +530,12 @@ async function search1337x(query) {
   // Try primary domain first, then mirrors if 403/blocked
   const domains = ['1337x.to', '1337x.st', '1337x.gd', '1337x.ws', '1337x.is'];
   let html = null;
+  let workingDomain = null;
   for (const domain of domains) {
     html = await fetchHTML(
       `https://${domain}/search/${encodeURIComponent(cleanQuery)}/1/`
     );
-    if (html) break;
+    if (html) { workingDomain = domain; break; }
   }
   if (!html) return streams;
 
@@ -548,7 +550,7 @@ async function search1337x(query) {
 
   // Fetch details for top 10 results to get magnet/hash
   const detailPromises = links.slice(0, 10).map(async (path) => {
-    const detailHtml = await fetchHTML(`https://1337x.to${path}`);
+    const detailHtml = await fetchHTML(`https://${workingDomain}${path}`);
     if (!detailHtml) return null;
 
     const d$ = cheerio.load(detailHtml);
@@ -970,6 +972,9 @@ function getCachedStreams(key) {
     _streamCache.delete(key);
     return null;
   }
+  // Move to end of Map insertion order for LRU eviction
+  _streamCache.delete(key);
+  _streamCache.set(key, entry);
   return entry.streams;
 }
 
@@ -1540,11 +1545,12 @@ async function search1337xMusic(query) {
   const cleanQuery = query.replace(/['']/g, ' ').replace(/[^\w\s-]/g, ' ').replace(/\s+/g, ' ').trim();
   const domains = ['1337x.to', '1337x.st', '1337x.gd', '1337x.ws', '1337x.is'];
   let html = null;
+  let workingDomain = null;
   for (const domain of domains) {
     html = await fetchHTML(
       `https://${domain}/category-search/${encodeURIComponent(cleanQuery)}/Music/1/`
     );
-    if (html) break;
+    if (html) { workingDomain = domain; break; }
   }
   if (!html) return streams;
 
@@ -1558,7 +1564,7 @@ async function search1337xMusic(query) {
   console.log(`[1337xMusic] Found ${links.length} search results for "${query}"`);
 
   const detailPromises = links.slice(0, 10).map(async (p) => {
-    const detailHtml = await fetchHTML(`https://1337x.to${p}`);
+    const detailHtml = await fetchHTML(`https://${workingDomain}${p}`);
     if (!detailHtml) return null;
     const d$ = cheerio.load(detailHtml);
     const magnetLink = d$('a[href^="magnet:"]').attr('href');

@@ -256,11 +256,17 @@
 
   // ─── Audio element wiring ─────────────────
 
+  let _rafPending = false;
   audio.addEventListener('timeupdate', () => {
-    state.position = audio.currentTime || 0;
-    state.duration = audio.duration || 0;
-    updateMediaPositionState();
-    emit();
+    if (_rafPending) return;
+    _rafPending = true;
+    requestAnimationFrame(() => {
+      _rafPending = false;
+      state.position = audio.currentTime || 0;
+      state.duration = audio.duration || 0;
+      updateMediaPositionState();
+      emit();
+    });
   });
   audio.addEventListener('play', () => {
     state.paused = false;

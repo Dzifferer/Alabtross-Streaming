@@ -77,16 +77,21 @@
   const RESUME_SAVE_THROTTLE_MS = 5000;
   const RESUME_MAX_ENTRIES = 200;
 
+  let _resumeStoreCache = null;
+
   function loadResumeStore() {
+    if (_resumeStoreCache) return _resumeStoreCache;
     try {
       const raw = localStorage.getItem(RESUME_STORAGE_KEY);
-      if (!raw) return {};
+      if (!raw) { _resumeStoreCache = {}; return _resumeStoreCache; }
       const parsed = JSON.parse(raw);
-      return (parsed && typeof parsed === 'object') ? parsed : {};
-    } catch { return {}; }
+      _resumeStoreCache = (parsed && typeof parsed === 'object') ? parsed : {};
+    } catch { _resumeStoreCache = {}; }
+    return _resumeStoreCache;
   }
 
   function writeResumeStore(store) {
+    _resumeStoreCache = store;
     try {
       const keys = Object.keys(store);
       if (keys.length > RESUME_MAX_ENTRIES) {
@@ -579,10 +584,13 @@
       return;
     }
 
-    // Load each catalog row
-    for (const catalog of allCatalogs) {
-      await loadCatalogRow(catalog);
-    }
+    // Load catalog rows in parallel, preserving DOM order via placeholders
+    const placeholders = allCatalogs.map(catalog => {
+      const row = document.createElement('div');
+      dom.homeCatalogs.appendChild(row);
+      return { catalog, row };
+    });
+    await Promise.all(placeholders.map(({ catalog, row }) => loadCatalogRow(catalog, row)));
 
     // Live TV — append after catalog rows (same as custom mode)
     if (!type) {
@@ -896,13 +904,16 @@
     }
   }
 
-  async function loadCatalogRow(catalog) {
+  async function loadCatalogRow(catalog, placeholder) {
     const items = await api.getCatalogItems(
       catalog.addonUrl, catalog.type, catalog.id
     );
-    if (items.length === 0) return;
+    if (items.length === 0) {
+      if (placeholder) placeholder.remove();
+      return;
+    }
 
-    const row = document.createElement('div');
+    const row = placeholder || document.createElement('div');
     row.className = 'catalog-row';
 
     const displayName = catalog.name.charAt(0).toUpperCase() + catalog.name.slice(1);
@@ -915,7 +926,7 @@
       <div class="catalog-scroll">${items.slice(0, 20).map(item => cardHTML(item, catalog.type)).join('')}</div>
     `;
 
-    dom.homeCatalogs.appendChild(row);
+    if (!placeholder) dom.homeCatalogs.appendChild(row);
     attachCardListeners(row);
   }
 

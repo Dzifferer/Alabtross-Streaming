@@ -111,6 +111,7 @@ function sweepStaleTemp() {
   } catch { /* ignore */ }
 }
 sweepStaleTemp();
+setInterval(() => sweepStaleTemp(), 3600 * 1000); // hourly
 
 function checkBinaries() {
   for (const [name, bin] of [['ffmpeg', FFMPEG], ['ffprobe', FFPROBE]]) {
@@ -130,6 +131,15 @@ function checkBinaries() {
   }
 }
 checkBinaries();
+
+// ─── Cached health info (computed once at startup) ───────────────────
+let _cachedHealth = null;
+function initHealthCache() {
+  const ffVer = (() => { try { return spawnSync(FFMPEG, ['-version'], { encoding: 'utf8' }).stdout.toString().split('\n')[0]; } catch { return 'unavailable'; } })();
+  const gpuInfo = (() => { try { const r = spawnSync('nvidia-smi', ['--query-gpu=name,driver_version', '--format=csv,noheader'], { encoding: 'utf8' }); return r.status === 0 ? (r.stdout || '').trim() : 'unavailable'; } catch { return 'unavailable'; } })();
+  _cachedHealth = { ffmpeg: ffVer, gpu: gpuInfo };
+}
+initHealthCache();
 
 // ─── Helpers ──────────────────────────────────────────────────────────
 function probeVideoCodec(filePath) {
@@ -269,21 +279,14 @@ function cleanupJob(job) {
 
 // ─── Endpoints ────────────────────────────────────────────────────────
 function handleHealth(req, res) {
-  const ffv = spawnSync(FFMPEG, ['-version'], { encoding: 'utf8' });
-  const firstLine = ((ffv.stdout || '').split('\n')[0] || '').trim();
-  let nvidiaSmi = null;
-  try {
-    const r = spawnSync('nvidia-smi', ['--query-gpu=name,driver_version', '--format=csv,noheader'], { encoding: 'utf8' });
-    if (r.status === 0) nvidiaSmi = (r.stdout || '').trim();
-  } catch { /* ignore */ }
   jsonResponse(res, 200, {
     ok: true,
     encoder: 'h264_nvenc',
     preset: NVENC_PRESET,
     cq: NVENC_CQ,
     maxWidth: MAX_WIDTH,
-    ffmpeg: firstLine,
-    gpu: nvidiaSmi,
+    ffmpeg: _cachedHealth.ffmpeg,
+    gpu: _cachedHealth.gpu,
     tempDir: TEMP_DIR,
     secured: !!SECRET,
     pid: process.pid,
@@ -401,7 +404,7 @@ function handleTranscode(req, res) {
     ff.stderr.on('data', (d) => {
       const msg = d.toString();
       stderrBuf += msg;
-      if (stderrBuf.length > 32768) stderrBuf = stderrBuf.slice(-32768);
+      if (stderrBuf.length > 4096) stderrBuf = stderrBuf.slice(-4096);
       const trimmed = msg.trim();
       if (trimmed) console.log(`${tag} ffmpeg: ${trimmed}`);
     });

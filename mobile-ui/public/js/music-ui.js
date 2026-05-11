@@ -660,72 +660,106 @@
 
   // ─── Mini / Full player wiring ─────────
 
+  // Cache DOM element references to avoid repeated querySelector calls.
+  let _mpDom = null;
+  function getMpDom() {
+    if (_mpDom) return _mpDom;
+    _mpDom = {
+      miniBar: $('#music-player-bar'),
+      miniCover: $('#mpb-cover'),
+      miniTitle: $('#mpb-title'),
+      miniArtist: $('#mpb-artist'),
+      miniPlayicon: $('#mpb-playicon'),
+      miniPauseicon: $('#mpb-pauseicon'),
+      miniProgressFill: $('#mpb-progress-fill'),
+      fullView: $('#view-music-player'),
+      fullCover: $('#mpf-cover'),
+      fullTitle: $('#mpf-title'),
+      fullArtist: $('#mpf-artist'),
+      fullAlbum: $('#mpf-album'),
+      fullDuration: $('#mpf-duration'),
+      fullSeek: $('#mpf-seek'),
+      fullCurrent: $('#mpf-current'),
+      fullPlayicon: $('#mpf-playicon'),
+      fullPauseicon: $('#mpf-pauseicon'),
+      fullShuffle: $('#mpf-shuffle'),
+      fullRepeat: $('#mpf-repeat'),
+      fullQueue: $('#mpf-queue'),
+    };
+    return _mpDom;
+  }
+
+  // Track queue state to skip expensive DOM rebuilds when only position changed.
+  let _lastQueueSnapshot = null;
+  let _lastQueueIndex = -1;
+
   function renderMiniPlayer(state) {
-    const bar = $('#music-player-bar');
-    if (!bar) return;
+    const d = getMpDom();
+    if (!d.miniBar) return;
     const item = window.MusicQueue.currentItem();
-    if (!item) { bar.classList.add('hidden'); return; }
-    bar.classList.remove('hidden');
-    const cover = $('#mpb-cover');
-    if (item.coverUrl) cover.style.backgroundImage = safeBgUrl(item.coverUrl);
-    else cover.style.backgroundImage = '';
-    $('#mpb-title').textContent = item.title || '—';
-    $('#mpb-artist').textContent = [item.artist, item.album].filter(Boolean).join(' — ');
-    $('#mpb-playicon').classList.toggle('hidden', !state.paused);
-    $('#mpb-pauseicon').classList.toggle('hidden', state.paused);
+    if (!item) { d.miniBar.classList.add('hidden'); return; }
+    d.miniBar.classList.remove('hidden');
+    if (item.coverUrl) d.miniCover.style.backgroundImage = safeBgUrl(item.coverUrl);
+    else d.miniCover.style.backgroundImage = '';
+    d.miniTitle.textContent = item.title || '—';
+    d.miniArtist.textContent = [item.artist, item.album].filter(Boolean).join(' — ');
+    d.miniPlayicon.classList.toggle('hidden', !state.paused);
+    d.miniPauseicon.classList.toggle('hidden', state.paused);
     const pct = state.duration ? (state.position / state.duration) * 100 : 0;
-    $('#mpb-progress-fill').style.width = `${Math.min(100, Math.max(0, pct))}%`;
+    d.miniProgressFill.style.width = `${Math.min(100, Math.max(0, pct))}%`;
   }
 
   function renderFullPlayer(state) {
-    const view = $('#view-music-player');
-    if (!view) return;
+    const d = getMpDom();
+    if (!d.fullView) return;
     const item = window.MusicQueue.currentItem();
     if (!item) return;
-    const cover = $('#mpf-cover');
-    if (item.coverUrl) cover.style.backgroundImage = safeBgUrl(item.coverUrl);
-    else cover.style.backgroundImage = '';
-    $('#mpf-title').textContent = item.title || '—';
-    $('#mpf-artist').textContent = item.artist || '';
-    $('#mpf-album').textContent = item.album || '';
-    $('#mpf-duration').textContent = fmtTime(state.duration);
-    const seek = $('#mpf-seek');
-    if (seek && !seek.dataset.dragging) {
+    if (item.coverUrl) d.fullCover.style.backgroundImage = safeBgUrl(item.coverUrl);
+    else d.fullCover.style.backgroundImage = '';
+    d.fullTitle.textContent = item.title || '—';
+    d.fullArtist.textContent = item.artist || '';
+    d.fullAlbum.textContent = item.album || '';
+    d.fullDuration.textContent = fmtTime(state.duration);
+    if (d.fullSeek && !d.fullSeek.dataset.dragging) {
       // Keep the slider and current-time label in sync with playback.
-      seek.value = state.duration ? Math.round((state.position / state.duration) * 1000) : 0;
-      $('#mpf-current').textContent = fmtTime(state.position);
-    } else if (seek && state.duration) {
+      d.fullSeek.value = state.duration ? Math.round((state.position / state.duration) * 1000) : 0;
+      d.fullCurrent.textContent = fmtTime(state.position);
+    } else if (d.fullSeek && state.duration) {
       // While dragging, show the scrubbed time instead of the still-playing
       // position so the user can preview where they're seeking to.
-      $('#mpf-current').textContent = fmtTime((seek.value / 1000) * state.duration);
+      d.fullCurrent.textContent = fmtTime((d.fullSeek.value / 1000) * state.duration);
     }
-    $('#mpf-playicon').classList.toggle('hidden', !state.paused);
-    $('#mpf-pauseicon').classList.toggle('hidden', state.paused);
-    $('#mpf-shuffle').classList.toggle('active', !!state.shuffle);
-    const rep = $('#mpf-repeat');
-    rep.classList.toggle('active', state.repeat !== 'off');
-    rep.setAttribute('data-state', state.repeat);
+    d.fullPlayicon.classList.toggle('hidden', !state.paused);
+    d.fullPauseicon.classList.toggle('hidden', state.paused);
+    d.fullShuffle.classList.toggle('active', !!state.shuffle);
+    d.fullRepeat.classList.toggle('active', state.repeat !== 'off');
+    d.fullRepeat.setAttribute('data-state', state.repeat);
 
-    // Queue list: show the current track first (marked) then the upcoming
-    // tracks. Users often want to confirm what's playing and jump back to
-    // earlier queue items, so rendering only "upcoming" hides useful context.
-    const ol = $('#mpf-queue');
-    ol.innerHTML = '';
-    const order = state.shuffleOrder || state.queue.map((_, i) => i);
-    const currentPos = order.indexOf(state.currentIndex);
-    for (let i = 0; i < order.length; i++) {
-      const qi = order[i];
-      const q = state.queue[qi];
-      const isCurrent = i === currentPos;
-      const li = el('li', {
-        class: 'queue-item' + (isCurrent ? ' now-playing' : ''),
-        draggable: !isCurrent,
-      });
-      li.dataset.queueIdx = qi;
-      li.appendChild(el('span', { class: 'queue-item__title' }, q.title || '—'));
-      li.appendChild(el('span', { class: 'queue-item__artist' }, q.artist || ''));
-      li.addEventListener('click', () => window.MusicQueue.jumpTo(qi));
-      ol.appendChild(li);
+    // Only rebuild the queue list when the queue or current track actually
+    // changes — skip the expensive DOM rebuild on pure position updates.
+    const queueChanged = state.queue !== _lastQueueSnapshot || state.currentIndex !== _lastQueueIndex;
+    if (queueChanged) {
+      _lastQueueSnapshot = state.queue;
+      _lastQueueIndex = state.currentIndex;
+
+      const ol = d.fullQueue;
+      ol.innerHTML = '';
+      const order = state.shuffleOrder || state.queue.map((_, i) => i);
+      const currentPos = order.indexOf(state.currentIndex);
+      for (let i = 0; i < order.length; i++) {
+        const qi = order[i];
+        const q = state.queue[qi];
+        const isCurrent = i === currentPos;
+        const li = el('li', {
+          class: 'queue-item' + (isCurrent ? ' now-playing' : ''),
+          draggable: !isCurrent,
+        });
+        li.dataset.queueIdx = qi;
+        li.appendChild(el('span', { class: 'queue-item__title' }, q.title || '—'));
+        li.appendChild(el('span', { class: 'queue-item__artist' }, q.artist || ''));
+        li.addEventListener('click', () => window.MusicQueue.jumpTo(qi));
+        ol.appendChild(li);
+      }
     }
   }
 

@@ -941,7 +941,7 @@
       <div class="card" data-type="${type}" data-id="${id}" data-name="${rawName}">
         <div class="card-poster">
           ${poster
-            ? `<img src="${poster}" alt="${title}" loading="lazy" class="loading">`
+            ? `<img src="${escapeHTML(poster)}" alt="${title}" loading="lazy" class="loading">`
             : ''}
           <div class="poster-placeholder">${!poster ? title : ''}</div>
         </div>
@@ -1027,7 +1027,7 @@
       <div class="card card-collection" data-collection-id="${escapeHTML(collection.id)}">
         <div class="card-poster collection-poster-stack">
           ${poster
-            ? `<img src="${poster}" alt="${name}" loading="lazy" class="loading">`
+            ? `<img src="${escapeHTML(poster)}" alt="${name}" loading="lazy" class="loading">`
             : ''}
           <div class="poster-placeholder">${!poster ? name : ''}</div>
           <div class="collection-badge">${count} movies</div>
@@ -1051,7 +1051,7 @@
     return `
       <div class="card library-group-tile" data-group-id="${escapeHTML(group.id)}" data-group-type="${group.type}">
         <div class="card-poster collection-poster-stack">
-          ${poster ? `<img src="${poster}" alt="${name}" loading="lazy" class="loading">` : ''}
+          ${poster ? `<img src="${escapeHTML(poster)}" alt="${name}" loading="lazy" class="loading">` : ''}
           <div class="poster-placeholder">${!poster ? name : ''}</div>
           <div class="collection-badge">${count} ${typeLabel}</div>
         </div>
@@ -1139,7 +1139,7 @@
            data-stremio-id="${escapeHTML(stremioId)}">
         <div class="channel-poster">
           ${logo
-            ? `<img src="${logo}" alt="${name}" loading="lazy" class="loading">`
+            ? `<img src="${escapeHTML(logo)}" alt="${name}" loading="lazy" class="loading">`
             : ''}
           <div class="channel-placeholder">${!logo ? name.substring(0, 3).toUpperCase() : ''}</div>
           <span class="channel-live-badge">LIVE</span>
@@ -1534,7 +1534,7 @@
 
     let html = `
       <div class="detail-hero">
-        ${bgImage ? `<img src="${bgImage}" alt="">` : '<div style="height:100%;background:var(--bg-card)"></div>'}
+        ${bgImage ? `<img src="${escapeHTML(bgImage)}" alt="">` : '<div style="height:100%;background:var(--bg-card)"></div>'}
         <div class="detail-hero-gradient"></div>
       </div>
       <div class="detail-body fade-in">
@@ -1758,12 +1758,15 @@
     attachEpisodeHandlers();
   }
 
-  // Episode click handler — uses event delegation to avoid stacking listeners
-  let _episodeDelegationAttached = false;
+  // Episode click handler — uses event delegation to avoid stacking listeners.
+  // Track the actual DOM element so we re-attach when the element is replaced
+  // (e.g. navigating away from the series detail view and back).
+  let _episodeDelegationElement = null;
   function attachEpisodeHandlers() {
     const episodeList = document.getElementById('episode-list');
-    if (!episodeList || _episodeDelegationAttached) return;
-    _episodeDelegationAttached = true;
+    if (!episodeList) return;
+    if (episodeList === _episodeDelegationElement) return;
+    _episodeDelegationElement = episodeList;
 
     episodeList.addEventListener('click', (e) => {
       const ep = e.target.closest('.episode-item');
@@ -2254,7 +2257,7 @@
         <div class="curtain-valance"></div>
         <div class="curtain-lights"></div>
         <div class="curtain-poster-wrap">
-          ${poster ? `<img src="${poster}" alt="">` : ''}
+          ${poster ? `<img src="${escapeHTML(poster)}" alt="">` : ''}
           ${title ? `<div class="curtain-poster-title">${escapeHTML(title)}</div>` : ''}
           <div class="curtain-loading-bar"><div class="loading-bar"></div></div>
           <div class="curtain-poster-status loading-status">${status}</div>
@@ -2784,7 +2787,7 @@
     card.innerHTML = `
       <div class="up-next-header">Up next</div>
       <div class="up-next-body">
-        ${poster ? `<img class="up-next-poster" src="${poster}" alt="">` : ''}
+        ${poster ? `<img class="up-next-poster" src="${escapeHTML(poster)}" alt="">` : ''}
         <div class="up-next-info">
           <div class="up-next-title">${safeTitle}</div>
           ${safeSubtitle ? `<div class="up-next-subtitle">${safeSubtitle}</div>` : ''}
@@ -3560,7 +3563,7 @@
       return `
         <button class="review-candidate" data-id="${escapeHTML(item.id)}" data-imdb-id="${escapeHTML(imdb)}" data-name="${escapeHTML(c.name || '')}" data-poster="${escapeHTML(c.poster || '')}" data-year="${escapeHTML(c.year || '')}" data-type="${escapeHTML(c.type || item.type || 'movie')}" title="${escapeHTML((c.name || '') + (c.year ? ' (' + c.year + ')' : ''))}" ${imdb ? '' : 'disabled'}>
           <div class="review-candidate-poster">
-            ${poster ? `<img src="${poster}" alt="${escapeHTML(c.name || '')}" loading="lazy">` : `<div class="review-candidate-no-poster">${escapeHTML((c.name || '?').slice(0, 2).toUpperCase())}</div>`}
+            ${poster ? `<img src="${escapeHTML(poster)}" alt="${escapeHTML(c.name || '')}" loading="lazy">` : `<div class="review-candidate-no-poster">${escapeHTML((c.name || '?').slice(0, 2).toUpperCase())}</div>`}
           </div>
           <div class="review-candidate-meta">
             <div class="review-candidate-title">${escapeHTML(c.name || 'Unknown')}</div>
@@ -3695,7 +3698,7 @@
     return `
       <div class="card" data-id="${escapeHTML(item.id)}" data-imdb-id="${escapeHTML(item.imdbId || '')}" data-item-name="${escapeHTML(item.name || '')}" data-status="${item.status}">
         <div class="card-poster">
-          ${poster ? `<img src="${poster}" alt="${title}" loading="lazy">` : ''}
+          ${poster ? `<img src="${escapeHTML(poster)}" alt="${title}" loading="lazy">` : ''}
           ${!poster ? `<div class="poster-placeholder">${title}</div>` : ''}
           ${matchBadge}
           ${overlayHtml}
@@ -4345,7 +4348,7 @@
           return `
             <div class="relink-result" data-imdb-id="${escapeHTML(imdbId)}" data-name="${escapeHTML(r.name || '')}" data-poster="${escapeHTML(poster)}" data-year="${escapeHTML(r.year || '')}" data-type="${escapeHTML(r.type || 'movie')}">
               <div class="relink-result-poster">
-                ${poster ? `<img src="${poster}" alt="${escapeHTML(r.name || '')}">` : `<div class="relink-result-no-poster">${escapeHTML(r.name || '?')}</div>`}
+                ${poster ? `<img src="${escapeHTML(poster)}" alt="${escapeHTML(r.name || '')}">` : `<div class="relink-result-no-poster">${escapeHTML(r.name || '?')}</div>`}
               </div>
               <div class="relink-result-info">
                 <div class="relink-result-title">${escapeHTML(r.name || 'Unknown')}</div>

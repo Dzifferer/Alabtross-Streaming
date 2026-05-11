@@ -45,11 +45,13 @@ class MusicPlaylists {
   _save() {
     const tmp = this._file + '.tmp';
     try {
-      if (fs.existsSync(this._file)) {
-        fs.copyFileSync(this._file, this._bak);
-      }
-      fs.writeFileSync(tmp, JSON.stringify({ playlists: this._playlists }, null, 2));
+      const json = JSON.stringify({ playlists: this._playlists }, null, 2);
+      // Write to tmp
+      fs.writeFileSync(tmp, json);
+      // Atomic swap
       fs.renameSync(tmp, this._file);
+      // Now create backup from the known-good file
+      try { fs.copyFileSync(this._file, this._bak); } catch(e) {}
     } catch (e) {
       console.error(`[Playlists] Save failed: ${e.message}`);
       try { fs.unlinkSync(tmp); } catch {}

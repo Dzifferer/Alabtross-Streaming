@@ -82,6 +82,8 @@ const MAX_INPUT_SIZE = (() => {
   const n = parseInt(process.env.MAX_INPUT_SIZE, 10);
   return Number.isFinite(n) && n > 0 ? n : 100 * 1024 * 1024 * 1024;
 })();
+const MAX_CONCURRENT_TRANSCODES = parseInt(process.env.MAX_TRANSCODES || '3', 10);
+let activeTranscodes = 0;
 
 fs.mkdirSync(TEMP_DIR, { recursive: true });
 
@@ -233,9 +235,11 @@ const SECRET_BUF = SECRET ? Buffer.from(SECRET) : null;
 function checkAuth(req) {
   if (!SECRET) return true;
   const provided = req.headers['x-worker-secret'];
-  if (typeof provided !== 'string' || provided.length !== SECRET.length) return false;
+  if (typeof provided !== 'string') return false;
+  const providedBuf = Buffer.from(provided);
+  if (providedBuf.length !== SECRET_BUF.length) return false;
   try {
-    return crypto.timingSafeEqual(Buffer.from(provided), SECRET_BUF);
+    return crypto.timingSafeEqual(providedBuf, SECRET_BUF);
   } catch {
     return false;
   }
@@ -292,6 +296,11 @@ function handleTranscode(req, res) {
     return jsonResponse(res, 401, { error: 'unauthorized' });
   }
 
+  if (activeTranscodes >= MAX_CONCURRENT_TRANSCODES) {
+    return jsonResponse(res, 503, { error: 'Too many concurrent transcodes' });
+  }
+  activeTranscodes++;
+
   // Reject oversized uploads up front via Content-Length. Also enforce
   // a live byte counter below in case the header is missing or lies —
   // Node won't auto-cap the request stream, so we abort once the cap
@@ -300,6 +309,7 @@ function handleTranscode(req, res) {
   // the malicious / buggy "no Content-Length" case.
   const declaredLen = parseInt(req.headers['content-length'], 10);
   if (Number.isFinite(declaredLen) && declaredLen > MAX_INPUT_SIZE) {
+    activeTranscodes--;
     return jsonResponse(res, 413, {
       error: 'input too large',
       limit: MAX_INPUT_SIZE,
@@ -338,8 +348,10 @@ function handleTranscode(req, res) {
     // the worker's temp disk.
     if (bytesIn > MAX_INPUT_SIZE && !aborted) {
       aborted = true;
+      try { req.unpipe(ws); } catch { /* ignore */ }
       try { req.destroy(new Error('input too large')); } catch { /* ignore */ }
       try { ws.destroy(); } catch { /* ignore */ }
+      activeTranscodes--;
       cleanupJob(job);
       if (!res.headersSent) {
         jsonResponse(res, 413, { error: 'input too large', limit: MAX_INPUT_SIZE });
@@ -349,15 +361,19 @@ function handleTranscode(req, res) {
   });
   req.pipe(ws);
 
-  req.on('aborted', () => {
-    aborted = true;
-    try { ws.destroy(); } catch { /* ignore */ }
-    if (ff) { try { ff.kill('SIGTERM'); } catch { /* ignore */ } }
-    cleanupJob(job);
-    console.log(`${tag} client aborted upload after ${(bytesIn / 1e9).toFixed(2)} GB`);
+  req.on('close', () => {
+    if (req.destroyed) {
+      aborted = true;
+      try { ws.destroy(); } catch { /* ignore */ }
+      if (ff) { try { ff.kill('SIGTERM'); } catch { /* ignore */ } }
+      activeTranscodes--;
+      cleanupJob(job);
+      console.log(`${tag} client aborted upload after ${(bytesIn / 1e9).toFixed(2)} GB`);
+    }
   });
 
   ws.on('error', (err) => {
+    activeTranscodes--;
     cleanupJob(job);
     if (!res.headersSent) jsonResponse(res, 500, { error: `upload write failed: ${err.message}` });
   });
@@ -391,6 +407,7 @@ function handleTranscode(req, res) {
     });
 
     ff.on('error', (err) => {
+      activeTranscodes--;
       cleanupJob(job);
       if (!res.headersSent) jsonResponse(res, 500, { error: `ffmpeg spawn failed: ${err.message}` });
     });
@@ -404,6 +421,7 @@ function handleTranscode(req, res) {
 
       if (code !== 0) {
         console.log(`${tag} ffmpeg exited ${code}`);
+        activeTranscodes--;
         cleanupJob(job);
         if (!res.headersSent) {
           jsonResponse(res, 500, {
@@ -418,11 +436,13 @@ function handleTranscode(req, res) {
       try {
         outStat = fs.statSync(job.outputPath);
       } catch (e) {
+        activeTranscodes--;
         cleanupJob(job);
         if (!res.headersSent) jsonResponse(res, 500, { error: `output missing: ${e.message}` });
         return;
       }
       if (outStat.size === 0) {
+        activeTranscodes--;
         cleanupJob(job);
         if (!res.headersSent) jsonResponse(res, 500, { error: 'output empty' });
         return;
@@ -443,11 +463,13 @@ function handleTranscode(req, res) {
       const rs = fs.createReadStream(job.outputPath);
       rs.pipe(res);
       rs.on('close', () => {
+        activeTranscodes--;
         cleanupJob(job);
         const tTotal = (Date.now() - tStart) / 1000;
         console.log(`${tag} complete in ${tTotal.toFixed(0)}s total`);
       });
       rs.on('error', () => {
+        activeTranscodes--;
         try { res.destroy(); } catch { /* ignore */ }
         cleanupJob(job);
       });
@@ -458,6 +480,7 @@ function handleTranscode(req, res) {
     res.on('close', () => {
       if (!res.writableFinished && ff) {
         try { ff.kill('SIGTERM'); } catch { /* ignore */ }
+        activeTranscodes--;
         cleanupJob(job);
         console.log(`${tag} client disconnected mid-encode`);
       }

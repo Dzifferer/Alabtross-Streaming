@@ -143,7 +143,6 @@ class PeerReputation {
     }
 
     const doSave = async () => {
-      this._dirty = false;
       this._expireStale();
       try {
         await fs.promises.mkdir(this._cacheDir, { recursive: true });
@@ -152,6 +151,7 @@ class PeerReputation {
         const tmp = this._file + '.tmp';
         await fs.promises.writeFile(tmp, JSON.stringify(out));
         await fs.promises.rename(tmp, this._file);
+        this._dirty = false;
       } catch (err) {
         // A failed write means the in-memory state is still ahead of
         // disk; mark dirty so the next tick retries instead of dropping

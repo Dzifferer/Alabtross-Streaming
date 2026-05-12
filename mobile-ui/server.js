@@ -4929,7 +4929,24 @@ const ADDON_JSON_PATH_RE = /^\/(manifest\.json|catalog\/|meta\/|stream\/)/;
 // NOT cached — addon downtime should retry on the next request.
 const ADDON_PROXY_CACHE_MAX    = 256;
 const ADDON_PROXY_CACHE_TTL_MS = 5 * 60 * 1000;
-const _addonProxyCache = new Map(); // url -> { value, expiresAt }
+const _addonProxyCache = new Map(); // normalized-url -> { value, expiresAt }
+
+// Normalize a URL for cache keying. The Stremio + IPTV ecosystems pass the
+// same logical request with different query-param orderings ("?a=1&b=2" vs
+// "?b=2&a=1") and inconsistent trailing-slash / case in the hostname; the
+// upstream returns identical bodies for any of these but the cache used to
+// key on the raw string and miss every alternate form. URL.toString
+// normalizes the host casing + the pathname; searchParams.sort() makes the
+// query-string order canonical.
+function normalizeCacheKey(urlStr) {
+  try {
+    const u = new URL(urlStr);
+    u.searchParams.sort();
+    return u.toString();
+  } catch {
+    return urlStr;
+  }
+}
 
 app.get('/api/addon-proxy', rateLimit, async (req, res) => {
   const targetUrl = req.query.url;
@@ -4950,11 +4967,12 @@ app.get('/api/addon-proxy', rateLimit, async (req, res) => {
     return res.status(400).json({ error: 'Disallowed path' });
   }
 
-  const cached = _addonProxyCache.get(targetUrl);
+  const cacheKey = normalizeCacheKey(targetUrl);
+  const cached = _addonProxyCache.get(cacheKey);
   if (cached && Date.now() < cached.expiresAt) {
     // LRU touch
-    _addonProxyCache.delete(targetUrl);
-    _addonProxyCache.set(targetUrl, cached);
+    _addonProxyCache.delete(cacheKey);
+    _addonProxyCache.set(cacheKey, cached);
     return res.json(cached.value);
   }
 
@@ -4966,7 +4984,7 @@ app.get('/api/addon-proxy', rateLimit, async (req, res) => {
       const oldest = _addonProxyCache.keys().next().value;
       if (oldest !== undefined) _addonProxyCache.delete(oldest);
     }
-    _addonProxyCache.set(targetUrl, { value: data, expiresAt: Date.now() + ADDON_PROXY_CACHE_TTL_MS });
+    _addonProxyCache.set(cacheKey, { value: data, expiresAt: Date.now() + ADDON_PROXY_CACHE_TTL_MS });
     res.json(data);
   } catch (err) {
     console.error(`[AddonProxy] Error fetching ${targetUrl}: ${err.message}`);
@@ -5249,9 +5267,11 @@ app.get('/api/iptv/channels', rateLimit, async (req, res) => {
     return res.status(400).json({ error: 'Invalid or blocked URL' });
   }
 
-  // Fetch and cache playlist
+  // Fetch and cache playlist. Key on the normalized URL so query-param
+  // reordering by upstream clients doesn't cause a cache miss.
+  const cacheKey = normalizeCacheKey(playlistUrl);
   let channels;
-  const cached = playlistCache.get(playlistUrl);
+  const cached = playlistCache.get(cacheKey);
   if (cached && Date.now() - cached.fetchedAt < PLAYLIST_CACHE_TTL) {
     channels = cached.channels;
   } else {
@@ -5262,7 +5282,7 @@ app.get('/api/iptv/channels', rateLimit, async (req, res) => {
         const oldest = playlistCache.keys().next().value;
         playlistCache.delete(oldest);
       }
-      playlistCache.set(playlistUrl, { channels, fetchedAt: Date.now() });
+      playlistCache.set(cacheKey, { channels, fetchedAt: Date.now() });
     } catch (err) {
       console.error('[IPTV] Playlist fetch error:', err.message);
       return res.status(502).json({ error: 'Failed to fetch playlist' });

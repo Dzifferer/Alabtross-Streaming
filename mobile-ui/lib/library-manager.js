@@ -17,7 +17,10 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
-const { VIDEO_EXTENSIONS, TRACKERS, isFileNameSafe, getMimeType } = require('./file-safety');
+const {
+  VIDEO_EXTENSIONS, TRACKERS, isFileNameSafe, getMimeType,
+  PACK_MIN_FILE_BYTES, MIN_PLAYABLE_VIDEO_BYTES, JUNK_FILE_REGEX,
+} = require('./file-safety');
 const { PeerManager } = require('./peer-manager');
 const { PeerReputation } = require('./peer-reputation');
 const { WorkerClient } = require('./worker-client');
@@ -1191,10 +1194,8 @@ class LibraryManager {
         tm.clear();
 
         // Find all video files, excluding samples/trailers/promos and tiny junk files
-        const PACK_MIN_FILE_SIZE = 10 * 1024 * 1024; // 10 MB — skip promo/ad files
-        const dominated = /\b(sample|trailer|extra|bonus|featurette|interview)\b/i;
         const videoFiles = engine.files.filter(f =>
-          isFileNameSafe(f.name) && !dominated.test(f.name) && f.length >= PACK_MIN_FILE_SIZE
+          isFileNameSafe(f.name) && !JUNK_FILE_REGEX.test(f.name) && f.length >= PACK_MIN_FILE_BYTES
         );
 
         if (videoFiles.length === 0) {
@@ -1385,10 +1386,8 @@ class LibraryManager {
         tm.clear();
 
         // Find all usable video files, excluding samples/trailers/promos and tiny junk files
-        const PACK_MIN_FILE_SIZE = 10 * 1024 * 1024; // 10 MB — skip promo/ad files
-        const dominated = /\b(sample|trailer|extra|bonus|featurette|interview)\b/i;
         const videoFiles = engine.files.filter(f =>
-          isFileNameSafe(f.name) && !dominated.test(f.name) && f.length >= PACK_MIN_FILE_SIZE
+          isFileNameSafe(f.name) && !JUNK_FILE_REGEX.test(f.name) && f.length >= PACK_MIN_FILE_BYTES
         );
 
         if (videoFiles.length === 0) {
@@ -2024,6 +2023,12 @@ class LibraryManager {
       if (allComplete) {
         clearInterval(progressTimer);
         this._stopPackEngine(packId);
+        // Clear the stall-recycle counter on natural completion. Otherwise
+        // it persists across the lifetime of the LibraryManager and a pack
+        // that takes 4 separate retries to finish across days/weeks (each
+        // a legitimate single stall recycle) would hit the per-pack cap on
+        // the next download attempt and give up prematurely.
+        this._packStallRecycles.delete(packId);
         this._saveMetadata();
         this._processQueue();
         return;
@@ -2314,8 +2319,6 @@ class LibraryManager {
    */
   repairPackMetadata() {
     const fixes = { retagged: 0, discovered: 0, errors: [] };
-    const PACK_MIN_FILE_SIZE = 10 * 1024 * 1024;
-    const dominated = /\b(sample|trailer|extra|bonus|featurette|interview)\b/i;
 
     // ── Phase 1: Fix season numbers on existing pack items ──
     const packItems = [...this._items.values()].filter(i => i.packId);
@@ -2376,7 +2379,7 @@ class LibraryManager {
       for (const fullPath of diskFiles) {
         const fileName = path.basename(fullPath);
         if (trackedFileNames.has(fileName)) continue;
-        if (dominated.test(fileName)) continue;
+        if (JUNK_FILE_REGEX.test(fileName)) continue;
 
         let fileSize;
         try {
@@ -2384,7 +2387,7 @@ class LibraryManager {
           fileSize = stat.size;
         } catch { continue; }
 
-        if (fileSize < PACK_MIN_FILE_SIZE) continue;
+        if (fileSize < PACK_MIN_FILE_BYTES) continue;
 
         const parsed = this._parseSeasonEpisode(fileName, first.season || 1);
         const seasonNum = parsed.season || first.season || 1;
@@ -3287,6 +3290,9 @@ class LibraryManager {
     if (this._engines.has(packId)) {
       this._stopPackEngine(packId);
     }
+    // Drop the stall-recycle counter — the pack is gone, future re-adds
+    // shouldn't inherit strikes against this packId.
+    this._packStallRecycles.delete(packId);
 
     for (const item of packItems) {
       this.removeItem(item.id);
@@ -4444,8 +4450,7 @@ class LibraryManager {
     if (videoFiles.length === 1) return videoFiles[0];
 
     // Filter out samples/trailers, pick largest remaining
-    const dominated = /\b(sample|trailer|extra|bonus|featurette|interview)\b/i;
-    const mainFiles = videoFiles.filter(f => !dominated.test(f.name));
+    const mainFiles = videoFiles.filter(f => !JUNK_FILE_REGEX.test(f.name));
     const candidates = mainFiles.length > 0 ? mainFiles : videoFiles;
 
     // Pick the largest file (likely the main video)
@@ -5418,10 +5423,10 @@ class LibraryManager {
       }
     }
 
-    // Files smaller than this are almost always samples/trailers/featurettes
-    // shipped alongside the real content. Skipping them stops the review
-    // queue from being drowned in noise on the first scan of a big library.
-    const MIN_VIDEO_SIZE = 50 * 1024 * 1024;
+    // Files smaller than MIN_PLAYABLE_VIDEO_BYTES (lib/file-safety) are
+    // almost always samples/trailers/featurettes shipped alongside the
+    // real content. Skipping them stops the review queue from being
+    // drowned in noise on the first scan of a big library.
     const MAX_DEPTH = 6;
     const MAX_DISCOVERED = 5000;
 
@@ -5535,7 +5540,7 @@ class LibraryManager {
         let stat;
         try { stat = fs.statSync(absPath); }
         catch { continue; }
-        if (stat.size < MIN_VIDEO_SIZE) continue;
+        if (stat.size < MIN_PLAYABLE_VIDEO_BYTES) continue;
 
         const built = buildItem(relPath, stat);
         if (built) discovered.push(built);
@@ -5572,7 +5577,7 @@ class LibraryManager {
       }
     }
 
-    const MIN_VIDEO_SIZE = 50 * 1024 * 1024;
+    // MIN_PLAYABLE_VIDEO_BYTES filters samples/trailers — see file-safety.js
     const MAX_DEPTH = 6;
     const MAX_DISCOVERED = 5000;
 
@@ -5670,7 +5675,7 @@ class LibraryManager {
         let stat;
         try { stat = await fs.promises.stat(absPath); }
         catch { continue; }
-        if (stat.size < MIN_VIDEO_SIZE) continue;
+        if (stat.size < MIN_PLAYABLE_VIDEO_BYTES) continue;
 
         const built = buildItem(relPath, stat);
         if (built) discovered.push(built);

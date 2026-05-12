@@ -121,12 +121,28 @@ function sanitizeFilename(filename) {
   return path.basename(filename).replace(/[^\w .\-()[\]]/g, '_').replace(/["\\]/g, '_').substring(0, 200);
 }
 
+// Size thresholds for distinguishing real media from samples/extras when
+// picking files out of a multi-file torrent. Previously inlined at three
+// sites in library-manager.js (addSeasonPack, addManual, repairPack) and
+// two in the disk-discovery walk — now shared so a future tweak hits
+// every call site at once.
+const PACK_MIN_FILE_BYTES = 10 * 1024 * 1024;        // 10 MB
+const MIN_PLAYABLE_VIDEO_BYTES = 50 * 1024 * 1024;   // 50 MB
+
+// Junk-file pattern for samples, trailers, featurettes, etc. Used when
+// scanning a pack to skip non-main files. Previously copied verbatim in
+// four places (addSeasonPack, addManual, repairPack, _selectVideoFile).
+const JUNK_FILE_REGEX = /\b(sample|trailer|extra|bonus|featurette|interview)\b/i;
+
 module.exports = {
   VIDEO_EXTENSIONS,
   AUDIO_EXTENSIONS,
   DANGEROUS_EXTENSIONS,
   TRACKERS,
   MIME_TYPES,
+  PACK_MIN_FILE_BYTES,
+  MIN_PLAYABLE_VIDEO_BYTES,
+  JUNK_FILE_REGEX,
   isFileNameSafe,
   getMimeType,
   sanitizeFilename,

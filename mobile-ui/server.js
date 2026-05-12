@@ -5618,9 +5618,17 @@ async function shutdown() {
   // (which itself is async via libuv threadpool, see _writeMetadataNow).
   // Without the await here, process.exit would race the disk write and
   // we'd lose the last burst of state changes.
-  try { await library.destroy(); } catch (err) {
-    console.error(`[Server] Library shutdown error: ${err.message}`);
-  }
+  //
+  // musicLibrary is its own LibraryManager instance with its own debounced
+  // metadata write, peer-reputation save, and periodic-save timer. The
+  // previous shutdown skipped it entirely, so the last few seconds of
+  // play-count / favorite / manual-genre mutations were silently lost
+  // when SIGTERM hit before the next debounce window. Tear both down in
+  // parallel — they don't share state.
+  await Promise.allSettled([
+    library.destroy().catch(err => { console.error(`[Server] Library shutdown error: ${err.message}`); }),
+    musicLibrary.destroy().catch(err => { console.error(`[Server] MusicLibrary shutdown error: ${err.message}`); }),
+  ]);
   try { if (engine) engine.destroy(); } catch (err) {
     console.error(`[Server] Engine shutdown error: ${err.message}`);
   }

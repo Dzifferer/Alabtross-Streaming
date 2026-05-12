@@ -594,4 +594,4 @@ function isBogusAddr(addr) {
   return false;
 }
 
-module.exports = { PeerManager };
+module.exports = { PeerManager, ipOf, isBogusAddr };

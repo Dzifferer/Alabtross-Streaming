@@ -513,4 +513,9 @@ module.exports = {
   isCastv2Available,
   seekDLNA,
   getLocalIP,
+  // Pure helpers — exported so tests can verify the XML escaping used in
+  // DIDL/SOAP envelopes and the tag extraction parser without standing
+  // up a network stack.
+  escapeXml,
+  extractXmlValue,
 };

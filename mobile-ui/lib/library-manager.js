@@ -205,6 +205,13 @@ class LibraryManager {
     this._metadataSaveCount = 0;
     this._maxConcurrentDownloads = opts.maxConcurrentDownloads || DEFAULT_MAX_CONCURRENT_DOWNLOADS;
     this._items = new Map();       // id -> library item
+    // Secondary indexes — kept in sync via _indexItem / _unindexItem /
+    // _reindexStatus / _setItemStatus on every mutation that touches the
+    // item.status or item.packId fields, plus _items.set/_items.delete.
+    // The full-scan filter pattern was hot enough on pack progress ticks
+    // (~22 packId sites + ~10 status sites) to justify these.
+    this._byPackId = new Map();    // packId -> Set<id>
+    this._byStatus = new Map();    // status -> Set<id>
     this._engines = new Map();     // id -> torrent engine (active downloads only)
     // PeerManager instances keyed by engine reference. WeakMap so entries are
     // garbage-collected when the engine is released, and every engine.destroy
@@ -554,7 +561,7 @@ class LibraryManager {
         if (!results[j]) continue;
         const item = batch[j];
         const wasFailed = item.status === 'failed';
-        item.status = 'complete';
+        this._setItemStatus(item, 'complete');
         item.error = null;
         item.progress = 100;
         item.downloadSpeed = 0;
@@ -856,8 +863,7 @@ class LibraryManager {
         // Leftover ffmpeg conversion temp files (*.converting.mp4)
         if (entry.name.endsWith('.converting.mp4')) {
           // Skip if there's an active conversion that owns it
-          const activeConvert = [...this._items.values()].some(i => {
-            if (i.status !== 'converting') return false;
+          const activeConvert = this._getItemsByStatus('converting').some(i => {
             const src = i.originalFilePath || i.filePath;
             if (!src) return false;
             const tmp = this._getConvertTempPath(path.join(this._libraryPath, src));
@@ -954,7 +960,7 @@ class LibraryManager {
       if (issue.kind === 'stale_downloading') {
         if (action === 'redownload') {
           if (!dryRun) {
-            item.status = 'failed';
+            this._setItemStatus(item, 'failed');
             item.error = 'Audit: stuck downloading with no active engine';
             this.retryItem(item.id);
           }
@@ -984,7 +990,7 @@ class LibraryManager {
           continue;
         }
         if (!dryRun) {
-          item.status = 'failed';
+          this._setItemStatus(item, 'failed');
           item.progress = 0;
           item.error = `Audit: ${issue.reason}`;
           item.completedAt = null;
@@ -1046,6 +1052,186 @@ class LibraryManager {
     };
   }
 
+  // ─── Secondary-index bookkeeping ──────────────────
+  //
+  // _byPackId and _byStatus mirror the contents of _items so the hot
+  // filter pattern "[...this._items.values()].filter(i => i.packId === X)"
+  // becomes an O(packSize) Set lookup instead of an O(libSize) scan.
+  //
+  // Invariants:
+  //   - every id present in _items appears in _byStatus[item.status]
+  //   - every id with a truthy packId appears in _byPackId[item.packId]
+  //   - empty Set values are removed (no dangling buckets)
+  //
+  // Mutators that change item.status MUST go through _setItemStatus.
+  // Direct `item.status = X` would silently break the invariant. Same
+  // discipline holds for item.packId (currently only set in object
+  // literals at item creation — no live re-assignment sites).
+  //
+  // When process.env.DEBUG_LIBRARY_INDEX is set, every mutation runs a
+  // fresh rebuild + deepStrictEqual to catch missed sites. Zero cost
+  // when unset. To be removed once the indexes have been battle-tested
+  // for a release cycle.
+
+  // _indexItem MUST be called immediately after this._items.set(id, item)
+  // so the live indexes match a fresh rebuild from _items. The debug
+  // assertion enforces this invariant.
+  _indexItem(item) {
+    if (!item || !item.id) return;
+    if (item.packId) {
+      let bucket = this._byPackId.get(item.packId);
+      if (!bucket) {
+        bucket = new Set();
+        this._byPackId.set(item.packId, bucket);
+      }
+      bucket.add(item.id);
+    }
+    // status may be undefined for the rare disk-promotion path before the
+    // first transition — bucket under '' so the rebuild assertion still
+    // matches.
+    const status = item.status || '';
+    let sb = this._byStatus.get(status);
+    if (!sb) {
+      sb = new Set();
+      this._byStatus.set(status, sb);
+    }
+    sb.add(item.id);
+    this._debugAssertIndex();
+  }
+
+  // _unindexItem MUST be called immediately after this._items.delete(id)
+  // so the live indexes match a fresh rebuild from _items. The item is
+  // passed by value (the caller usually has it from _items.get(id) before
+  // the delete) so the helper can read item.packId / item.status to
+  // identify the buckets.
+  _unindexItem(item) {
+    if (!item || !item.id) return;
+    if (item.packId) {
+      const bucket = this._byPackId.get(item.packId);
+      if (bucket) {
+        bucket.delete(item.id);
+        if (bucket.size === 0) this._byPackId.delete(item.packId);
+      }
+    }
+    const status = item.status || '';
+    const sb = this._byStatus.get(status);
+    if (sb) {
+      sb.delete(item.id);
+      if (sb.size === 0) this._byStatus.delete(status);
+    }
+    this._debugAssertIndex();
+  }
+
+  _reindexStatus(item, newStatus) {
+    if (!item || !item.id) return;
+    const oldStatus = item.status || '';
+    if (oldStatus === newStatus) return;
+    const ob = this._byStatus.get(oldStatus);
+    if (ob) {
+      ob.delete(item.id);
+      if (ob.size === 0) this._byStatus.delete(oldStatus);
+    }
+    item.status = newStatus;
+    let nb = this._byStatus.get(newStatus);
+    if (!nb) {
+      nb = new Set();
+      this._byStatus.set(newStatus, nb);
+    }
+    nb.add(item.id);
+    this._debugAssertIndex();
+  }
+
+  _reindexPackId(item, newPackId) {
+    if (!item || !item.id) return;
+    const oldPackId = item.packId || null;
+    if (oldPackId === newPackId) return;
+    if (oldPackId) {
+      const ob = this._byPackId.get(oldPackId);
+      if (ob) {
+        ob.delete(item.id);
+        if (ob.size === 0) this._byPackId.delete(oldPackId);
+      }
+    }
+    item.packId = newPackId;
+    if (newPackId) {
+      let nb = this._byPackId.get(newPackId);
+      if (!nb) {
+        nb = new Set();
+        this._byPackId.set(newPackId, nb);
+      }
+      nb.add(item.id);
+    }
+    this._debugAssertIndex();
+  }
+
+  // Thin wrapper around `item.status = X` so every mutation site funnels
+  // through the index-maintaining path. Use this EVERYWHERE — never
+  // assign directly.
+  _setItemStatus(item, newStatus) {
+    this._reindexStatus(item, newStatus);
+  }
+
+  // Set / change item.packId through the index. Today only used by the
+  // _reKey path (which leaves packId stable) and the (currently absent)
+  // future packId-reassign flow; included for symmetry.
+  _setItemPackId(item, newPackId) {
+    this._reindexPackId(item, newPackId);
+  }
+
+  // Query helpers. The Set holds ids, so we lookup into _items and drop
+  // any nulls in case the id was concurrently removed (paranoid, since
+  // _unindexItem precedes _items.delete in every site).
+  _getPackItems(packId) {
+    const bucket = this._byPackId.get(packId);
+    if (!bucket || bucket.size === 0) return [];
+    const out = [];
+    for (const id of bucket) {
+      const it = this._items.get(id);
+      if (it) out.push(it);
+    }
+    return out;
+  }
+
+  _getItemsByStatus(status) {
+    const bucket = this._byStatus.get(status);
+    if (!bucket || bucket.size === 0) return [];
+    const out = [];
+    for (const id of bucket) {
+      const it = this._items.get(id);
+      if (it) out.push(it);
+    }
+    return out;
+  }
+
+  // Debug assertion: rebuilds both indexes from _items and asserts they
+  // deepStrictEqual the live indexes. No-op when DEBUG_LIBRARY_INDEX is
+  // unset. Will be removed once the indexes have shipped for a release.
+  _debugAssertIndex() {
+    if (!process.env.DEBUG_LIBRARY_INDEX) return;
+    const freshPack = new Map();
+    const freshStatus = new Map();
+    for (const item of this._items.values()) {
+      if (item.packId) {
+        let b = freshPack.get(item.packId);
+        if (!b) { b = new Set(); freshPack.set(item.packId, b); }
+        b.add(item.id);
+      }
+      const s = item.status || '';
+      let sb = freshStatus.get(s);
+      if (!sb) { sb = new Set(); freshStatus.set(s, sb); }
+      sb.add(item.id);
+    }
+    // Normalize to sorted arrays for stable comparison
+    const norm = (m) => {
+      const obj = {};
+      for (const [k, v] of m) obj[k] = [...v].sort();
+      return obj;
+    };
+    const assert = require('assert');
+    assert.deepStrictEqual(norm(this._byPackId), norm(freshPack), '[Library] _byPackId out of sync');
+    assert.deepStrictEqual(norm(this._byStatus), norm(freshStatus), '[Library] _byStatus out of sync');
+  }
+
   // ─── Public API ──────────────────────────────────
 
   /**
@@ -1082,13 +1268,14 @@ class LibraryManager {
       // If failed or cancelled, allow re-download
       if (existing.status !== 'downloading') {
         this._items.delete(id);
+        this._unindexItem(existing);
       } else {
         return { id, status: 'already_downloading' };
       }
     }
 
     // Check concurrent download limit — queue if at capacity
-    const activeDownloads = [...this._items.values()].filter(i => i.status === 'downloading').length;
+    const activeDownloads = this._getItemsByStatus('downloading').length;
     const shouldQueue = activeDownloads >= this._maxConcurrentDownloads;
 
     const item = {
@@ -1131,6 +1318,7 @@ class LibraryManager {
     };
 
     this._items.set(id, item);
+    this._indexItem(item);
     this._saveMetadata();
 
     if (shouldQueue) {
@@ -1261,6 +1449,7 @@ class LibraryManager {
               continue;
             }
             this._items.delete(itemId);
+            this._unindexItem(existing);
           }
 
           const relativePath = path.relative(this._libraryPath, path.join(packDir, file.path));
@@ -1301,6 +1490,7 @@ class LibraryManager {
           };
 
           this._items.set(itemId, item);
+          this._indexItem(item);
           createdItems.push({ id: itemId, status: 'started', episode: episodeNum });
         }
 
@@ -1467,6 +1657,7 @@ class LibraryManager {
               continue;
             }
             this._items.delete(itemId);
+            this._unindexItem(existing);
           }
 
           const relativePath = path.relative(this._libraryPath, path.join(scanDir, file.path));
@@ -1500,6 +1691,7 @@ class LibraryManager {
           };
 
           this._items.set(itemId, item);
+          this._indexItem(item);
           createdItems.push({ id: itemId, status: 'started' });
         }
 
@@ -1922,7 +2114,7 @@ class LibraryManager {
       const file = engine.files.find(f => path.basename(f.name) === next.fileName);
       if (!file) {
         console.error(`[Library] Pack sequential: file "${next.fileName}" not found in torrent — marking failed`);
-        next.status = 'failed';
+        this._setItemStatus(next, 'failed');
         next.error = 'File not found in torrent';
         continue;
       }
@@ -1987,7 +2179,7 @@ class LibraryManager {
         item.progress = progressPct;
 
         if (isComplete) {
-          item.status = 'complete';
+          this._setItemStatus(item, 'complete');
           item.completedAt = Date.now();
           item.downloadSpeed = 0;
           delete item._nearCompleteSince;
@@ -2063,7 +2255,7 @@ class LibraryManager {
         if (!item._nearCompleteSince) continue;
         if (Date.now() - item._nearCompleteSince < NEAR_COMPLETE_STUCK_MS) continue;
         console.warn(`[Library] Pack ${packId}: item "${item.fileName}" stuck near-complete for >5min — marking failed so user can retry`);
-        item.status = 'failed';
+        this._setItemStatus(item, 'failed');
         item.error = 'Missing piece unavailable from peers after 5 min — retry to pick new peers';
         delete item._nearCompleteSince;
         markedNearCompleteFailed = true;
@@ -2071,8 +2263,8 @@ class LibraryManager {
       if (markedNearCompleteFailed) {
         // If that leaves the pack with no more 'downloading' items, tear
         // down the engine; otherwise persist and continue the poll loop.
-        const stillDownloading = [...this._items.values()].some(
-          (i) => i.packId === packId && i.status === 'downloading'
+        const stillDownloading = this._getPackItems(packId).some(
+          (i) => i.status === 'downloading'
         );
         if (!stillDownloading) {
           clearInterval(progressTimer);
@@ -2098,8 +2290,8 @@ class LibraryManager {
       // "100%" and is waiting on what looks like a finished download. Use
       // a 2-min threshold in that case so we recycle aggressively to find
       // peers that have the missing pieces.
-      const remaining = [...this._items.values()].filter(
-        (i) => i.packId === packId && i.status === 'downloading'
+      const remaining = this._getPackItems(packId).filter(
+        (i) => i.status === 'downloading'
       );
       const allRemainingNearComplete = remaining.length > 0
         && remaining.every((i) => (i.progress || 0) >= 99);
@@ -2112,7 +2304,7 @@ class LibraryManager {
           console.warn(`[Library] Pack ${packId}: giving up after ${MAX_PACK_RECYCLES} stall recycles — marking episodes failed`);
           for (const [, item] of this._items) {
             if (item.packId === packId && item.status === 'downloading') {
-              item.status = 'failed';
+              this._setItemStatus(item, 'failed');
               item.error = `Pack stalled after ${MAX_PACK_RECYCLES} engine recycles`;
             }
           }
@@ -2123,8 +2315,8 @@ class LibraryManager {
           return;
         }
         this._packStallRecycles.set(packId, recycles + 1);
-        const packItems = [...this._items.values()].filter(
-          (i) => i.packId === packId && i.status === 'downloading'
+        const packItems = this._getPackItems(packId).filter(
+          (i) => i.status === 'downloading'
         );
         console.log(`[Library] Recycling pack ${packId} engine (stall recycle #${recycles + 1}, ${packItems.length} episode(s))`);
         clearInterval(progressTimer);
@@ -2132,8 +2324,8 @@ class LibraryManager {
         // Brief delay so the old engine's TCP state clears before we
         // dial the same peers from a fresh engine.
         setTimeout(() => {
-          const stillDownloading = [...this._items.values()].filter(
-            (i) => i.packId === packId && i.status === 'downloading'
+          const stillDownloading = this._getPackItems(packId).filter(
+            (i) => i.status === 'downloading'
           );
           if (stillDownloading.length > 0) this._resumePackDownload(packId, stillDownloading);
         }, 1000);
@@ -2208,7 +2400,7 @@ class LibraryManager {
         // Fail ALL downloading items for this pack, not just the ones passed in
         for (const [, item] of this._items) {
           if (item.packId === packId && item.status === 'downloading') {
-            item.status = 'failed';
+            this._setItemStatus(item, 'failed');
             item.error = `Torrent metadata timeout on resume (${totalS}s) — ${diag} — ${reason}`;
           }
         }
@@ -2224,7 +2416,7 @@ class LibraryManager {
       tm.clear();
       for (const [, item] of this._items) {
         if (item.packId === packId && item.status === 'downloading') {
-          item.status = 'failed';
+          this._setItemStatus(item, 'failed');
           item.error = err.message;
         }
       }
@@ -2248,7 +2440,7 @@ class LibraryManager {
         const file = engine.files.find(f => path.basename(f.name) === item.fileName);
         if (!file) {
           console.error(`[Library] Pack resume: could not find file "${item.fileName}" in torrent`);
-          item.status = 'failed';
+          this._setItemStatus(item, 'failed');
           item.error = 'File not found in torrent on resume';
         }
       }
@@ -2354,9 +2546,15 @@ class LibraryManager {
           fixes.errors.push(`Skipped "${item.fileName}": target ID ${newId} already exists`);
           continue;
         }
+        // Re-key: drop the old id from the indexes, mutate the item.id,
+        // then re-add under the new id so the index Sets reflect the new
+        // key. _items.delete/set wrap the _unindexItem/_indexItem calls
+        // so the debug-assert rebuild from _items sees a consistent state.
         this._items.delete(item.id);
+        this._unindexItem(item);
         item.id = newId;
         this._items.set(newId, item);
+        this._indexItem(item);
       }
 
       item.season = newSeason;
@@ -2443,6 +2641,7 @@ class LibraryManager {
         };
 
         this._items.set(itemId, newItem);
+        this._indexItem(newItem);
         trackedFileNames.add(fileName);
         fixes.discovered++;
 
@@ -2487,7 +2686,7 @@ class LibraryManager {
    * Already-downloaded files on disk are kept and verified by torrent-stream.
    */
   async restartPack(packId) {
-    const packItems = [...this._items.values()].filter(i => i.packId === packId);
+    const packItems = this._getPackItems(packId);
     if (packItems.length === 0) return { error: 'Pack not found' };
 
     const first = packItems[0];
@@ -2517,6 +2716,7 @@ class LibraryManager {
       if (item.status === 'complete' || item.status === 'converting') continue;
       this._stopDownload(item.id);
       this._items.delete(item.id);
+      this._unindexItem(item);
     }
     this._saveMetadata();
 
@@ -2548,15 +2748,15 @@ class LibraryManager {
     if (item.status !== 'downloading' && item.status !== 'queued') return false;
 
     const wasDownloading = item.status === 'downloading';
-    item.status = 'paused';
+    this._setItemStatus(item, 'paused');
     item.downloadSpeed = 0;
     item.numPeers = 0;
 
     if (wasDownloading) {
       if (item.packId) {
         // For pack items, only stop the shared engine if no other items are still downloading
-        const remainingActive = [...this._items.values()].filter(
-          i => i.packId === item.packId && i.id !== id && i.status === 'downloading'
+        const remainingActive = this._getPackItems(item.packId).filter(
+          i => i.id !== id && i.status === 'downloading'
         );
         if (remainingActive.length === 0) {
           this._stopPackEngine(item.packId);
@@ -2590,7 +2790,7 @@ class LibraryManager {
 
     // For pack items, don't count sibling pack items individually — they share one engine.
     // Count each active pack as 1 slot, plus individual (non-pack) downloads.
-    const activeItems = [...this._items.values()].filter(i => i.status === 'downloading');
+    const activeItems = this._getItemsByStatus('downloading');
     const activePacks = new Set(activeItems.filter(i => i.packId).map(i => i.packId));
     const activeSingles = activeItems.filter(i => !i.packId).length;
     const effectiveActive = activePacks.size + activeSingles;
@@ -2598,21 +2798,21 @@ class LibraryManager {
     // If this item's pack already has an active engine, it doesn't consume an extra slot
     const packAlreadyActive = item.packId && activePacks.has(item.packId);
     if (!packAlreadyActive && effectiveActive >= this._maxConcurrentDownloads) {
-      item.status = 'queued';
+      this._setItemStatus(item, 'queued');
       this._saveMetadata();
       console.log(`[Library] Resume queued (at capacity): "${item.name}"`);
       return true;
     }
 
-    item.status = 'downloading';
+    this._setItemStatus(item, 'downloading');
     item.error = null;
 
     if (item.packId) {
       const engine = this._engines.get(item.packId);
       if (!engine) {
         // No pack engine running — restart it with all downloading items in this pack
-        const packItems = [...this._items.values()].filter(
-          i => i.packId === item.packId && i.status === 'downloading'
+        const packItems = this._getPackItems(item.packId).filter(
+          i => i.status === 'downloading'
         );
         this._resumePackDownload(item.packId, packItems);
       } else if (engine.files) {
@@ -2641,7 +2841,7 @@ class LibraryManager {
     if (!item) return false;
     if (item.status !== 'queued') return false;
 
-    const activeItems = [...this._items.values()].filter(i => i.status === 'downloading');
+    const activeItems = this._getItemsByStatus('downloading');
     const activePacks = new Set(activeItems.filter(i => i.packId).map(i => i.packId));
     const activeSingles = activeItems.filter(i => !i.packId).length;
     const effectiveActive = activePacks.size + activeSingles;
@@ -2651,22 +2851,22 @@ class LibraryManager {
       return false; // No slots available
     }
 
-    item.status = 'downloading';
+    this._setItemStatus(item, 'downloading');
     item.progress = item.progress || 0;
     item.error = null;
 
     if (item.packId) {
       // Also start all other queued items in the same pack
-      const packItems = [...this._items.values()].filter(
-        i => i.packId === item.packId && i.status === 'queued'
+      const packItems = this._getPackItems(item.packId).filter(
+        i => i.status === 'queued'
       );
       for (const pi of packItems) {
-        pi.status = 'downloading';
+        this._setItemStatus(pi, 'downloading');
         pi.progress = pi.progress || 0;
       }
       if (!this._engines.has(item.packId)) {
-        const allDownloading = [...this._items.values()].filter(
-          i => i.packId === item.packId && i.status === 'downloading'
+        const allDownloading = this._getPackItems(item.packId).filter(
+          i => i.status === 'downloading'
         );
         this._resumePackDownload(item.packId, allDownloading);
       }
@@ -2791,7 +2991,7 @@ class LibraryManager {
     }
 
     const prevStatus = item.status;
-    item.status = 'failed';
+    this._setItemStatus(item, 'failed');
     item.error = 'User-requested repair';
     item.progress = 0;
     item.completedAt = null;
@@ -2958,21 +3158,21 @@ class LibraryManager {
     if (item.status !== 'failed') return false;
 
     // Same pack-aware concurrent limit as resumeItem
-    const activeItems = [...this._items.values()].filter(i => i.status === 'downloading');
+    const activeItems = this._getItemsByStatus('downloading');
     const activePacks = new Set(activeItems.filter(i => i.packId).map(i => i.packId));
     const activeSingles = activeItems.filter(i => !i.packId).length;
     const effectiveActive = activePacks.size + activeSingles;
     const packAlreadyActive = item.packId && activePacks.has(item.packId);
 
     if (!packAlreadyActive && effectiveActive >= this._maxConcurrentDownloads) {
-      item.status = 'queued';
+      this._setItemStatus(item, 'queued');
       item.error = null;
       this._saveMetadata();
       console.log(`[Library] Retry queued (at capacity): "${item.name}"`);
       return true;
     }
 
-    item.status = 'downloading';
+    this._setItemStatus(item, 'downloading');
     item.error = null;
     // Don't reset progress — torrent engine uses verify:true to skip existing data,
     // and progress will be recalculated from disk size on the next poll cycle.
@@ -2983,8 +3183,8 @@ class LibraryManager {
       const engine = this._engines.get(item.packId);
       if (!engine) {
         // No engine yet — start one for all downloading items in this pack
-        const packItems = [...this._items.values()].filter(
-          i => i.packId === item.packId && i.status === 'downloading'
+        const packItems = this._getPackItems(item.packId).filter(
+          i => i.status === 'downloading'
         );
         this._resumePackDownload(item.packId, packItems);
       } else if (engine.files) {
@@ -3015,8 +3215,7 @@ class LibraryManager {
     if (item.packId) return false;
 
     // Build logical queue entries
-    const queued = [...this._items.values()]
-      .filter(i => i.status === 'queued')
+    const queued = this._getItemsByStatus('queued')
       .sort((a, b) => a.addedAt - b.addedAt);
 
     const entries = [];
@@ -3059,14 +3258,13 @@ class LibraryManager {
    * (each pack = 1 entry, each single item = 1 entry).
    */
   reorderPackQueue(packId, newPosition) {
-    const packItems = [...this._items.values()].filter(
-      i => i.packId === packId && i.status === 'queued'
+    const packItems = this._getPackItems(packId).filter(
+      i => i.status === 'queued'
     );
     if (packItems.length === 0) return false;
 
     // Build logical queue entries: each pack = 1 entry, each single = 1 entry
-    const queued = [...this._items.values()]
-      .filter(i => i.status === 'queued')
+    const queued = this._getItemsByStatus('queued')
       .sort((a, b) => a.addedAt - b.addedAt);
 
     const entries = [];       // { type, id/packId, items[] }
@@ -3130,13 +3328,13 @@ class LibraryManager {
    * requests per-item, each triggering engine reselection or partial state.
    */
   pausePack(packId) {
-    const packItems = [...this._items.values()].filter(i => i.packId === packId);
+    const packItems = this._getPackItems(packId);
     if (packItems.length === 0) return false;
 
     let changed = 0;
     for (const item of packItems) {
       if (item.status !== 'downloading' && item.status !== 'queued') continue;
-      item.status = 'paused';
+      this._setItemStatus(item, 'paused');
       item.downloadSpeed = 0;
       item.numPeers = 0;
       changed++;
@@ -3161,7 +3359,7 @@ class LibraryManager {
    * limit is reached, the items are re-queued instead.
    */
   resumePack(packId) {
-    const packItems = [...this._items.values()].filter(i => i.packId === packId);
+    const packItems = this._getPackItems(packId);
     if (packItems.length === 0) return false;
 
     const pausedItems = packItems.filter(i => i.status === 'paused');
@@ -3169,15 +3367,15 @@ class LibraryManager {
 
     // Pack-aware slot check: a single pack engine counts as 1 slot.
     const activePacks = new Set(
-      [...this._items.values()]
-        .filter(i => i.status === 'downloading' && i.packId)
+      this._getItemsByStatus('downloading')
+        .filter(i => i.packId)
         .map(i => i.packId),
     );
     const packAlreadyActive = activePacks.has(packId);
     if (!packAlreadyActive && this._countActiveSlots() >= this._maxConcurrentDownloads) {
       // No free slots — re-queue the items so they start later.
       for (const item of pausedItems) {
-        item.status = 'queued';
+        this._setItemStatus(item, 'queued');
       }
       this._saveMetadata();
       console.log(`[Library] Resume-pack queued (at capacity): ${packId}`);
@@ -3185,14 +3383,14 @@ class LibraryManager {
     }
 
     for (const item of pausedItems) {
-      item.status = 'downloading';
+      this._setItemStatus(item, 'downloading');
       item.error = null;
     }
 
     const engine = this._engines.get(packId);
     if (!engine) {
-      const allDownloading = [...this._items.values()].filter(
-        i => i.packId === packId && i.status === 'downloading',
+      const allDownloading = this._getPackItems(packId).filter(
+        i => i.status === 'downloading',
       );
       this._resumePackDownload(packId, allDownloading);
     } else if (engine.files) {
@@ -3209,15 +3407,15 @@ class LibraryManager {
    * queued packs in the downloads UI.
    */
   startPack(packId) {
-    const packItems = [...this._items.values()].filter(i => i.packId === packId);
+    const packItems = this._getPackItems(packId);
     if (packItems.length === 0) return false;
 
     const queuedItems = packItems.filter(i => i.status === 'queued');
     if (queuedItems.length === 0) return false;
 
     const activePacks = new Set(
-      [...this._items.values()]
-        .filter(i => i.status === 'downloading' && i.packId)
+      this._getItemsByStatus('downloading')
+        .filter(i => i.packId)
         .map(i => i.packId),
     );
     const packAlreadyActive = activePacks.has(packId);
@@ -3226,14 +3424,14 @@ class LibraryManager {
     }
 
     for (const item of queuedItems) {
-      item.status = 'downloading';
+      this._setItemStatus(item, 'downloading');
       item.progress = item.progress || 0;
       item.error = null;
     }
 
     if (!this._engines.has(packId)) {
-      const allDownloading = [...this._items.values()].filter(
-        i => i.packId === packId && i.status === 'downloading',
+      const allDownloading = this._getPackItems(packId).filter(
+        i => i.status === 'downloading',
       );
       this._resumePackDownload(packId, allDownloading);
     }
@@ -3247,22 +3445,22 @@ class LibraryManager {
    * Atomically retry every failed item in a pack.
    */
   retryPack(packId) {
-    const packItems = [...this._items.values()].filter(i => i.packId === packId);
+    const packItems = this._getPackItems(packId);
     if (packItems.length === 0) return false;
 
     const failedItems = packItems.filter(i => i.status === 'failed');
     if (failedItems.length === 0) return false;
 
     const activePacks = new Set(
-      [...this._items.values()]
-        .filter(i => i.status === 'downloading' && i.packId)
+      this._getItemsByStatus('downloading')
+        .filter(i => i.packId)
         .map(i => i.packId),
     );
     const packAlreadyActive = activePacks.has(packId);
     const atCapacity = !packAlreadyActive && this._countActiveSlots() >= this._maxConcurrentDownloads;
 
     for (const item of failedItems) {
-      item.status = atCapacity ? 'queued' : 'downloading';
+      this._setItemStatus(item, atCapacity ? 'queued' : 'downloading');
       item.error = null;
       item.downloadSpeed = 0;
       item.numPeers = 0;
@@ -3270,8 +3468,8 @@ class LibraryManager {
 
     if (!atCapacity) {
       if (!this._engines.has(packId)) {
-        const allDownloading = [...this._items.values()].filter(
-          i => i.packId === packId && i.status === 'downloading',
+        const allDownloading = this._getPackItems(packId).filter(
+          i => i.status === 'downloading',
         );
         this._resumePackDownload(packId, allDownloading);
       } else {
@@ -3294,7 +3492,7 @@ class LibraryManager {
    * per-item filesystem cleanup).
    */
   removePack(packId) {
-    const packItems = [...this._items.values()].filter(i => i.packId === packId);
+    const packItems = this._getPackItems(packId);
     if (packItems.length === 0) return false;
 
     // Stop the shared engine first so it releases file handles and the
@@ -3432,6 +3630,7 @@ class LibraryManager {
       parsed,
     };
     this._items.set(id, item);
+    this._indexItem(item);
     // Force a fresh discovery scan so the now-tracked item drops off the
     // virtual list.
     this._discoveryCache = null;
@@ -3548,6 +3747,7 @@ class LibraryManager {
     }
 
     this._items.delete(id);
+    this._unindexItem(item);
     this._discoveryCache = null; // invalidate discovery cache after deletion
     // Drop any per-item watchdog state so a re-add doesn't inherit
     // strike counts against the now-gone id.
@@ -3558,8 +3758,8 @@ class LibraryManager {
     //   - Otherwise, re-pick the next file so the engine doesn't keep
     //     downloading bytes for the item we just removed.
     if (packIdForRemoval) {
-      const remainingActive = [...this._items.values()].filter(
-        i => i.packId === packIdForRemoval && i.status === 'downloading',
+      const remainingActive = this._getPackItems(packIdForRemoval).filter(
+        i => i.status === 'downloading',
       );
       if (remainingActive.length === 0) {
         if (this._engines.has(packIdForRemoval)) {
@@ -3914,8 +4114,7 @@ class LibraryManager {
     const available = this._maxConcurrentDownloads - this._countActiveSlots();
     if (available <= 0) return;
 
-    const queued = [...this._items.values()]
-      .filter(i => i.status === 'queued')
+    const queued = this._getItemsByStatus('queued')
       .sort((a, b) => a.addedAt - b.addedAt);
 
     // Group queued pack items so they start together with one engine
@@ -3935,7 +4134,7 @@ class LibraryManager {
     // Start individual items
     for (const item of singles) {
       if (started >= available) break;
-      item.status = 'downloading';
+      this._setItemStatus(item, 'downloading');
       item.progress = 0;
       console.log(`[Library] Dequeuing: "${item.name}"`);
       this._startDownload(item.id);
@@ -3946,7 +4145,7 @@ class LibraryManager {
     for (const [packId, items] of packGroups) {
       if (started >= available) break;
       for (const item of items) {
-        item.status = 'downloading';
+        this._setItemStatus(item, 'downloading');
       }
       if (this._engines.has(packId)) {
         // Engine already running, items will be picked up by progress timer
@@ -3973,7 +4172,7 @@ class LibraryManager {
     // the priority back). Returning here avoids spinning up the engine.
     if (this._downloadsBlockedByConversions()) {
       console.log(`[Library] Download queued (conversions-first): "${item.name}" — ${this._countActiveConversions().local + this._countActiveConversions().remote} conversion(s) active`);
-      item.status = 'queued';
+      this._setItemStatus(item, 'queued');
       item.error = null;
       return;
     }
@@ -4004,7 +4203,7 @@ class LibraryManager {
         if (item.status === 'downloading' && !item.filePath) {
           const totalS = (totalMs / 1000) | 0;
           console.error(`[Library] Metadata timeout for "${item.name}" — ${diag} — ${reason}`);
-          item.status = 'failed';
+          this._setItemStatus(item, 'failed');
           item.error = `Torrent metadata timeout (${totalS}s) — ${diag} — ${reason}`;
           this._stopDownload(id);
           this._saveMetadata();
@@ -4026,7 +4225,7 @@ class LibraryManager {
       // Find the best video file
       const file = this._selectVideoFile(engine.files);
       if (!file) {
-        item.status = 'failed';
+        this._setItemStatus(item, 'failed');
         item.error = 'No valid video file found in torrent';
         this._stopDownload(id);
         this._saveMetadata();
@@ -4040,7 +4239,7 @@ class LibraryManager {
       const space = await this._checkFreeSpace(file.length, `download "${item.name}"`);
       if (!space.ok) {
         console.error(`[Library] ${space.reason}`);
-        item.status = 'failed';
+        this._setItemStatus(item, 'failed');
         item.error = space.reason;
         this._stopDownload(id);
         this._saveMetadata();
@@ -4088,7 +4287,7 @@ class LibraryManager {
         item.progress = progressPct;
 
         if (isComplete) {
-          item.status = 'complete';
+          this._setItemStatus(item, 'complete');
           item.completedAt = Date.now();
           item.downloadSpeed = 0;
           console.log(`[Library] Download complete: "${item.name}" (${(expectedSize / 1e9).toFixed(2)} GB)`);
@@ -4128,7 +4327,7 @@ class LibraryManager {
     engine.on('error', (err) => {
       tm.clear();
       console.error(`[Library] Download error for "${item.name}": ${err.message}`);
-      item.status = 'failed';
+      this._setItemStatus(item, 'failed');
       item.error = err.message;
       this._stopDownload(id);
       this._saveMetadata();
@@ -4146,7 +4345,7 @@ class LibraryManager {
 
     const audioFiles = engine.files.filter(f => isFileNameSafe(f.name, 'audio'));
     if (!audioFiles.length) {
-      item.status = 'failed';
+      this._setItemStatus(item, 'failed');
       item.error = 'No audio files found in torrent';
       this._stopDownload(id);
       this._saveMetadata();
@@ -4158,7 +4357,7 @@ class LibraryManager {
     const space = await this._checkFreeSpace(totalBytes, `music "${item.name}"`);
     if (!space.ok) {
       console.error(`[Library] ${space.reason}`);
-      item.status = 'failed';
+      this._setItemStatus(item, 'failed');
       item.error = space.reason;
       this._stopDownload(id);
       this._saveMetadata();
@@ -4219,7 +4418,7 @@ class LibraryManager {
           duration: null,
           fileSize: f.length,
         }));
-        item.status = 'complete';
+        this._setItemStatus(item, 'complete');
         item.completedAt = Date.now();
         item.downloadSpeed = 0;
         console.log(`[Library] Music album complete: "${item.name}" (${audioFiles.length} tracks)`);
@@ -4815,7 +5014,7 @@ class LibraryManager {
     const MAX_STALL_RECYCLES = 3;
     const n = item._stallRecycles || 0;
     if (n >= MAX_STALL_RECYCLES) {
-      item.status = 'failed';
+      this._setItemStatus(item, 'failed');
       item.error = `Download stalled after ${MAX_STALL_RECYCLES} engine recycles`;
       return false;
     }
@@ -5038,6 +5237,7 @@ class LibraryManager {
             item.convertProgress = 0;
           }
           this._items.set(item.id, item);
+          this._indexItem(item);
         }
 
         if (file === backupFile) {
@@ -5140,7 +5340,7 @@ class LibraryManager {
     for (const item of singles) {
       if (started >= this._maxConcurrentDownloads) {
         console.log(`[Library] Queued "${item.name}" — concurrent limit reached during restart`);
-        item.status = 'queued';
+        this._setItemStatus(item, 'queued');
         item.error = null;
         continue;
       }
@@ -5174,7 +5374,7 @@ class LibraryManager {
       if (started >= this._maxConcurrentDownloads) {
         for (const item of items) {
           console.log(`[Library] Queued "${item.name}" — concurrent limit reached during restart`);
-          item.status = 'queued';
+          this._setItemStatus(item, 'queued');
           item.error = null;
         }
         continue;
@@ -5217,7 +5417,7 @@ class LibraryManager {
       const fullPath = path.join(this._libraryPath, sourcePath);
       if (!fs.existsSync(fullPath)) {
         console.error(`[Library] Cannot resume conversion for "${item.name}" — source file missing`);
-        item.status = 'failed';
+        this._setItemStatus(item, 'failed');
         item.error = 'Source file missing after restart';
         continue;
       }
@@ -5234,7 +5434,7 @@ class LibraryManager {
       const probe = await this._probeFile(fullPath);
       if (!probe.probeOk) {
         console.error(`[Library] Cannot resume conversion for "${item.name}" — probe failed: ${probe.reason}`);
-        item.status = 'complete';
+        this._setItemStatus(item, 'complete');
         item.convertError = `Resume probe failed: ${probe.reason}`;
         item.convertKind = null;
         continue;
@@ -5242,7 +5442,7 @@ class LibraryManager {
       const kind = this._classifyConversionKind(probe);
       if (!kind) {
         console.log(`[Library] "${item.name}" no longer needs conversion — marking complete`);
-        item.status = 'complete';
+        this._setItemStatus(item, 'complete');
         item.convertKind = null;
         item.convertProgress = null;
         item.conversionCheckedAt = Date.now();
@@ -5260,9 +5460,9 @@ class LibraryManager {
       if (this._convertProcesses.size >= this._maxConcurrentConversions || !this._canStartConversionNow()) {
         item._pendingConversion = true;
         item._pendingConvertKind = kind;
-        item.status = 'complete'; // keep out of the "in-flight" set until started
+        this._setItemStatus(item, 'complete'); // keep out of the "in-flight" set until started
       } else {
-        item.status = 'converting';
+        this._setItemStatus(item, 'converting');
         item.convertProgress = 0;
         this._startPeriodicSave();
         this._startConversion(item.id);
@@ -6215,7 +6415,7 @@ class LibraryManager {
           }
           console.log(`[Library] "${item.name}" is incomplete (${(probe.completenessRatio * 100).toFixed(1)}% on disk) — triggering repair re-download`);
           item._autoRepairAttempted = true;
-          item.status       = 'failed';
+          this._setItemStatus(item, 'failed');
           item.error        = probe.reason;
           item.progress     = 0;
           item.completedAt  = null;
@@ -6292,7 +6492,7 @@ class LibraryManager {
       return;
     }
 
-    item.status = 'converting';
+    this._setItemStatus(item, 'converting');
     item.convertKind = kind;
     item.convertProgress = 0;
     item.convertError = null;
@@ -6617,7 +6817,7 @@ class LibraryManager {
       // restart _resumeInterruptedConversions sees a "converting" item
       // and tries to restart it. Same pattern as
       // _onConversionPausedForDownloads.
-      item.status = 'complete';
+      this._setItemStatus(item, 'complete');
       item.convertKind = null;
       item.convertProgress = null;
       item.convertError = null;
@@ -6885,7 +7085,7 @@ class LibraryManager {
       item.filePath = newRelPath;
       item.fileName = path.basename(finalOutputPath);
       item.fileSize = stat.size;
-      item.status = 'complete';
+      this._setItemStatus(item, 'complete');
       item.convertProgress = 100;
       item.convertKind = null;
       item.convertError = null;
@@ -6954,7 +7154,7 @@ class LibraryManager {
       item.filePath = item.originalFilePath;
       item.originalFilePath = null;
     }
-    item.status = 'complete';
+    this._setItemStatus(item, 'complete');
     item.convertError = reason;
     item.convertProgress = null;
     item.convertKind = null;
@@ -7077,7 +7277,7 @@ class LibraryManager {
       const kind = pending._pendingConvertKind === 'transcode' ? 'transcode' : 'remux';
       delete pending._pendingConversion;
       delete pending._pendingConvertKind;
-      pending.status = 'converting';
+      this._setItemStatus(pending, 'converting');
       pending.convertKind = kind;
       pending.convertProgress = 0;
       pending.convertError = null;
@@ -7285,7 +7485,7 @@ class LibraryManager {
     // Requeue for the pending-conversion queue. Keep the kind so
     // _processConversionQueue picks it up unchanged when it fires.
     const kind = item.convertKind || 'transcode';
-    item.status = 'complete';
+    this._setItemStatus(item, 'complete');
     item._pendingConversion = true;
     item._pendingConvertKind = kind;
     item.convertKind = null;

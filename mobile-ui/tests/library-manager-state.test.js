@@ -188,3 +188,223 @@ test('packCatalog dedup on infoHash', (t) => {
   const entry = lib._packCatalog.get('aaa');
   assert.equal(entry.title, 'Pack A (replayed)');
 });
+
+// ─── Secondary-index correctness ────────────────────────────────────
+//
+// These tests exercise _byPackId / _byStatus / _getPackItems /
+// _getItemsByStatus / _setItemStatus / _indexItem / _unindexItem
+// directly. They drive items in through the indexed-path APIs (not
+// `_items.set` raw) so the index invariants hold. The full library
+// suite runs with DEBUG_LIBRARY_INDEX=1 in CI to catch any missed
+// mutation site.
+
+function addRaw(lib, partial) {
+  // Helper that mirrors what addItem does internally: set into _items,
+  // then call _indexItem. Tests bypass addItem so they don't have to
+  // produce a valid infoHash / magnetUri pair.
+  const item = { id: partial.id, status: 'queued', ...partial };
+  lib._items.set(item.id, item);
+  lib._indexItem(item);
+  return item;
+}
+
+test('_indexItem — addItem populates _byPackId and _byStatus', (t) => {
+  const { lib } = makeLib(t);
+  const a = addRaw(lib, { id: 'a', packId: 'pack1', status: 'downloading' });
+  const b = addRaw(lib, { id: 'b', packId: 'pack1', status: 'downloading' });
+  const c = addRaw(lib, { id: 'c', packId: 'pack2', status: 'queued' });
+  const d = addRaw(lib, { id: 'd',                  status: 'complete' });
+  // _byPackId
+  assert.equal(lib._byPackId.size, 2, '_byPackId has 2 distinct packs');
+  assert.deepEqual([...lib._byPackId.get('pack1')].sort(), ['a', 'b']);
+  assert.deepEqual([...lib._byPackId.get('pack2')], ['c']);
+  // _byStatus
+  assert.deepEqual([...lib._byStatus.get('downloading')].sort(), ['a', 'b']);
+  assert.deepEqual([...lib._byStatus.get('queued')], ['c']);
+  assert.deepEqual([...lib._byStatus.get('complete')], ['d']);
+  // No packId → no entry in _byPackId for that item
+  assert.ok(!lib._byPackId.get(undefined));
+  // Tag check — silence ESLint unused-var on a,b,c,d
+  assert.ok(a && b && c && d);
+});
+
+test('_setItemStatus — moves id between status buckets', (t) => {
+  const { lib } = makeLib(t);
+  addRaw(lib, { id: 'a', status: 'downloading' });
+  addRaw(lib, { id: 'b', status: 'downloading' });
+  // Transition a to complete
+  const a = lib._items.get('a');
+  lib._setItemStatus(a, 'complete');
+  assert.equal(a.status, 'complete', '_setItemStatus mutates the item');
+  assert.deepEqual([...lib._byStatus.get('downloading')], ['b']);
+  assert.deepEqual([...lib._byStatus.get('complete')], ['a']);
+});
+
+test('_setItemStatus — same-status no-op leaves indexes unchanged', (t) => {
+  const { lib } = makeLib(t);
+  const a = addRaw(lib, { id: 'a', status: 'downloading' });
+  lib._setItemStatus(a, 'downloading');
+  assert.deepEqual([...lib._byStatus.get('downloading')], ['a']);
+});
+
+test('_setItemStatus — chain of transitions ends in the correct bucket', (t) => {
+  const { lib } = makeLib(t);
+  const a = addRaw(lib, { id: 'a', status: 'queued' });
+  lib._setItemStatus(a, 'downloading');
+  lib._setItemStatus(a, 'paused');
+  lib._setItemStatus(a, 'downloading');
+  lib._setItemStatus(a, 'complete');
+  // Only 'complete' should hold 'a'; all other buckets should be empty / absent.
+  assert.deepEqual([...lib._byStatus.get('complete')], ['a']);
+  assert.ok(!lib._byStatus.has('queued'));
+  assert.ok(!lib._byStatus.has('downloading'));
+  assert.ok(!lib._byStatus.has('paused'));
+});
+
+test('_unindexItem — drops id from both _byPackId and _byStatus', (t) => {
+  const { lib } = makeLib(t);
+  addRaw(lib, { id: 'a', packId: 'pack1', status: 'downloading' });
+  addRaw(lib, { id: 'b', packId: 'pack1', status: 'downloading' });
+  const a = lib._items.get('a');
+  lib._items.delete('a');
+  lib._unindexItem(a);
+  // pack1 still has b
+  assert.deepEqual([...lib._byPackId.get('pack1')], ['b']);
+  // downloading still has b
+  assert.deepEqual([...lib._byStatus.get('downloading')], ['b']);
+});
+
+test('_unindexItem — removing last member of a bucket deletes the empty Set', (t) => {
+  const { lib } = makeLib(t);
+  addRaw(lib, { id: 'a', packId: 'pack1', status: 'failed' });
+  const a = lib._items.get('a');
+  lib._items.delete('a');
+  lib._unindexItem(a);
+  // Empty buckets should be removed from the maps (not left as empty Sets).
+  assert.ok(!lib._byPackId.has('pack1'));
+  assert.ok(!lib._byStatus.has('failed'));
+});
+
+test('_reKey — re-add under new id keeps indexes consistent', (t) => {
+  const { lib } = makeLib(t);
+  const a = addRaw(lib, { id: 'oldId', packId: 'pack1', status: 'downloading' });
+  // Simulate the _reKey path: delete + unindex, mutate id, set + index.
+  lib._items.delete('oldId');
+  lib._unindexItem(a);
+  a.id = 'newId';
+  lib._items.set('newId', a);
+  lib._indexItem(a);
+  assert.deepEqual([...lib._byPackId.get('pack1')], ['newId']);
+  assert.deepEqual([...lib._byStatus.get('downloading')], ['newId']);
+});
+
+test('_getPackItems — returns live items for a pack', (t) => {
+  const { lib } = makeLib(t);
+  addRaw(lib, { id: 'a', packId: 'pack1', status: 'downloading', name: 'A' });
+  addRaw(lib, { id: 'b', packId: 'pack1', status: 'complete',    name: 'B' });
+  addRaw(lib, { id: 'c', packId: 'pack2', status: 'downloading', name: 'C' });
+  const pack1Items = lib._getPackItems('pack1');
+  assert.equal(pack1Items.length, 2);
+  const names = pack1Items.map(i => i.name).sort();
+  assert.deepEqual(names, ['A', 'B']);
+});
+
+test('_getPackItems — unknown packId returns []', (t) => {
+  const { lib } = makeLib(t);
+  assert.deepEqual(lib._getPackItems('nope'), []);
+});
+
+test('_getItemsByStatus — returns live items for a status', (t) => {
+  const { lib } = makeLib(t);
+  addRaw(lib, { id: 'a', status: 'downloading' });
+  addRaw(lib, { id: 'b', status: 'downloading' });
+  addRaw(lib, { id: 'c', status: 'queued' });
+  const active = lib._getItemsByStatus('downloading');
+  const queued = lib._getItemsByStatus('queued');
+  assert.deepEqual(active.map(i => i.id).sort(), ['a', 'b']);
+  assert.deepEqual(queued.map(i => i.id), ['c']);
+});
+
+test('_getItemsByStatus — equivalent to filter on _items.values()', (t) => {
+  const { lib } = makeLib(t);
+  for (let i = 0; i < 20; i++) {
+    addRaw(lib, { id: `i${i}`, status: i % 3 === 0 ? 'downloading' : (i % 3 === 1 ? 'complete' : 'queued') });
+  }
+  const filterBased = [...lib._items.values()].filter(x => x.status === 'downloading');
+  const indexBased = lib._getItemsByStatus('downloading');
+  // Same length, same ids.
+  assert.equal(indexBased.length, filterBased.length);
+  assert.deepEqual(indexBased.map(i => i.id).sort(), filterBased.map(i => i.id).sort());
+});
+
+test('_setItemPackId — moves id between pack buckets', (t) => {
+  const { lib } = makeLib(t);
+  const a = addRaw(lib, { id: 'a', packId: 'pack1', status: 'downloading' });
+  lib._setItemPackId(a, 'pack2');
+  assert.equal(a.packId, 'pack2');
+  assert.ok(!lib._byPackId.has('pack1'));
+  assert.deepEqual([...lib._byPackId.get('pack2')], ['a']);
+});
+
+test('addItem → public path indexes the item', (t) => {
+  const { lib, dir } = makeLib(t);
+  fs.mkdirSync(dir, { recursive: true });
+  const r = lib.addItem({
+    type: 'movie',
+    name: 'Indexed',
+    infoHash: 'bb'.repeat(20),
+    magnetUri: 'magnet:?xt=urn:btih:' + 'bb'.repeat(20),
+  });
+  // Item should be in both _items and in the status bucket.
+  assert.ok(lib._items.has(r.id));
+  // status is either 'downloading' (under cap) or 'queued' (at cap).
+  const bucket = lib._byStatus.get(lib._items.get(r.id).status);
+  assert.ok(bucket && bucket.has(r.id), `index missed id ${r.id}`);
+});
+
+test('removeItem → indexes are cleared', (t) => {
+  const { lib, dir } = makeLib(t);
+  fs.mkdirSync(dir, { recursive: true });
+  const r = lib.addItem({
+    type: 'movie',
+    name: 'ToRemove',
+    infoHash: 'cc'.repeat(20),
+    magnetUri: 'magnet:?xt=urn:btih:' + 'cc'.repeat(20),
+  });
+  lib.removeItem(r.id);
+  // Both indexes must be empty afterwards (no other items in this lib).
+  assert.equal(lib._byStatus.size, 0);
+  assert.equal(lib._byPackId.size, 0);
+});
+
+test('DEBUG_LIBRARY_INDEX=1 does not change query results', (t) => {
+  const { lib } = makeLib(t);
+  // The debug-assertion path is gated on process.env.DEBUG_LIBRARY_INDEX;
+  // setting/clearing it inside the test toggles the path without
+  // touching other tests' env. Either way, _getPackItems / _getItemsByStatus
+  // must return identical results.
+  const prev = process.env.DEBUG_LIBRARY_INDEX;
+  process.env.DEBUG_LIBRARY_INDEX = '1';
+  try {
+    addRaw(lib, { id: 'a', packId: 'pack1', status: 'downloading' });
+    addRaw(lib, { id: 'b', packId: 'pack1', status: 'complete' });
+    assert.equal(lib._getPackItems('pack1').length, 2);
+    assert.equal(lib._getItemsByStatus('downloading').length, 1);
+  } finally {
+    if (prev === undefined) delete process.env.DEBUG_LIBRARY_INDEX;
+    else process.env.DEBUG_LIBRARY_INDEX = prev;
+  }
+});
+
+test('_indexItem — item with empty/missing status buckets under \'\'', (t) => {
+  const { lib } = makeLib(t);
+  // Disk-promoted items can briefly have no status; the index should
+  // still cope and use the '' bucket so the rebuild assertion matches.
+  const a = { id: 'a' };
+  lib._items.set('a', a);
+  lib._indexItem(a);
+  assert.deepEqual([...lib._byStatus.get('')], ['a']);
+  lib._items.delete('a');
+  lib._unindexItem(a);
+  assert.ok(!lib._byStatus.has(''));
+});

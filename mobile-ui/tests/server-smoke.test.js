@@ -10,11 +10,17 @@ const { withTmpDir } = require('./helpers/tmpdir');
 const { startTestServer } = require('./helpers/http');
 
 async function boot(t) {
+  // node:test runs t.after hooks in FIFO order. The server's shutdown
+  // path triggers a final _writeMetadataNow(); if the tmpdirs are
+  // unlinked before the server stops, that write fails with ENOENT and
+  // spams the log. Register the server-stop hook FIRST so it runs
+  // before the tmpdir cleanup that withTmpDir registers below.
+  let srv;
+  t.after(async () => { if (srv) await srv.stop(); });
   const libraryPath = withTmpDir(t, 'alabtross-lib-');
   const musicLibraryPath = withTmpDir(t, 'alabtross-music-');
   const torrentCachePath = withTmpDir(t, 'alabtross-cache-');
-  const srv = await startTestServer({ libraryPath, musicLibraryPath, torrentCachePath });
-  t.after(async () => { await srv.stop(); });
+  srv = await startTestServer({ libraryPath, musicLibraryPath, torrentCachePath });
   return srv;
 }
 

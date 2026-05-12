@@ -4426,7 +4426,7 @@ app.get('/api/library/:id/stream/transcode', rateLimit, transcodeGate, async (re
 // blocks until the first .ts segment is on disk, then serves the m3u8
 // playlist so the browser can start pulling segments. The playlist uses
 // relative URLs so /segment requests resolve under this same path.
-app.get('/api/library/:id/stream/hls/playlist.m3u8', async (req, res) => {
+app.get('/api/library/:id/stream/hls/playlist.m3u8', rateLimit, async (req, res) => {
   const item = library.getItem(req.params.id);
   if (!item) return res.status(404).json({ error: 'Item not found' });
   if (item.status !== 'complete' && item.status !== 'converting') {
@@ -4546,7 +4546,7 @@ app.get('/api/library/:id/stream/hls/playlist.m3u8', async (req, res) => {
 // If a segment hasn't been written yet (client is asking ahead of the
 // transcoder), block briefly for it to appear. Segment requests keep the
 // session alive so the idle cleanup doesn't kill ffmpeg mid-watch.
-app.get('/api/library/:id/stream/hls/:segment', async (req, res) => {
+app.get('/api/library/:id/stream/hls/:segment', rateLimit, async (req, res) => {
   // Pin the segment name to the exact pattern ffmpeg writes so a client
   // can't use this endpoint to read arbitrary files under the cache dir.
   const name = req.params.segment;
@@ -5295,7 +5295,7 @@ app.get('/api/cast/sessions', (req, res) => {
 app.use(express.static(path.join(__dirname, 'public'), {
   etag: true,
   lastModified: true,
-  maxAge: '1d',
+  maxAge: '1h',
   setHeaders: (res, filePath) => {
     if (filePath.endsWith('.html')) {
       res.setHeader('Cache-Control', 'no-cache');

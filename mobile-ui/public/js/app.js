@@ -2103,7 +2103,7 @@
         statusEl.innerHTML = `
           <span style="color:var(--success)">&#9889;</span>
           Best stream: <strong>${seeds} seeds</strong>
-          <span style="color:var(--success)"> &mdash; ${sourceLabel}</span>
+          <span style="color:var(--success)"> &mdash; ${escapeHTML(sourceLabel)}</span>
         `;
       } else {
         statusEl.innerHTML = `
@@ -2220,7 +2220,7 @@
         </div>
         <div style="font-size:15px;font-weight:600;margin-bottom:4px;">${mainTitle}</div>
         <div style="font-size:13px;color:var(--text-dim);margin-bottom:16px;">
-          ${[quality, format, seeds + ' seeds', source].filter(Boolean).join(' \u00b7 ')}
+          ${[quality, escapeHTML(format), seeds + ' seeds', escapeHTML(source)].filter(Boolean).join(' \u00b7 ')}
         </div>
         <div style="display:flex;gap:12px;justify-content:center;">
           <button class="btn-play" id="auto-play-btn">

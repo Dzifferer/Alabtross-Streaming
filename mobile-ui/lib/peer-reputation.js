@@ -93,6 +93,7 @@ class PeerReputation {
   }
 
   _load() {
+    const ADDR_RE = /^[\d.]+:\d+$|^\[[^\]]+\]:\d+$/;
     try {
       if (!fs.existsSync(this._file)) return;
       const raw = fs.readFileSync(this._file, 'utf8');
@@ -102,6 +103,7 @@ class PeerReputation {
       const now = Date.now();
       let kept = 0, dropped = 0;
       for (const [addr, entry] of Object.entries(data.entries)) {
+        if (!ADDR_RE.test(addr)) continue;
         if (!entry || typeof entry !== 'object') { dropped++; continue; }
         const lastSeenAt = Number(entry.lastSeenAt) || 0;
         if (!lastSeenAt || now - lastSeenAt > ENTRY_MAX_AGE_MS) { dropped++; continue; }

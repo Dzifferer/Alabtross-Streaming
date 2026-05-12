@@ -5444,6 +5444,56 @@
   // ─── Settings ────────────────────────────────────
 
   function initSettings() {
+    // ─── Collapsible section toggles ─────────────────
+    document.querySelectorAll('.settings-section-toggle').forEach(header => {
+      header.addEventListener('click', () => {
+        header.closest('.settings-section').classList.toggle('settings-section--collapsed');
+      });
+    });
+
+    // ─── Danger Zone button handlers ─────────────────
+    $('#danger-import-torrent')?.addEventListener('click', () => showManualImportModal());
+
+    $('#danger-repair-incomplete')?.addEventListener('click', async () => {
+      if (!confirm('This will re-download all incomplete library items. Continue?')) return;
+      try {
+        const r = await fetch('/api/library/repair-all-incomplete', { method: 'POST' });
+        const data = await r.json();
+        showToast(`Repair started for ${data.repaired || 0} items`);
+      } catch (e) { showToast('Repair failed: ' + e.message); }
+    });
+
+    $('#danger-remove-broken')?.addEventListener('click', async () => {
+      if (!confirm('This will permanently delete all library items that cannot be re-downloaded. This cannot be undone. Continue?')) return;
+      try {
+        const r = await fetch('/api/library/remove-unfixable-broken', { method: 'POST' });
+        const data = await r.json();
+        showToast(`Removed ${data.removed || 0} broken items`);
+        loadLibrary();
+      } catch (e) { showToast('Remove failed: ' + e.message); }
+    });
+
+    $('#danger-purge-failed')?.addEventListener('click', async () => {
+      if (!confirm('This will permanently delete all library items in a failed state. This cannot be undone. Continue?')) return;
+      try {
+        const r = await fetch('/api/library/purge-failed', { method: 'POST' });
+        const data = await r.json();
+        showToast(`Purged ${data.removed || 0} failed items`);
+        loadLibrary();
+      } catch (e) { showToast('Purge failed: ' + e.message); }
+    });
+
+    $('#danger-repair-metadata')?.addEventListener('click', async () => {
+      if (!confirm('This will re-fetch TMDB metadata for ALL library items, overwriting existing metadata. This may take several minutes. Continue?')) return;
+      try {
+        showToast('Repairing metadata... this may take a while');
+        const r = await fetch('/api/library/repair-metadata', { method: 'POST' });
+        const data = await r.json();
+        showToast(`Metadata repaired: ${data.updated || 0} items updated`);
+        loadLibrary();
+      } catch (e) { showToast('Repair failed: ' + e.message); }
+    });
+
     // ─── Max Concurrent Streams ─────────────────────
     const maxStreamsInput = $('#setting-max-streams');
     const maxStreamsSave = $('#setting-max-streams-save');
@@ -7237,12 +7287,6 @@
     // Back button
     dom.backBtn.addEventListener('click', goBack);
 
-    // Manual torrent import button
-    const manualImportBtn = document.getElementById('manual-import-btn');
-    if (manualImportBtn) {
-      manualImportBtn.addEventListener('click', showManualImportModal);
-    }
-
     // Library toolbar: Auto-match (only unmatched/needsReview) + Re-match
     // (force: everything, including already-linked). Both call the same
     // endpoint with a different body.
@@ -7315,74 +7359,8 @@
     // Library toolbar: bulk remove unfixable-broken. Deletes library items
     // that are incompleteOnDisk AND have no recoverable magnet (self, pack
     // sibling, or directory sibling). After this the user typically re-imports
-    // the missing content via a fresh magnet.
-    const removeBrokenBtn = document.getElementById('library-remove-broken-btn');
-    if (removeBrokenBtn) {
-      removeBrokenBtn.addEventListener('click', async () => {
-        if (removeBrokenBtn.disabled) return;
-        if (!confirm('Delete every incomplete library item that has no magnet to re-download from?\nThis removes the broken entries permanently. Items that CAN be repaired are kept.')) {
-          return;
-        }
-        const label = removeBrokenBtn.querySelector('.library-automatch-label');
-        const orig = label ? label.textContent : null;
-        removeBrokenBtn.disabled = true;
-        if (label) label.textContent = 'Removing…';
-        try {
-          const resp = await fetch('/api/library/remove-unfixable-broken', { method: 'POST' });
-          if (!resp.ok) {
-            const j = await resp.json().catch(() => ({}));
-            showToast(j.error ? `Remove failed: ${j.error}` : 'Remove broken failed');
-            return;
-          }
-          const data = await resp.json();
-          showToast(data.removed === 0 ? 'No unfixable broken items found'
-                                       : `Removed ${data.removed} unfixable item${data.removed === 1 ? '' : 's'}`);
-          loadLibrary();
-        } catch { showToast('Remove request failed'); }
-        finally {
-          removeBrokenBtn.disabled = false;
-          if (label && orig) label.textContent = orig;
-        }
-      });
-    }
-
-    // Library toolbar: bulk repair. Scans every 'complete' item server-side,
-    // identifies the ones whose on-disk bytes are < 90% of expected size
-    // (abandoned torrent downloads), and queues a re-download for each.
-    const repairAllBtn = document.getElementById('library-repair-all-btn');
-    if (repairAllBtn) {
-      repairAllBtn.addEventListener('click', async () => {
-        if (repairAllBtn.disabled) return;
-        if (!confirm('Scan the whole library and re-download any item whose on-disk bytes are incomplete?\nItems without a stored magnet URI (manual imports) will be skipped.')) {
-          return;
-        }
-        const label = repairAllBtn.querySelector('.library-automatch-label');
-        const orig = label ? label.textContent : null;
-        repairAllBtn.disabled = true;
-        if (label) label.textContent = 'Scanning…';
-        try {
-          const resp = await fetch('/api/library/repair-all-incomplete', { method: 'POST' });
-          if (!resp.ok) {
-            const j = await resp.json().catch(() => ({}));
-            showToast(j.error ? `Repair failed: ${j.error}` : 'Bulk repair failed');
-            return;
-          }
-          const data = await resp.json();
-          if (data.triggered === 0 && data.incomplete === 0) {
-            showToast(`Scanned ${data.scanned} items — all intact`);
-          } else if (data.triggered === 0) {
-            showToast(`${data.incomplete} incomplete, but none have a magnet to re-download`);
-          } else {
-            showToast(`Queued ${data.triggered} repair${data.triggered === 1 ? '' : 's'}${data.noMagnet ? ` (${data.noMagnet} skipped — no magnet)` : ''}`);
-          }
-          loadLibrary();
-        } catch { showToast('Bulk repair request failed'); }
-        finally {
-          repairAllBtn.disabled = false;
-          if (label && orig) label.textContent = orig;
-        }
-      });
-    }
+    // (Import Torrent, Repair Incomplete, and Remove Broken buttons
+    // have been relocated to Settings > Danger Zone)
 
     // Player back button — navigate back (goBack handles video cleanup after hiding view)
     dom.playerBackBtn.addEventListener('click', () => {

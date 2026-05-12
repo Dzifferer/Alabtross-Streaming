@@ -5245,3 +5245,74 @@ body.music-player-open .music-player-bar { display: none; }
   border-color: transparent;
 }
 
+/* ─── Settings Sections (collapsible) ─── */
+.settings-section {
+  margin-top: 20px;
+}
+
+.settings-section-header {
+  font-weight: 600;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  padding: 8px 0;
+}
+
+.settings-section-toggle {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.settings-section-toggle:active {
+  opacity: 0.7;
+}
+
+.settings-chevron {
+  transition: transform 0.2s;
+}
+
+.settings-section--collapsed .settings-section-body {
+  display: none;
+}
+
+.settings-section--collapsed .settings-chevron {
+  transform: rotate(-90deg);
+}
+
+/* Danger Zone */
+.settings-section--danger {
+  border: 1px solid rgba(255, 107, 107, 0.3);
+  border-radius: var(--radius, 12px);
+  padding: 12px 16px;
+  margin-top: 24px;
+}
+
+.settings-section--danger .settings-section-header {
+  color: var(--danger, #ff6b6b);
+}
+
+.btn-danger-outline {
+  display: block;
+  width: 100%;
+  padding: 10px 16px;
+  border-radius: var(--radius-sm, 8px);
+  border: 1px solid rgba(255, 107, 107, 0.4);
+  background: transparent;
+  color: var(--danger, #ff6b6b);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.btn-danger-outline:hover,
+.btn-danger-outline:active {
+  background: rgba(255, 107, 107, 0.1);
+  border-color: var(--danger, #ff6b6b);
+}
+

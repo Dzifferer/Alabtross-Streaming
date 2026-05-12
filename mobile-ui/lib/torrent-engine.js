@@ -247,6 +247,7 @@ class TorrentEngine {
 
       engine.on('error', (err) => {
         clearTimeout(timeout);
+        clearTimeout(earlyCheck);
         clearInterval(peerLog);
         try { peerMgr.destroy(); } catch { /* ignore */ }
         console.error(`[TorrentEngine] Engine error for ${hash}: ${err.message}`);
@@ -815,7 +816,7 @@ class TorrentEngine {
     const entry = this._active.get(hash);
     if (!entry) return;
     if (entry.timer) clearTimeout(entry.timer);
-    entry.timer = setTimeout(() => this._removeTorrent(hash), IDLE_TIMEOUT);
+    entry.timer = setTimeout(() => this._removeTorrent(hash), this._idleTimeout);
   }
 
   _removeTorrent(hash) {

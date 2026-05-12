@@ -240,4 +240,4 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -sf http://localhost:${PORT:-8080}/health || exit 1
 
-CMD ["node", "server.js"]
+CMD ["node", "--max-old-space-size=2048", "--max-semi-space-size=64", "server.js"]

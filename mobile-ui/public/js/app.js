@@ -1039,7 +1039,7 @@
     );
 
     const row = placeholder || document.createElement('div');
-    row.className = 'catalog-row';
+    row.className = 'catalog-row visible';
 
     if (items.length === 0) {
       row.innerHTML = `

@@ -44,6 +44,7 @@ const { getSystemDiag } = require('./lib/system-diag');
 const { discoverDevices, getLocalIP } = require('./lib/local-discovery');
 const castManager = require('./lib/cast-manager');
 const ffmpegHw = require('./lib/ffmpeg-hw');
+const { createDebouncedAtomicWriter } = require('./lib/util');
 
 const compression = require('compression');
 
@@ -1534,12 +1535,19 @@ try {
   console.warn('[Collections] Failed to load cache:', e.message);
 }
 
-async function saveCollectionCache() {
-  try {
-    await fs.promises.writeFile(COLLECTION_CACHE_PATH, JSON.stringify(collectionCache), 'utf8');
-  } catch (e) {
-    console.warn('[Collections] Failed to save cache:', e.message);
-  }
+// Debounced atomic writer — see lib/util.js. Trailing-edge 500ms window
+// coalesces the chatty per-categorize / per-enrich saves into one
+// fs.writeFile+rename, and the tempfile+rename pair makes the on-disk
+// state crash-safe (a kill mid-write leaves the previous good copy
+// intact). Shutdown calls .flush() so the final state is persisted.
+const _collectionCacheWriter = createDebouncedAtomicWriter({
+  path: COLLECTION_CACHE_PATH,
+  getData: () => collectionCache,
+  waitMs: 500,
+  label: 'Collections',
+});
+function saveCollectionCache() {
+  _collectionCacheWriter.schedule();
 }
 
 // Title-based franchise detection (works without TMDB)
@@ -1822,12 +1830,16 @@ try {
   console.warn('[Categories] Failed to load manual categories:', e.message);
 }
 
-async function saveManualCategories() {
-  try {
-    await fs.promises.writeFile(MANUAL_CATEGORIES_PATH, JSON.stringify(manualCategories), 'utf8');
-  } catch (e) {
-    console.warn('[Categories] Failed to save manual categories:', e.message);
-  }
+// Same shape as the collection-cache writer — debounced atomic write
+// with .flush() wired into shutdown.
+const _manualCategoriesWriter = createDebouncedAtomicWriter({
+  path: MANUAL_CATEGORIES_PATH,
+  getData: () => manualCategories,
+  waitMs: 500,
+  label: 'Categories',
+});
+function saveManualCategories() {
+  _manualCategoriesWriter.schedule();
 }
 
 // POST /api/library/categorize - manually assign a genre or collection to a movie
@@ -5794,6 +5806,11 @@ async function shutdown() {
   await Promise.allSettled([
     library.destroy().catch(err => { console.error(`[Server] Library shutdown error: ${err.message}`); }),
     musicLibrary.destroy().catch(err => { console.error(`[Server] MusicLibrary shutdown error: ${err.message}`); }),
+    // Flush the debounced category / collection cache writes — the trailing-
+    // debounce window can swallow the last user mutation if SIGTERM fires
+    // inside it.
+    _collectionCacheWriter.flush().catch(err => { console.error(`[Server] Collection cache flush error: ${err.message}`); }),
+    _manualCategoriesWriter.flush().catch(err => { console.error(`[Server] Manual categories flush error: ${err.message}`); }),
   ]);
   try { if (engine) engine.destroy(); } catch (err) {
     console.error(`[Server] Engine shutdown error: ${err.message}`);

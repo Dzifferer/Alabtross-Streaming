@@ -1096,6 +1096,14 @@ function _coverCacheSet(key, buf, type) {
   _coverCache.set(key, { buf, type, ts: Date.now() });
 }
 
+// Keep-alive agents for outbound cover-proxy fetches. coverartarchive.org
+// 307-redirects to archive.org and card grids fan out to ~20 fetches in a
+// burst — without keep-alive each one pays a ~150ms TLS handshake. maxSockets:
+// 4 keeps the burst from monopolizing outbound bandwidth on cellular. family:
+// 4 matches the rest of this file (the SSRF guard does v4 resolution).
+const _coverProxyAgentHttps = new https.Agent({ keepAlive: true, keepAliveMsecs: 30000, maxSockets: 4 });
+const _coverProxyAgentHttp  = new http.Agent({  keepAlive: true, keepAliveMsecs: 30000, maxSockets: 4 });
+
 async function _fetchImage(url, maxRedirects = 3) {
   // Validate at EVERY hop. coverartarchive.org 307s to archive.org for
   // the actual blob; without re-validating the redirect target, an
@@ -1113,9 +1121,12 @@ async function _fetchImage(url, maxRedirects = 3) {
     let settled = false;
     const settle = (fn, arg) => { if (!settled) { settled = true; fn(arg); } };
     const mod = parsed.protocol === 'https:' ? https : http;
+    const agent = parsed.protocol === 'https:' ? _coverProxyAgentHttps : _coverProxyAgentHttp;
     const req = mod.get(url, {
       headers: { 'User-Agent': 'AlabtrossStreaming/1.0', 'Accept': 'image/*' },
       timeout: 12000,
+      family: 4,
+      agent,
     }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && maxRedirects > 0) {
         res.resume();

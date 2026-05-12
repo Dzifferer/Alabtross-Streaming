@@ -17,6 +17,20 @@ const MB_BASE = 'https://musicbrainz.org/ws/2';
 const CAA_BASE = 'https://coverartarchive.org';
 const UA = 'AlabtrossStreaming/1.0 (https://github.com/Dzifferer/alabtross-streaming)';
 
+// Keep-alive agent for MusicBrainz. MB rate-limits to ~1 req/s per IP and
+// we serialize all calls through a single promise-chain queue, so in
+// practice only one socket is ever in use at a time. maxSockets: 2
+// leaves headroom for one queued follow-up without inviting wasteful
+// parallelism that MB would just throttle anyway. The handshake savings
+// matter: TLS to musicbrainz.org costs ~120-180ms cold, so reusing the
+// socket across the 5-15 calls a single album-import touches saves over
+// a second of end-to-end latency.
+const _mbAgent = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 30000,
+  maxSockets: 2,
+});
+
 // Covers are returned as proxied paths (/api/cover/release/...) instead of
 // the direct coverartarchive.org URL. coverartarchive 307-redirects to
 // archive.org which is slow and flaky over VPN; our server proxy caches
@@ -55,6 +69,7 @@ function httpGetJSON(url, timeoutMs = 10000, _depth = 0) {
         'Accept': 'application/json',
       },
       timeout: timeoutMs,
+      agent: _mbAgent,
     }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         clearTimeout(deadline);

@@ -1082,24 +1082,41 @@ function _coverCacheSet(key, buf, type) {
   _coverCache.set(key, { buf, type, ts: Date.now() });
 }
 
-function _fetchImage(url, maxRedirects = 3) {
+async function _fetchImage(url, maxRedirects = 3) {
+  // Validate at EVERY hop. coverartarchive.org 307s to archive.org for
+  // the actual blob; without re-validating the redirect target, an
+  // upstream compromise (or a stray open-redirect at archive.org) could
+  // pivot this fetch into a private-network SSRF. The host check is
+  // independent of the top-level routes that gate on the MBID format.
+  let parsed;
+  try {
+    await validateUrlNotSSRF(url);
+    parsed = new URL(url);
+  } catch (err) {
+    throw new Error(`Cover URL blocked: ${err.message}`);
+  }
   return new Promise((resolve, reject) => {
-    const mod = url.startsWith('https:') ? https : http;
+    let settled = false;
+    const settle = (fn, arg) => { if (!settled) { settled = true; fn(arg); } };
+    const mod = parsed.protocol === 'https:' ? https : http;
     const req = mod.get(url, {
       headers: { 'User-Agent': 'AlabtrossStreaming/1.0', 'Accept': 'image/*' },
       timeout: 12000,
     }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && maxRedirects > 0) {
         res.resume();
-        return _fetchImage(res.headers.location, maxRedirects - 1).then(resolve, reject);
+        return _fetchImage(res.headers.location, maxRedirects - 1).then(
+          v => settle(resolve, v),
+          e => settle(reject, e),
+        );
       }
       if (res.statusCode === 404) {
         res.resume();
-        return resolve({ ok: false, status: 404 });
+        return settle(resolve, { ok: false, status: 404 });
       }
       if (res.statusCode !== 200) {
         res.resume();
-        return resolve({ ok: false, status: res.statusCode });
+        return settle(resolve, { ok: false, status: res.statusCode });
       }
       const type = res.headers['content-type'] || 'image/jpeg';
       const chunks = [];
@@ -1107,14 +1124,14 @@ function _fetchImage(url, maxRedirects = 3) {
       const MAX_IMAGE_BYTES = 8 * 1024 * 1024; // 8MB safety cap
       res.on('data', c => {
         total += c.length;
-        if (total > MAX_IMAGE_BYTES) { res.destroy(); return reject(new Error('Image too large')); }
+        if (total > MAX_IMAGE_BYTES) { res.destroy(); return settle(reject, new Error('Image too large')); }
         chunks.push(c);
       });
-      res.on('end', () => resolve({ ok: true, buf: Buffer.concat(chunks), type }));
-      res.on('error', reject);
+      res.on('end', () => settle(resolve, { ok: true, buf: Buffer.concat(chunks), type }));
+      res.on('error', e => settle(reject, e));
     });
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('Socket timeout')); });
+    req.on('error', e => settle(reject, e));
+    req.on('timeout', () => { req.destroy(); settle(reject, new Error('Socket timeout')); });
   });
 }
 
@@ -1229,6 +1246,14 @@ app.post('/api/music-library/add', rateLimit, express.json(), (req, res) => {
   if (!/^[0-9a-f]{40}$/i.test(b.infoHash)) {
     return res.status(400).json({ error: 'Invalid infoHash' });
   }
+  // Same consistency guard /api/library/add enforces — without it a
+  // caller can register an item whose stored magnet URI points at a
+  // different swarm than its declared infoHash. The engine keys on
+  // infoHash, but the magnet survives in metadata and gets re-used by
+  // resume / repair paths.
+  if (!String(b.magnetUri).toLowerCase().includes(b.infoHash.toLowerCase())) {
+    return res.status(400).json({ error: 'magnetUri must reference infoHash' });
+  }
   try {
     const result = musicLibrary.addItem({
       type: 'album',
@@ -1257,18 +1282,24 @@ app.delete('/api/music-library/:id', rateLimit, (req, res) => {
   res.json({ ok: true });
 });
 
-// POST /api/music-library/:id/pause | /resume | /retry
+// POST /api/music-library/:id/pause | /resume | /retry — match the
+// movie-library counterparts which 4xx when the item / state transition
+// is invalid. The earlier shape always returned 200 even on a missing id,
+// silently swallowing UI bugs.
 app.post('/api/music-library/:id/pause', rateLimit, (req, res) => {
   const ok = musicLibrary.pauseItem(req.params.id);
-  res.json({ ok });
+  if (!ok) return res.status(400).json({ error: 'Item not found or cannot be paused' });
+  res.json({ ok: true });
 });
 app.post('/api/music-library/:id/resume', rateLimit, (req, res) => {
   const ok = musicLibrary.resumeItem(req.params.id);
-  res.json({ ok });
+  if (!ok) return res.status(400).json({ error: 'Item not found or cannot be resumed' });
+  res.json({ ok: true });
 });
 app.post('/api/music-library/:id/retry', rateLimit, (req, res) => {
   const ok = musicLibrary.retryItem(req.params.id);
-  res.json({ ok });
+  if (!ok) return res.status(400).json({ error: 'Item not found or cannot be retried' });
+  res.json({ ok: true });
 });
 
 // GET /api/music-library/:id/stream?track=N — stream a specific track file
@@ -1344,7 +1375,13 @@ app.get('/api/music/discover/genres', (req, res) => {
 
 app.get('/api/music/discover/genre/:genre', rateLimit, async (req, res) => {
   try {
-    const genre = decodeURIComponent(req.params.genre);
+    // Express already decoded req.params once. The previous extra
+    // decodeURIComponent on top let `%252F` collapse to `/`, which is
+    // a confused-deputy footgun even when MB doesn't care about the
+    // contents. Use the param verbatim and cap the length so the
+    // upstream query stays small.
+    const genre = String(req.params.genre || '').slice(0, 80);
+    if (!genre) return res.status(400).json({ error: 'Genre required' });
     const results = await mbSearchRelease(`tag:${genre}`, 20);
     const releases = results.map(r => ({
       mbid: r.id, title: r.title, artist: r['artist-credit']?.[0]?.name || 'Unknown',
@@ -1373,6 +1410,12 @@ app.get('/api/music/discover/new-releases', rateLimit, async (req, res) => {
 });
 
 app.get('/api/music/discover/similar/:artistMbid', rateLimit, async (req, res) => {
+  // Validate the MBID shape before hitting MusicBrainz. Arbitrary
+  // strings would otherwise burn the 1 req/s MB rate limit on
+  // guaranteed-404 lookups and pollute the MB query log.
+  if (!MBID_RE.test(req.params.artistMbid)) {
+    return res.status(400).json({ error: 'Invalid MBID' });
+  }
   try {
     const artist = await mbGetArtist(req.params.artistMbid);
     if (!artist) return res.status(404).json({ error: 'Artist not found' });
@@ -1775,9 +1818,26 @@ async function saveManualCategories() {
 }
 
 // POST /api/library/categorize - manually assign a genre or collection to a movie
+//
+// Without strict input validation, this endpoint becomes an unbounded
+// disk-write vector: the body fields are written verbatim into the
+// in-memory tables and flushed to manualCategories.json /
+// collection-cache.json on every call. An attacker could feed multi-MB
+// strings or arbitrary IMDb-id keys and silently grow the metadata
+// files until the disk fills.
 app.post('/api/library/categorize', rateLimit, (req, res) => {
-  const { imdbId, genre, collectionId, collectionName } = req.body || {};
-  if (!imdbId) return res.status(400).json({ error: 'imdbId is required' });
+  const body = req.body || {};
+  const imdbId = typeof body.imdbId === 'string' ? body.imdbId : '';
+  if (!/^tt\d{1,10}$/.test(imdbId)) {
+    return res.status(400).json({ error: 'imdbId must match tt\\d{1,10}' });
+  }
+  // Cap string fields to a length that's well above any realistic genre /
+  // collection label but small enough to keep the on-disk file bounded.
+  const MAX_FIELD = 200;
+  const clip = (v) => (typeof v === 'string' ? v.slice(0, MAX_FIELD).trim() : '');
+  const genre = clip(body.genre);
+  const collectionId = clip(body.collectionId);
+  const collectionName = clip(body.collectionName);
 
   if (genre) {
     manualCategories[imdbId] = { genre };
@@ -2291,11 +2351,18 @@ app.get('/api/streams/artist/:mbid', rateLimit, async (req, res) => {
 // GET /api/streams/season-pack/:imdbId?season=N&title=ShowName — search for season pack torrents
 app.get('/api/streams/season-pack/:imdbId', rateLimit, async (req, res) => {
   const { imdbId } = req.params;
+  // Same imdbId shape /api/streams/movie and /api/streams/series enforce —
+  // these two route variants used to pass the raw param straight through,
+  // letting any string disable provider caches and end up in upstream
+  // search queries.
+  if (!/^tt\d{1,10}$/.test(imdbId)) {
+    return res.status(400).json({ error: 'Invalid IMDB ID' });
+  }
   const season = req.query.season ? parseInt(req.query.season, 10) : undefined;
-  const title = req.query.title || '';
+  const title = (req.query.title || '').toString().slice(0, 200);
 
-  if (season === undefined || isNaN(season)) {
-    return res.status(400).json({ error: 'season query parameter is required' });
+  if (season === undefined || isNaN(season) || season < 0 || season > 999) {
+    return res.status(400).json({ error: 'season must be a non-negative integer' });
   }
 
   try {
@@ -2310,7 +2377,10 @@ app.get('/api/streams/season-pack/:imdbId', rateLimit, async (req, res) => {
 // GET /api/streams/complete/:imdbId?title=ShowName — search for complete series/movie torrents
 app.get('/api/streams/complete/:imdbId', rateLimit, async (req, res) => {
   const { imdbId } = req.params;
-  const title = req.query.title || '';
+  if (!/^tt\d{1,10}$/.test(imdbId)) {
+    return res.status(400).json({ error: 'Invalid IMDB ID' });
+  }
+  const title = (req.query.title || '').toString().slice(0, 200);
 
   try {
     const streams = await getCompleteStreams(title, imdbId);
@@ -2344,7 +2414,14 @@ app.post('/api/library/diagnose', rateLimit, express.json({ limit: '4kb' }), asy
   if (!/^magnet:\?/i.test(magnet)) {
     return res.status(400).json({ error: 'Missing or invalid magnet URI' });
   }
-  const durationMs = Number(req.body.durationMs) || 60000;
+  // Cap durationMs at 2 minutes — the only safe upper bound for a route
+  // that holds an engine slot. Unbounded values were accepted by the
+  // previous Number(...) || default fallback, which let a single caller
+  // pin a slot for ~10**14 ms (Number.MAX_SAFE).
+  const rawDuration = Number(req.body.durationMs);
+  const durationMs = Number.isFinite(rawDuration) && rawDuration > 0
+    ? Math.min(120000, Math.max(5000, Math.floor(rawDuration)))
+    : 60000;
   try {
     console.log(`[API] Running torrent diagnostic for ${magnet.slice(0, 60)}...`);
     const result = await library.diagnoseTorrent(magnet, { durationMs });
@@ -2360,7 +2437,12 @@ app.post('/api/library/diagnose', rateLimit, express.json({ limit: '4kb' }), asy
 // Spawns yt-dlp with -f bestaudio and streams the extracted audio bytes directly.
 app.get('/api/play/youtube/:videoId', rateLimit, (req, res) => {
   const { videoId } = req.params;
-  if (!/^[a-zA-Z0-9_-]{6,20}$/.test(videoId)) {
+  // YouTube video IDs are exactly 11 chars from the [A-Za-z0-9_-] alphabet.
+  // The old {6,20} range admitted shorter / longer strings — notably
+  // playlist tokens (e.g. "PLxxxxxxxxxxxxxxxxx", "RDxxxxxx...") which
+  // yt-dlp resolves as PLAYLISTS, then attempts to download EVERY video
+  // in them into the response.
+  if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) {
     return res.status(400).json({ error: 'Invalid videoId' });
   }
   const url = `https://www.youtube.com/watch?v=${videoId}`;
@@ -2371,6 +2453,8 @@ app.get('/api/play/youtube/:videoId', rateLimit, (req, res) => {
     '-o', '-',     // stdout
     '--no-warnings',
     '--no-part',
+    '--no-playlist',           // defense in depth — never expand to a playlist
+    '--max-downloads', '1',
     '--quiet',
     url,
   ]);
@@ -2665,19 +2749,25 @@ app.get('/api/diagnostics/system', async (req, res) => {
 // ─── Library API Routes ───────────────────────────────────────────────
 
 // GET /api/library — list all library items
+//
+// ETag is keyed on _libraryVersion only (no 2-second epoch). The version
+// counter is bumped on every mutation that the UI cares about, which is
+// exactly the freshness signal the conditional-GET path needs. The old
+// shape rolled the timestamp into the ETag, busting both the browser
+// cache and the in-process JSON-string cache every 2 seconds — even on
+// an idle library, the periodic poll re-serialized the whole payload
+// (~80 KB on big libraries) just to return identical bytes.
 app.get('/api/library', (req, res) => {
   try {
-    const epoch = Math.floor(Date.now() / 2000);
-    const etag = `"lib-${_libraryVersion}-${epoch}"`;
+    const etag = `"lib-${_libraryVersion}"`;
     if (req.headers['if-none-match'] === etag) {
       return res.status(304).end();
     }
-    const cacheKey = `${_libraryVersion}-${epoch}`;
-    if (_libraryCachedVersion !== cacheKey || !_libraryCachedJson) {
+    if (_libraryCachedVersion !== _libraryVersion || !_libraryCachedJson) {
       const items = library.getAll();
       const slots = library.getDownloadSlots();
       _libraryCachedJson = JSON.stringify({ items, slots });
-      _libraryCachedVersion = cacheKey;
+      _libraryCachedVersion = _libraryVersion;
     }
     res.set('ETag', etag);
     res.type('json').send(_libraryCachedJson);
@@ -3526,12 +3616,19 @@ app.post('/api/library/purge-failed', rateLimit, (req, res) => {
     }
 
     // Direct removal from the in-memory map. We deliberately DO NOT call
-    // library.removeItem() because that also stops downloads, reshuffles
-    // pack selection, and deletes files — none of which make sense here
-    // (the items are already dead, have no file, and aren't downloading).
-    // One _saveMetadata() at the end batches all deletions into a single
-    // atomic metadata write.
+    // library.removeItem() because that also reshuffles pack selection
+    // and deletes files — none of which make sense here (the items are
+    // already dead and have no file). One _saveMetadata() at the end
+    // batches all deletions into a single atomic metadata write.
+    //
+    // BUT: defense in depth — if an item ended up in 'failed' status
+    // via a path that didn't already call _stopDownload (e.g. a future
+    // refactor, or a retry that crashed mid-flight), the engine handle
+    // and progress timer can survive. Tear them down explicitly before
+    // deleting so we don't leak event-loop handles and listener slots.
     for (const item of toDelete) {
+      try { library._stopDownload(item.id); } catch { /* best-effort */ }
+      if (library._autoRetryState) library._autoRetryState.delete(item.id);
       library._items.delete(item.id);
     }
     library._saveMetadata();
@@ -5217,10 +5314,28 @@ app.get('/api/iptv/stream', rateLimit, async (req, res) => {
 
     // If m3u8 playlist, rewrite URLs to go through proxy
     if (streamUrl.endsWith('.m3u8') || ct.includes('mpegurl')) {
+      // Cap the playlist body — without this an upstream advertising
+      // `application/vnd.apple.mpegurl` could ship arbitrary bytes
+      // straight into a `body +=` accumulator. 5 MB is well above any
+      // realistic HLS playlist (typical: a few KB).
+      const MAX_M3U8_BYTES = 5 * 1024 * 1024;
       let body = '';
+      let m3u8Bytes = 0;
+      let m3u8Aborted = false;
       upstream.setEncoding('utf8');
-      upstream.on('data', chunk => body += chunk);
+      upstream.on('data', chunk => {
+        if (m3u8Aborted) return;
+        m3u8Bytes += Buffer.byteLength(chunk, 'utf8');
+        if (m3u8Bytes > MAX_M3U8_BYTES) {
+          m3u8Aborted = true;
+          upstream.destroy();
+          if (!res.headersSent) res.status(502).json({ error: 'Playlist too large' });
+          return;
+        }
+        body += chunk;
+      });
       upstream.on('end', () => {
+        if (m3u8Aborted) return;
         // Resolve relative URLs against the original stream URL
         const base = streamUrl.substring(0, streamUrl.lastIndexOf('/') + 1);
         const rewritten = body.replace(/^(?!#)(\S+)$/gm, (match) => {
@@ -5247,6 +5362,14 @@ app.get('/api/iptv/stream', rateLimit, async (req, res) => {
       });
       upstream.pipe(res);
     }
+  });
+  // If the downstream client disconnects mid-stream, abort the upstream
+  // request so we don't keep draining bytes the user already abandoned
+  // — important for the 500 MB binary cap path which would otherwise
+  // pin LAN egress until ContentLength is reached or the upstream
+  // closes on its own.
+  req.on('close', () => {
+    if (!proxyReq.destroyed) proxyReq.destroy();
   });
   proxyReq.on('error', (err) => {
     console.error('[IPTV] Stream proxy error:', err.message);
@@ -5430,6 +5553,23 @@ app.get('/api/cast/devices', rateLimit, async (req, res) => {
 // streamPath is constrained to known internal stream routes so the server
 // cannot be tricked into asking the TV to fetch arbitrary same-origin URLs.
 const _STREAM_PATH_RE = /^\/api\/(play|library|music-library)\/[A-Za-z0-9._/~-]+(\?[A-Za-z0-9._~%&=+-]*)?$/;
+// Allow-list of MIME types the cast device may be told to fetch. Without
+// it any caller could ask the TV to fetch with an arbitrary Content-Type
+// for fingerprinting; this keeps it bounded to the formats the cast
+// layer actually handles.
+const _CAST_MIME_ALLOWED = new Set([
+  'video/mp4', 'video/webm', 'video/x-matroska',
+  'application/vnd.apple.mpegurl', 'application/x-mpegURL',
+  'audio/mp4', 'audio/mpeg', 'audio/aac', 'audio/ogg', 'audio/flac',
+]);
+
+// Resolve a body-supplied { id, ... } device blob against discoveryCache.
+// Used by /play/stop/pause/status so all cast endpoints share the same
+// device-id allow-list. Returns the trusted record or null.
+function _resolveCastDevice(deviceId) {
+  if (typeof deviceId !== 'string' || !deviceId) return null;
+  return discoveryCache.devices.find(d => d && d.id === deviceId) || null;
+}
 
 app.post('/api/cast/play', rateLimit, async (req, res) => {
   const { device, streamPath, title, mimeType } = req.body;
@@ -5440,9 +5580,12 @@ app.post('/api/cast/play', rateLimit, async (req, res) => {
   if (typeof streamPath !== 'string' || !_STREAM_PATH_RE.test(streamPath)) {
     return res.status(400).json({ error: 'Invalid streamPath' });
   }
+  const resolvedMime = (typeof mimeType === 'string' && _CAST_MIME_ALLOWED.has(mimeType))
+    ? mimeType
+    : 'video/mp4';
 
   // Resolve the trusted device record by id; ignore any other body fields.
-  const trustedDevice = discoveryCache.devices.find(d => d && d.id === device.id);
+  const trustedDevice = _resolveCastDevice(device.id);
   if (!trustedDevice) {
     return res.status(404).json({
       error: 'Unknown device — run /api/cast/devices first',
@@ -5457,7 +5600,7 @@ app.post('/api/cast/play', rateLimit, async (req, res) => {
 
   try {
     console.log(`[Cast API] Casting to ${trustedDevice.friendlyName}: ${mediaUrl}`);
-    await castManager.castToDevice(trustedDevice, mediaUrl, title || 'Albatross', mimeType || 'video/mp4');
+    await castManager.castToDevice(trustedDevice, mediaUrl, title || 'Albatross', resolvedMime);
     res.json({ success: true, mediaUrl, device: trustedDevice.friendlyName });
   } catch (err) {
     console.error(`[Cast API] Cast failed: ${err.message}`);
@@ -5467,11 +5610,15 @@ app.post('/api/cast/play', rateLimit, async (req, res) => {
 
 // POST /api/cast/stop — stop casting on a device
 app.post('/api/cast/stop', rateLimit, async (req, res) => {
-  const { deviceId } = req.body;
-  if (!deviceId) return res.status(400).json({ error: 'Missing deviceId' });
-
+  // deviceId must reference a device we discovered ourselves — same
+  // allow-list /api/cast/play uses. Without it the cast layer would
+  // accept arbitrary identifiers and could be used as a fingerprinting
+  // / cache-probing primitive.
+  if (!_resolveCastDevice(req.body && req.body.deviceId)) {
+    return res.status(404).json({ error: 'Unknown deviceId' });
+  }
   try {
-    await castManager.stopDevice(deviceId);
+    await castManager.stopDevice(req.body.deviceId);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -5480,11 +5627,11 @@ app.post('/api/cast/stop', rateLimit, async (req, res) => {
 
 // POST /api/cast/pause — toggle pause on a device
 app.post('/api/cast/pause', rateLimit, async (req, res) => {
-  const { deviceId } = req.body;
-  if (!deviceId) return res.status(400).json({ error: 'Missing deviceId' });
-
+  if (!_resolveCastDevice(req.body && req.body.deviceId)) {
+    return res.status(404).json({ error: 'Unknown deviceId' });
+  }
   try {
-    const status = await castManager.pauseDevice(deviceId);
+    const status = await castManager.pauseDevice(req.body.deviceId);
     res.json({ success: true, status });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -5493,6 +5640,9 @@ app.post('/api/cast/pause', rateLimit, async (req, res) => {
 
 // GET /api/cast/status/:deviceId — get playback status
 app.get('/api/cast/status/:deviceId', async (req, res) => {
+  if (!_resolveCastDevice(req.params.deviceId)) {
+    return res.status(404).json({ error: 'Unknown deviceId' });
+  }
   try {
     const status = await castManager.getDeviceStatus(req.params.deviceId);
     if (!status) return res.status(404).json({ error: 'No active session' });
@@ -5583,8 +5733,16 @@ app.get('/api/status', async (req, res) => {
   }
 });
 
-// SPA fallback
+// SPA fallback — serve index.html for client-side router paths. Don't
+// swallow unmatched /api/* GETs into the SPA shell; those should return
+// a JSON 404 so the client's error handling and monitoring see the real
+// failure. Without this guard a typo'd /api/library/typo returned a 200
+// HTML page with `<title>Albatross</title>` and the SPA tried to parse
+// it as JSON downstream.
 app.get('*', (req, res) => {
+  if (req.path.startsWith('/api/')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 

@@ -32,11 +32,24 @@ const SOAP_ENVELOPE = (action, body) => [
 ].join('');
 
 function soapAction(controlUrl, action, bodyXml) {
-  // Validate controlUrl to prevent SSRF via crafted control URLs
+  // Validate controlUrl to prevent SSRF via crafted control URLs. Node's
+  // URL parser keeps IPv6 hostnames in bracketed form ("[::1]") — strip
+  // the brackets before the equality checks so the loopback / link-local
+  // guards work for both http://[::1]/ and http://1.2.3.4/.
   try {
     const u = new URL(controlUrl);
-    if (u.hostname === 'localhost' || u.hostname.startsWith('127.') || u.hostname === '::1' || u.hostname.startsWith('169.254.')) {
-      throw new Error('SOAP action to loopback address blocked');
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+      throw new Error('non-http scheme');
+    }
+    let host = u.hostname;
+    if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
+    if (host === 'localhost'
+        || host.startsWith('127.')
+        || host === '::1'
+        || host.startsWith('169.254.')
+        || host.startsWith('::ffff:127.')
+        || host.startsWith('::ffff:169.254.')) {
+      throw new Error('SOAP action to loopback / link-local address blocked');
     }
   } catch(e) {
     throw new Error(`Invalid control URL: ${e.message}`);

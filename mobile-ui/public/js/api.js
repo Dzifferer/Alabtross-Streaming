@@ -105,19 +105,25 @@ class StremioAPI {
     const cached = this._manifestCache.get(addonUrl);
     const ts = this._cacheTimestamps.get(addonUrl) || 0;
 
-    // Cache for 5 minutes
     if (cached && (now - ts) < 300000) {
+      if (cached._failed) throw new Error(cached._failed);
       return cached;
     }
 
-    const resp = await fetch('/api/addon-proxy?url=' + encodeURIComponent(addonUrl + '/manifest.json'), {
-      signal: AbortSignal.timeout(8000),
-    });
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    const data = await resp.json();
-    this._manifestCache.set(addonUrl, data);
-    this._cacheTimestamps.set(addonUrl, now);
-    return data;
+    try {
+      const resp = await fetch('/api/addon-proxy?url=' + encodeURIComponent(addonUrl + '/manifest.json'), {
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const data = await resp.json();
+      this._manifestCache.set(addonUrl, data);
+      this._cacheTimestamps.set(addonUrl, now);
+      return data;
+    } catch (err) {
+      this._manifestCache.set(addonUrl, { _failed: err.message });
+      this._cacheTimestamps.set(addonUrl, now);
+      throw err;
+    }
   }
 
   // ─── Catalogs ────────────────────────────────────

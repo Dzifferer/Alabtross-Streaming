@@ -34,6 +34,11 @@
     vpnVerified: false,
     activeFilter: '',     // currently selected filter chip value
     playerStarted: false, // true after first 'playing' event, prevents overlay clobber during initial load
+    // ETag of the last /api/library response we successfully consumed. Sent
+    // back as If-None-Match on each poll so an idle library returns 304 +
+    // empty body instead of the ~80KB JSON payload. Captured fresh on every
+    // 200 response so a mid-poll mutation re-arms the cache.
+    lastLibraryEtag: null,
   };
 
   // ─── Auto-play Next Settings ─────────────────────
@@ -3446,8 +3451,30 @@
     `;
 
     try {
+      // Conditional-GET the library on initial load too. If the SPA bounced
+      // back from another view and the library hasn't changed since the
+      // previous visit, the server returns 304 and we reuse no payload —
+      // but loadLibrary needs a body, so on 304 we re-fetch without the
+      // If-None-Match header. The poll path below avoids that fallback.
+      const headers = state.lastLibraryEtag ? { 'If-None-Match': state.lastLibraryEtag } : {};
       const [libResp, reviewResp] = await Promise.all([
-        fetch('/api/library').then(r => { if (!r.ok) throw new Error(`Library API ${r.status}`); return r.json(); }).catch(e => { console.error('[Library] fetch failed:', e); return { items: [] }; }),
+        fetch('/api/library', { headers }).then(async r => {
+          if (r.status === 304) {
+            // Server says nothing changed; re-fetch unconditionally so we
+            // get the body for the initial render. This is rare — only
+            // happens when loadLibrary is called twice without any
+            // intervening library mutation.
+            const r2 = await fetch('/api/library');
+            if (!r2.ok) throw new Error(`Library API ${r2.status}`);
+            const etag2 = r2.headers.get('etag');
+            if (etag2) state.lastLibraryEtag = etag2;
+            return r2.json();
+          }
+          if (!r.ok) throw new Error(`Library API ${r.status}`);
+          const etag = r.headers.get('etag');
+          if (etag) state.lastLibraryEtag = etag;
+          return r.json();
+        }).catch(e => { console.error('[Library] fetch failed:', e); return { items: [] }; }),
         fetch('/api/library/review-queue').then(r => r.ok ? r.json() : { items: [] }).catch(() => ({ items: [] })),
       ]);
 
@@ -5333,7 +5360,22 @@
         return;
       }
       try {
-        const resp = await fetch('/api/library');
+        // Conditional GET — server keys the ETag on a monotonic library
+        // version counter, so an idle library responds 304 + 0 bytes
+        // instead of the ~80KB JSON payload. We skip the render path
+        // entirely on 304 since nothing has changed since the last tick.
+        const headers = state.lastLibraryEtag ? { 'If-None-Match': state.lastLibraryEtag } : {};
+        const resp = await fetch('/api/library', { headers });
+        if (resp.status === 304) {
+          // No mutation since last poll — nothing to do. Continue polling
+          // so we pick up the next change.
+          return;
+        }
+        // Capture the new ETag from EVERY 200 response, not just the
+        // first one — otherwise a single mutation arms us forever to
+        // the older ETag and the 304 path stops firing.
+        const etag = resp.headers.get('etag');
+        if (etag) state.lastLibraryEtag = etag;
         const data = await resp.json();
         const items = data.items || [];
 

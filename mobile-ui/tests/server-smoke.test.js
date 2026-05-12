@@ -56,6 +56,23 @@ test('GET /api/library second call with If-None-Match echoing the ETag → 304',
   assert.equal(body, '');
 });
 
+test('GET /api/library — ETag stays stable across idle polls', async (t) => {
+  // The browser poll captures a new ETag from every 200 response and sends
+  // it on the next If-None-Match. An idle library must keep returning 304
+  // for the same ETag indefinitely — that's the bandwidth-saving guarantee.
+  const srv = await boot(t);
+  const r1 = await fetch(`${srv.url}/api/library`);
+  const etag = r1.headers.get('etag');
+  assert.ok(etag);
+  // Three consecutive conditional GETs against an idle server.
+  for (let i = 0; i < 3; i++) {
+    const r = await fetch(`${srv.url}/api/library`, { headers: { 'If-None-Match': etag } });
+    assert.equal(r.status, 304, `cycle ${i}: idle library should 304`);
+    const body = await r.text();
+    assert.equal(body, '', `cycle ${i}: 304 should have empty body`);
+  }
+});
+
 test('GET /api/nonexistent → 404 JSON (not HTML)', async (t) => {
   const srv = await boot(t);
   const r = await fetch(`${srv.url}/api/this-does-not-exist`);

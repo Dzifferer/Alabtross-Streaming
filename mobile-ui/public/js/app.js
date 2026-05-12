@@ -5494,6 +5494,38 @@
       } catch (e) { showToast('Repair failed: ' + e.message); }
     });
 
+    // ─── Storage Info ─────────────────────────────────
+    (async () => {
+      try {
+        const r = await fetch('/api/status');
+        if (!r.ok) return;
+        const data = await r.json();
+        const disk = data.disk;
+        if (disk && disk.totalGB) {
+          const usedGB = disk.totalGB - disk.freeGB;
+          const pct = Math.round((usedGB / disk.totalGB) * 100);
+          const fill = document.getElementById('storage-bar-fill');
+          const label = document.getElementById('storage-label');
+          if (fill) {
+            fill.style.width = pct + '%';
+            if (pct > 90) fill.classList.add('storage-critical');
+            else if (pct > 75) fill.classList.add('storage-warning');
+          }
+          if (label) label.textContent = `${usedGB.toFixed(1)} GB used of ${disk.totalGB.toFixed(1)} GB (${pct}%)`;
+        }
+      } catch {}
+    })();
+
+    // ─── Clear Cache ────────────────────────────────
+    $('#danger-clear-cache')?.addEventListener('click', async () => {
+      if (!confirm('Delete all cached torrent data? This frees disk space but you will need to re-download if you want to stream cached content again.')) return;
+      try {
+        const r = await fetch('/api/cache', { method: 'DELETE' });
+        const data = await r.json();
+        showToast(`Cache cleared: ${data.freedMB ? data.freedMB.toFixed(0) + ' MB freed' : 'done'}`);
+      } catch (e) { showToast('Clear cache failed: ' + e.message); }
+    });
+
     // ─── Max Concurrent Streams ─────────────────────
     const maxStreamsInput = $('#setting-max-streams');
     const maxStreamsSave = $('#setting-max-streams-save');

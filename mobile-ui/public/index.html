@@ -92,21 +92,36 @@
         <div class="settings-panel">
           <h2>Settings</h2>
 
-          <!-- ═══ Downloads (always visible at top) ═══ -->
-          <div class="setting-group">
-            <label>Downloads</label>
-            <div id="system-status-bar" class="system-status-bar"></div>
-            <div id="downloads-panel">
-              <div id="downloads-loading" class="downloads-empty">
-                <span class="setting-hint">Loading downloads...</span>
+          <!-- ═══ Downloads (collapsible) ═══ -->
+          <div class="settings-section" id="settings-downloads">
+            <div class="settings-section-header settings-section-toggle">
+              Downloads
+              <svg class="settings-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+            </div>
+            <div class="settings-section-body">
+              <div class="setting-group">
+                <div id="system-status-bar" class="system-status-bar"></div>
+                <div id="downloads-panel">
+                  <div id="downloads-loading" class="downloads-empty">
+                    <span class="setting-hint">Loading downloads...</span>
+                  </div>
+                </div>
               </div>
             </div>
-            <span class="setting-hint" style="margin-top:8px">Active downloads, queued items, and completed files</span>
           </div>
 
           <!-- ═══ General ═══ -->
           <div class="settings-section">
             <div class="settings-section-header">General</div>
+
+            <div class="setting-group">
+              <label>Storage</label>
+              <div id="storage-info" class="storage-bar-wrap">
+                <div class="storage-bar"><div id="storage-bar-fill" class="storage-bar-fill"></div></div>
+                <span id="storage-label" class="setting-hint">Checking storage...</span>
+              </div>
+            </div>
+
             <div class="setting-group">
               <label>Auto-play Next</label>
               <div class="setting-row">
@@ -117,9 +132,8 @@
               </div>
               <div class="setting-row">
                 <input type="number" id="setting-autoplay-countdown" min="0" max="60" value="8" style="width:80px">
-                <span class="setting-hint">Countdown seconds before the next item starts</span>
+                <span class="setting-hint">Countdown seconds</span>
               </div>
-              <span class="setting-hint">Series use season/episode order; movies use the TMDB collection sorted by release year.</span>
             </div>
           </div>
 
@@ -128,48 +142,7 @@
             <div class="settings-section-header">Content Sources</div>
 
             <div class="setting-group">
-              <label>Stream Sources (Scrapers)</label>
-              <div class="source-list">
-                <div class="source-item">
-                  <div class="source-icon">P</div>
-                  <div class="source-info">
-                    <div class="source-name">The Pirate Bay</div>
-                    <div class="source-desc">Primary — fast JSON API, movies &amp; series</div>
-                  </div>
-                  <span class="source-badge active">Active</span>
-                </div>
-                <div class="source-item">
-                  <div class="source-icon">Y</div>
-                  <div class="source-info">
-                    <div class="source-name">YTS</div>
-                    <div class="source-desc">Movies — high quality, small files</div>
-                  </div>
-                  <span class="source-badge active">Active</span>
-                </div>
-                <div class="source-item">
-                  <div class="source-icon">E</div>
-                  <div class="source-info">
-                    <div class="source-name">EZTV</div>
-                    <div class="source-desc">TV series — episode-level results</div>
-                  </div>
-                  <span class="source-badge active">Active</span>
-                </div>
-                <div class="source-item">
-                  <div class="source-icon">1</div>
-                  <div class="source-info">
-                    <div class="source-name">1337x</div>
-                    <div class="source-desc">General fallback — movies &amp; series</div>
-                  </div>
-                  <span class="source-badge active">Active</span>
-                </div>
-              </div>
-              <div id="source-stats" class="source-stats"></div>
-              <span class="setting-hint">Streams are fetched directly from torrent sources</span>
-            </div>
-
-            <div class="setting-group">
               <label>Stremio Addons</label>
-              <span class="setting-hint" style="margin-bottom:8px;display:block">Addon streams are shown alongside scraped results</span>
               <div id="addon-list" class="addon-list">
                 <p class="setting-hint">No addons configured</p>
               </div>
@@ -177,45 +150,43 @@
                 <input type="text" id="addon-url-input" placeholder="Addon manifest URL...">
                 <button id="addon-add-btn" class="btn-sm">Add</button>
               </div>
+              <div class="setting-row" style="margin-top:8px;gap:8px">
+                <button id="addon-add-cinemeta" class="btn-sm">+ Cinemeta</button>
+                <button id="addon-add-torrentio" class="btn-sm">+ Torrentio</button>
+              </div>
+              <span class="setting-hint">Cinemeta provides metadata &amp; search. Torrentio provides additional streams.</span>
             </div>
 
             <div class="setting-group">
-              <label>Quick Add</label>
-              <button id="addon-add-cinemeta" class="btn-block">Add Cinemeta (Metadata)</button>
-              <button id="addon-add-torrentio" class="btn-block">Add Torrentio (Streams)</button>
-              <span class="setting-hint">Cinemeta provides movie/series info, posters, and search. Required for browsing.</span>
-            </div>
-
-            <div class="setting-group">
-              <label>Live TV Sources</label>
+              <label>Live TV</label>
               <div id="livetv-source-list" class="source-list">
                 <p class="setting-hint">No live TV sources configured</p>
               </div>
-            </div>
-
-            <div class="setting-group">
-              <label>Add M3U Playlist</label>
-              <div class="setting-row">
+              <div class="setting-row" style="margin-top:8px">
                 <input type="text" id="setting-iptv-url" placeholder="M3U playlist URL...">
                 <button id="setting-iptv-save" class="btn-sm">Add</button>
               </div>
-              <span id="iptv-status" class="setting-hint">Paste an M3U/M3U8 playlist URL for live TV channels</span>
-            </div>
-
-            <div class="setting-group">
-              <label>Add Stremio TV Addon</label>
-              <div class="setting-row">
-                <input type="text" id="setting-livetv-addon-url" placeholder="Addon URL (e.g. https://usatv.click)...">
+              <span id="iptv-status" class="setting-hint"></span>
+              <div class="setting-row" style="margin-top:6px">
+                <input type="text" id="setting-livetv-addon-url" placeholder="Stremio TV addon URL...">
                 <button id="setting-livetv-addon-add" class="btn-sm">Add</button>
               </div>
-              <span id="livetv-addon-status" class="setting-hint">Add a Stremio addon that provides live TV channels</span>
+              <span id="livetv-addon-status" class="setting-hint"></span>
+              <div class="setting-row" style="margin-top:8px;gap:8px">
+                <button class="btn-sm livetv-quick-add" data-url="https://7a82163c306e-livetv.baby-beamup.club" data-name="Live TV">+ Live TV</button>
+                <button class="btn-sm livetv-quick-add" data-url="https://848b3516657c-usatv.baby-beamup.club" data-name="USA TV">+ USA TV</button>
+              </div>
             </div>
 
             <div class="setting-group">
-              <label>Quick Add TV Sources</label>
-              <button class="btn-block livetv-quick-add" data-url="https://7a82163c306e-livetv.baby-beamup.club" data-name="Live TV">Add Live TV (International)</button>
-              <button class="btn-block livetv-quick-add" data-url="https://848b3516657c-usatv.baby-beamup.club" data-name="USA TV">Add USA TV (180+ US Channels)</button>
-              <span class="setting-hint">Popular Stremio addons for live TV streams — sports, news, entertainment</span>
+              <label>Built-in Scrapers</label>
+              <div class="source-list source-list--compact">
+                <div class="source-item"><div class="source-icon">P</div><div class="source-info"><div class="source-name">The Pirate Bay</div></div><span class="source-badge active">Active</span></div>
+                <div class="source-item"><div class="source-icon">Y</div><div class="source-info"><div class="source-name">YTS</div></div><span class="source-badge active">Active</span></div>
+                <div class="source-item"><div class="source-icon">E</div><div class="source-info"><div class="source-name">EZTV</div></div><span class="source-badge active">Active</span></div>
+                <div class="source-item"><div class="source-icon">1</div><div class="source-info"><div class="source-name">1337x</div></div><span class="source-badge active">Active</span></div>
+              </div>
+              <div id="source-stats" class="source-stats"></div>
             </div>
           </div>
 
@@ -342,12 +313,16 @@
                 <span class="setting-hint">Re-fetch TMDB metadata for all library items. Overwrites existing metadata.</span>
                 <button id="danger-repair-metadata" class="btn-block btn-danger-outline" style="margin-top:8px">Repair Metadata...</button>
               </div>
+              <div class="setting-group">
+                <label>Clear Torrent Cache</label>
+                <span class="setting-hint">Delete cached torrent data for completed downloads. Frees disk space but removes seeding ability.</span>
+                <button id="danger-clear-cache" class="btn-block btn-danger-outline" style="margin-top:8px">Clear Cache...</button>
+              </div>
             </div>
           </div>
 
-          <div class="setting-group">
-            <label>About</label>
-            <p class="setting-hint">Albatross Mobile v1.1 — A lightweight mobile interface for your streaming server running on Jetson Orin Nano.</p>
+          <div class="setting-group" style="opacity:0.5;text-align:center;padding:16px 0 8px">
+            <p class="setting-hint">Albatross v1.1 — Jetson Orin Nano</p>
           </div>
         </div>
       </div>

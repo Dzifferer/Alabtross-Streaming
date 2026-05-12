@@ -369,6 +369,13 @@ function handleTranscode(req, res) {
       console.log(`${tag} input exceeded ${(MAX_INPUT_SIZE / 1e9).toFixed(1)} GB cap; aborted`);
     }
   });
+  req.on('error', (err) => {
+    aborted = true;
+    try { ws.destroy(); } catch {}
+    if (ff) { try { ff.kill('SIGTERM'); } catch {} }
+    releaseSlot();
+    cleanupJob(job);
+  });
   req.pipe(ws);
 
   req.on('close', () => {
@@ -397,15 +404,22 @@ function handleTranscode(req, res) {
 
     // If the Orin didn't send a codec hint, probe locally. Costs ~50ms.
     let codec = sourceCodec;
-    if (!codec) {
-      codec = probeVideoCodec(job.inputPath);
-      console.log(`${tag} probed codec=${codec || 'unknown'}`);
+    try {
+      if (!codec) {
+        codec = probeVideoCodec(job.inputPath);
+        console.log(`${tag} probed codec=${codec || 'unknown'}`);
+      }
+
+      const args = buildFfmpegArgs(job.inputPath, job.outputPath, codec, audioCopyHint);
+      console.log(`${tag} ffmpeg ${args.join(' ')}`);
+
+      ff = spawn(FFMPEG, args);
+    } catch (err) {
+      releaseSlot();
+      cleanupJob(job);
+      if (!res.headersSent) jsonResponse(res, 500, { error: `transcode setup failed: ${err.message}` });
+      return;
     }
-
-    const args = buildFfmpegArgs(job.inputPath, job.outputPath, codec, audioCopyHint);
-    console.log(`${tag} ffmpeg ${args.join(' ')}`);
-
-    ff = spawn(FFMPEG, args);
 
     let stderrBuf = '';
     ff.stderr.on('data', (d) => {

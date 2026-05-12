@@ -228,8 +228,8 @@ app.use('/api', (req, res, next) => {
   if (!origin) return next();
   const host = req.headers['host'] || '';
   if (origin === `http://${host}` || origin === `https://${host}`
-      || origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1')
-      || origin.startsWith('https://localhost') || origin.startsWith('https://127.0.0.1')) {
+      || /^https?:\/\/localhost(:\d+)?$/.test(origin)
+      || /^https?:\/\/127\.0\.0\.1(:\d+)?$/.test(origin)) {
     return next();
   }
   return res.status(403).json({ error: 'Forbidden: cross-origin request' });
@@ -4605,70 +4605,74 @@ function parseClientCaps(rawCaps) {
 // parameter lets the server reason about THIS client's decoder — a file
 // that's "direct play" on Safari may need transcoding on Linux Firefox.
 app.get('/api/library/:id/probe', async (req, res) => {
-  const item = library.getItem(req.params.id);
-  if (!item) return res.status(404).json({ error: 'Item not found' });
-  if (item.status !== 'complete' && item.status !== 'converting') {
-    return res.status(400).json({ error: 'Download not complete' });
+  try {
+    const item = library.getItem(req.params.id);
+    if (!item) return res.status(404).json({ error: 'Item not found' });
+    if (item.status !== 'complete' && item.status !== 'converting') {
+      return res.status(400).json({ error: 'Download not complete' });
+    }
+
+    const filePath = library.getFilePath(req.params.id);
+    if (!filePath) return res.status(404).json({ error: 'File not found' });
+
+    const probe = await library._probeFile(filePath);
+    const caps = parseClientCaps(req.query.caps);
+    const decision = library.classifyForClient(probe, caps);
+
+    // Log the probe outcome so we can diagnose failed playbacks from the
+    // server side. Include enough context to correlate with client reports:
+    // item name, full file path, decision action, and ffprobe reason if any.
+    if (decision.action === 'unplayable') {
+      let fileSize = '?';
+      try { fileSize = String(fs.statSync(filePath).size); } catch { /* ignore */ }
+      console.warn(
+        `[Library] Probe UNPLAYABLE: "${item.name}" ` +
+        `file=${filePath} size=${fileSize}B ` +
+        `reason=${decision.reason || '?'}`
+      );
+    } else {
+      console.log(
+        `[Library] Probe ${decision.action}: "${item.name}" ` +
+        `video=${decision.videoCodec || '?'} profile=${decision.videoProfile || '?'} ` +
+        `pix=${decision.pixFmt || '?'} audio=${decision.audioCodec || '?'} ` +
+        `ext=${decision.ext} caps=${req.query.caps || '(none)'} ` +
+        `${decision.reason ? 'reason=' + decision.reason : ''}`
+      );
+    }
+
+    // Suggest the exact path the client should request. Keeps the client
+    // logic dumb — it just follows whatever we say.
+    const idParam = encodeURIComponent(req.params.id);
+    const endpoints = {
+      direct:   `/api/library/${idParam}/stream`,
+      remux:    `/api/library/${idParam}/stream/remux`,
+      transcode: `/api/library/${idParam}/stream/transcode?caps=${encodeURIComponent(req.query.caps || '')}`,
+    };
+
+    // Expose background-conversion state so the client can show a
+    // "Converting X%" message instead of hammering live transcode while
+    // the permanent MP4 is being produced.
+    const convState = library.getConversionState(req.params.id);
+
+    res.json({
+      action: decision.action,
+      reason: decision.reason,
+      endpoint: endpoints[decision.action] || null,
+      container: decision.container,
+      ext: decision.ext,
+      videoCodec: decision.videoCodec,
+      videoProfile: decision.videoProfile,
+      pixFmt: decision.pixFmt,
+      audioCodec: decision.audioCodec,
+      duration: decision.duration,
+      conversion: convState,
+      // Legacy flag kept so older clients still get a sensible answer while
+      // rolling out. TRUE only for the 'direct' action.
+      directPlay: decision.action === 'direct',
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-
-  const filePath = library.getFilePath(req.params.id);
-  if (!filePath) return res.status(404).json({ error: 'File not found' });
-
-  const probe = await library._probeFile(filePath);
-  const caps = parseClientCaps(req.query.caps);
-  const decision = library.classifyForClient(probe, caps);
-
-  // Log the probe outcome so we can diagnose failed playbacks from the
-  // server side. Include enough context to correlate with client reports:
-  // item name, full file path, decision action, and ffprobe reason if any.
-  if (decision.action === 'unplayable') {
-    let fileSize = '?';
-    try { fileSize = String(fs.statSync(filePath).size); } catch { /* ignore */ }
-    console.warn(
-      `[Library] Probe UNPLAYABLE: "${item.name}" ` +
-      `file=${filePath} size=${fileSize}B ` +
-      `reason=${decision.reason || '?'}`
-    );
-  } else {
-    console.log(
-      `[Library] Probe ${decision.action}: "${item.name}" ` +
-      `video=${decision.videoCodec || '?'} profile=${decision.videoProfile || '?'} ` +
-      `pix=${decision.pixFmt || '?'} audio=${decision.audioCodec || '?'} ` +
-      `ext=${decision.ext} caps=${req.query.caps || '(none)'} ` +
-      `${decision.reason ? 'reason=' + decision.reason : ''}`
-    );
-  }
-
-  // Suggest the exact path the client should request. Keeps the client
-  // logic dumb — it just follows whatever we say.
-  const idParam = encodeURIComponent(req.params.id);
-  const endpoints = {
-    direct:   `/api/library/${idParam}/stream`,
-    remux:    `/api/library/${idParam}/stream/remux`,
-    transcode: `/api/library/${idParam}/stream/transcode?caps=${encodeURIComponent(req.query.caps || '')}`,
-  };
-
-  // Expose background-conversion state so the client can show a
-  // "Converting X%" message instead of hammering live transcode while
-  // the permanent MP4 is being produced.
-  const convState = library.getConversionState(req.params.id);
-
-  res.json({
-    action: decision.action,
-    reason: decision.reason,
-    endpoint: endpoints[decision.action] || null,
-    container: decision.container,
-    ext: decision.ext,
-    videoCodec: decision.videoCodec,
-    videoProfile: decision.videoProfile,
-    pixFmt: decision.pixFmt,
-    audioCodec: decision.audioCodec,
-    duration: decision.duration,
-    conversion: convState,
-    // Legacy flag kept so older clients still get a sensible answer while
-    // rolling out. TRUE only for the 'direct' action.
-    directPlay: decision.action === 'direct',
-  });
 });
 
 // ─── Stremio Addon Proxy ──────────────────────────────────────────────
@@ -5253,9 +5257,13 @@ app.post('/api/cast/pause', rateLimit, async (req, res) => {
 
 // GET /api/cast/status/:deviceId — get playback status
 app.get('/api/cast/status/:deviceId', async (req, res) => {
-  const status = await castManager.getDeviceStatus(req.params.deviceId);
-  if (!status) return res.status(404).json({ error: 'No active session' });
-  res.json(status);
+  try {
+    const status = await castManager.getDeviceStatus(req.params.deviceId);
+    if (!status) return res.status(404).json({ error: 'No active session' });
+    res.json(status);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // GET /api/cast/sessions — list all active cast sessions

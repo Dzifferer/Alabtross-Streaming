@@ -493,6 +493,8 @@
       clearPlayerControlsTimer();
       exitPlayerFullscreen();
       if (_playStreamCleanup) { _playStreamCleanup(); _playStreamCleanup = null; }
+      const nextBtn = document.getElementById('next-episode-btn');
+      if (nextBtn) nextBtn.classList.add('hidden');
     }
   }
 
@@ -2479,6 +2481,34 @@
   // Clean up stale video event listeners from previous playStream calls
   let _playStreamCleanup = null;
 
+  function updateNextEpisodeButton() {
+    const btn = document.getElementById('next-episode-btn');
+    if (!btn) return;
+    if (state.currentType !== 'series' || !state.currentMeta || !state.currentSeasonEp) {
+      btn.classList.add('hidden');
+      return;
+    }
+    const next = findNextEpisode(state.currentMeta, state.currentSeasonEp);
+    if (!next) {
+      btn.classList.add('hidden');
+      return;
+    }
+    const label = document.getElementById('next-episode-label');
+    if (label) label.textContent = `S${next.season}E${next.episode}`;
+    btn.classList.remove('hidden');
+    btn.onclick = () => {
+      clearUpNextOverlay();
+      const showId = state.currentMeta.imdb_id || state.currentMeta.id;
+      autoplayLoadAndPlay({
+        type: 'series',
+        id: showId,
+        seasonEpisode: { season: next.season, episode: next.episode, absoluteEpisode: next.absoluteEpisode, genres: state.currentMeta.genres },
+        nextMeta: state.currentMeta,
+        fallbackTitle: `${state.currentMeta.name || ''} — S${next.season}E${next.episode}`,
+      });
+    };
+  }
+
   async function playStream(stream) {
     if (_playStreamCleanup) { _playStreamCleanup(); _playStreamCleanup = null; }
     stopResumeTracker(true); // save any in-progress position before switching
@@ -2566,6 +2596,7 @@
       if (resumeKey) applyResumeSeek(resumeKey);
       await dom.videoPlayer.play();
       openCurtains();
+      updateNextEpisodeButton();
 
       if (resumeKey) {
         _resumeTrackerDetach = attachResumeTracker(resumeKey, {
@@ -2654,6 +2685,29 @@
       dom.videoPlayer.addEventListener('ended', onEnded);
       dom.videoPlayer.addEventListener('timeupdate', onTimeUpdate);
       dom.videoPlayer.addEventListener('pause', onPause);
+
+      // Fallback for streams where duration is unknown (NaN/Infinity):
+      // If no timeupdate fires for 5s while the video is paused and we've
+      // played at least 60s, treat it as end-of-playback. This catches
+      // torrent streams that stall at the end without a clean 'ended' event.
+      let _lastTimeUpdateAt = Date.now();
+      let _totalPlayedSecs = 0;
+      const onTimeUpdateTrack = () => {
+        _lastTimeUpdateAt = Date.now();
+        _totalPlayedSecs = dom.videoPlayer.currentTime || 0;
+      };
+      dom.videoPlayer.addEventListener('timeupdate', onTimeUpdateTrack);
+      const _stallEndCheck = setInterval(() => {
+        if (_endFired) { clearInterval(_stallEndCheck); return; }
+        if (!dom.videoPlayer.paused) { _lastTimeUpdateAt = Date.now(); return; }
+        if (_totalPlayedSecs < 60) return;
+        const stallSecs = (Date.now() - _lastTimeUpdateAt) / 1000;
+        if (stallSecs >= 5) {
+          clearInterval(_stallEndCheck);
+          fireEnded('stall-timeout-fallback');
+        }
+      }, 1000);
+
       _playStreamCleanup = () => {
         dom.videoPlayer.removeEventListener('waiting', onStalled);
         dom.videoPlayer.removeEventListener('stalled', onStalled);
@@ -2661,6 +2715,8 @@
         dom.videoPlayer.removeEventListener('ended', onEnded);
         dom.videoPlayer.removeEventListener('timeupdate', onTimeUpdate);
         dom.videoPlayer.removeEventListener('pause', onPause);
+        dom.videoPlayer.removeEventListener('timeupdate', onTimeUpdateTrack);
+        clearInterval(_stallEndCheck);
         if (_nearEndTimer) { clearTimeout(_nearEndTimer); _nearEndTimer = null; }
       };
     } catch (e) {

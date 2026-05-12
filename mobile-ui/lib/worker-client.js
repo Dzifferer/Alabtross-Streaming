@@ -258,9 +258,15 @@ class WorkerClient {
         ws = fs.createWriteStream(outputPath);
         ws.on('error', (err) => fail(new Error(`output write failed: ${err.message}`)));
 
+        const maxOutput = inputStat.size * 3;
         res.on('data', (chunk) => {
           bytesDown += chunk.length;
           lastProgressAt = Date.now();
+          if (bytesDown > maxOutput) {
+            res.destroy();
+            fail(new Error('Worker output exceeds size cap'));
+            return;
+          }
           if (opts.onProgress) {
             try { opts.onProgress({ phase, bytesUp, bytesDown, totalUp: inputStat.size }); }
             catch {}

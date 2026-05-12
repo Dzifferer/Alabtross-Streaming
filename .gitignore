@@ -2,3 +2,4 @@ node_modules/
 .torrent-cache/
 library/
 .env
+coverage/

@@ -2702,11 +2702,11 @@
         if (!dom.videoPlayer.paused) { _lastTimeUpdateAt = Date.now(); return; }
         if (_totalPlayedSecs < 60) return;
         const stallSecs = (Date.now() - _lastTimeUpdateAt) / 1000;
-        if (stallSecs >= 5) {
+        if (stallSecs >= 6) {
           clearInterval(_stallEndCheck);
           fireEnded('stall-timeout-fallback');
         }
-      }, 1000);
+      }, 3000);
 
       _playStreamCleanup = () => {
         dom.videoPlayer.removeEventListener('waiting', onStalled);

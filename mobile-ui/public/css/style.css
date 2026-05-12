@@ -240,6 +240,10 @@ body::before {
   body::before { animation: none; }
 }
 
+@media (max-width: 768px) {
+  body::before { animation: none; }
+}
+
 @keyframes ambientGlow {
   0%, 100% { background-position: 0% 50%; }
   50% { background-position: 100% 50%; }
@@ -772,13 +776,19 @@ body::before {
   width: 130px;
 }
 
+.skeleton-poster,
+.skeleton-title,
+.skeleton-year,
+.skeleton-channel {
+  background: linear-gradient(90deg, var(--bg-card, #1a1a2e) 25%, var(--bg-elevated, #252540) 50%, var(--bg-card, #1a1a2e) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
 .skeleton-poster {
   width: 130px;
   height: 195px;
   border-radius: var(--radius-sm, 8px);
-  background: linear-gradient(90deg, var(--bg-card, #1a1a2e) 25%, var(--bg-elevated, #252540) 50%, var(--bg-card, #1a1a2e) 75%);
-  background-size: 200% 100%;
-  animation: shimmer 1.5s ease-in-out infinite;
 }
 
 .skeleton-title {
@@ -786,9 +796,6 @@ body::before {
   height: 13px;
   margin: 8px 2px 0;
   border-radius: 4px;
-  background: linear-gradient(90deg, var(--bg-card, #1a1a2e) 25%, var(--bg-elevated, #252540) 50%, var(--bg-card, #1a1a2e) 75%);
-  background-size: 200% 100%;
-  animation: shimmer 1.5s ease-in-out infinite;
 }
 
 .skeleton-year {
@@ -796,9 +803,6 @@ body::before {
   height: 11px;
   margin: 4px 2px 0;
   border-radius: 4px;
-  background: linear-gradient(90deg, var(--bg-card, #1a1a2e) 25%, var(--bg-elevated, #252540) 50%, var(--bg-card, #1a1a2e) 75%);
-  background-size: 200% 100%;
-  animation: shimmer 1.5s ease-in-out infinite;
 }
 
 .skeleton-channel {
@@ -806,9 +810,6 @@ body::before {
   width: 150px;
   height: 90px;
   border-radius: var(--radius-sm, 8px);
-  background: linear-gradient(90deg, var(--bg-card, #1a1a2e) 25%, var(--bg-elevated, #252540) 50%, var(--bg-card, #1a1a2e) 75%);
-  background-size: 200% 100%;
-  animation: shimmer 1.5s ease-in-out infinite;
 }
 
 .card-info {

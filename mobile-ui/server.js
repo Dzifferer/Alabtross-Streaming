@@ -786,12 +786,11 @@ app.get('/api/search', rateLimit, async (req, res) => {
       }
     }
 
-    // Sort by relevance to query, then popularity as tiebreaker
-    results.sort((a, b) => {
-      const relDiff = relevanceScore(b.name, query) - relevanceScore(a.name, query);
-      if (relDiff !== 0) return relDiff;
-      return b.popularity - a.popularity;
-    });
+    // Pre-compute relevance scores once, then sort by relevance then popularity
+    for (const r of results) {
+      r._relevance = relevanceScore(r.name, query);
+    }
+    results.sort((a, b) => (b._relevance - a._relevance) || ((b.popularity || 0) - (a.popularity || 0)));
 
     // Fetch IMDB IDs for top results (concurrency-limited to avoid TMDB rate limits)
     const topResults = results.slice(0, 20);
@@ -811,14 +810,12 @@ app.get('/api/search', rateLimit, async (req, res) => {
       }));
     }
 
-    // Sort: IMDB availability first, then relevance, then popularity
+    // Sort: IMDB availability first, then relevance (pre-computed), then popularity
     topResults.sort((a, b) => {
       const aHas = a.imdb_id ? 1 : 0;
       const bHas = b.imdb_id ? 1 : 0;
       if (aHas !== bHas) return bHas - aHas;
-      const relDiff = relevanceScore(b.name, query) - relevanceScore(a.name, query);
-      if (relDiff !== 0) return relDiff;
-      return b.popularity - a.popularity;
+      return (b._relevance - a._relevance) || ((b.popularity || 0) - (a.popularity || 0));
     });
 
     res.json({ results: topResults });
@@ -4575,10 +4572,12 @@ app.get('/api/library/:id/stream/hls/:segment', async (req, res) => {
     await new Promise((resolve) => setTimeout(resolve, 150));
   }
 
-  if (session.ended && !fs.existsSync(segmentPath)) {
+  let segmentExists = false;
+  try { await fs.promises.access(segmentPath, fs.constants.F_OK); segmentExists = true; } catch {}
+  if (session.ended && !segmentExists) {
     return res.status(502).json({ error: 'HLS session ended before segment was produced', reason: session.stderrTail });
   }
-  if (!fs.existsSync(segmentPath)) {
+  if (!segmentExists) {
     return res.status(404).json({ error: 'Segment not available yet' });
   }
 

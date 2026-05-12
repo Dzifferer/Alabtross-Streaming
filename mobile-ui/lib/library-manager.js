@@ -5332,11 +5332,7 @@ class LibraryManager {
     const doWrite = async () => {
       try {
         // Rotate current -> backup before writing new version. Best-effort.
-        try {
-          if (fs.existsSync(this._metadataFile)) {
-            await fs.promises.copyFile(this._metadataFile, backupFile);
-          }
-        } catch { /* non-critical */ }
+        try { await fs.promises.copyFile(this._metadataFile, backupFile); } catch {}
 
         // Atomic + durable write: write to temp file, fsync, rename.
         // Without fsync a power loss between write and rename can leave

@@ -64,6 +64,14 @@ class MusicPlaylists {
     }
   }
 
+  destroy() {
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+      this._saveNow();
+    }
+  }
+
   list() {
     return this._playlists.map(p => ({ ...p, items: p.items ? p.items.slice() : [] }));
   }

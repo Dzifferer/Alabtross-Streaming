@@ -268,7 +268,7 @@
       emit();
     });
   });
-  audio.addEventListener('play', () => {
+  audio.addEventListener('playing', () => {
     state.paused = false;
     consecutiveErrors = 0;
     setMediaPlaybackState('playing');

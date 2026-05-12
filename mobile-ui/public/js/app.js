@@ -492,6 +492,7 @@
       dom.videoPlayer.load(); // release previous resource from memory
       clearPlayerControlsTimer();
       exitPlayerFullscreen();
+      if (_playStreamCleanup) { _playStreamCleanup(); _playStreamCleanup = null; }
     }
   }
 
@@ -1037,7 +1038,7 @@
 
     row.innerHTML = `
       <div class="catalog-row-header">
-        <h3 class="catalog-row-title">${displayName} ${state.currentType ? '' : '(' + typeLabel + ')'}</h3>
+        <h3 class="catalog-row-title">${escapeHTML(displayName)} ${state.currentType ? '' : '(' + typeLabel + ')'}</h3>
       </div>
       <div class="catalog-scroll">${items.slice(0, 20).map(item => cardHTML(item, catalog.type)).join('')}</div>
     `;
@@ -1074,7 +1075,7 @@
         </div>
         <div class="card-info">
           <div class="card-title">${title}</div>
-          <div class="card-year">${year}</div>
+          <div class="card-year">${escapeHTML(year)}</div>
         </div>
       </div>
     `;
@@ -1667,8 +1668,8 @@
       <div class="detail-body fade-in">
         <h2 class="detail-title">${escapeHTML(meta.name)}</h2>
         <div class="detail-meta">
-          ${year ? `<span class="detail-tag">${year}</span>` : ''}
-          ${rating ? `<span class="detail-tag rating">&#9733; ${rating}</span>` : ''}
+          ${year ? `<span class="detail-tag">${escapeHTML(year)}</span>` : ''}
+          ${rating ? `<span class="detail-tag rating">&#9733; ${escapeHTML(String(rating))}</span>` : ''}
           ${genres.map(g => `<span class="detail-tag">${escapeHTML(g)}</span>`).join('')}
           <span class="detail-tag">${type === 'movie' ? 'Movie' : 'Series'}</span>
         </div>

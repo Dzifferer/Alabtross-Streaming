@@ -205,5 +205,35 @@
     addToPlaylist,
     reorderPlaylistItem,
     removePlaylistItem,
+    getDiscoverGenres,
+    getGenreReleases,
+    getNewReleases,
+    getSimilarArtists,
   };
+
+  async function getDiscoverGenres() {
+    return cachedFetch('/api/music/discover/genres');
+  }
+
+  async function getGenreReleases(genre) {
+    return cachedFetch(`/api/music/discover/genre/${encodeURIComponent(genre)}`);
+  }
+
+  async function getNewReleases() {
+    return cachedFetch('/api/music/discover/new-releases');
+  }
+
+  async function getSimilarArtists(artistMbid) {
+    return cachedFetch(`/api/music/discover/similar/${encodeURIComponent(artistMbid)}`);
+  }
+
+  async function cachedFetch(url) {
+    const cached = cacheGet(url);
+    if (cached) return cached;
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    cacheSet(url, data);
+    return data;
+  }
 })();

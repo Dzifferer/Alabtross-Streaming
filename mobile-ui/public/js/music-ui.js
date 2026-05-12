@@ -100,6 +100,125 @@
 
   function capitalize(s) { return (s || '').replace(/\b\w/g, c => c.toUpperCase()); }
 
+  // ─── Discover Tab ──────────────────────
+
+  async function renderDiscoverTab() {
+    const content = $('#music-content');
+    content.innerHTML = '<div class="loading-state"><div class="spinner"></div><p>Loading discovery...</p></div>';
+
+    try {
+      const [genresData, newData, library] = await Promise.all([
+        window.MusicAPI.getDiscoverGenres().catch(() => ({ genres: [] })),
+        window.MusicAPI.getNewReleases().catch(() => ({ releases: [] })),
+        window.MusicAPI.getLibrary().catch(() => []),
+      ]);
+
+      content.innerHTML = '';
+
+      // Genre chips
+      const genres = genresData.genres || [];
+      if (genres.length) {
+        const genreSection = el('div', { className: 'discover-section' });
+        genreSection.appendChild(el('h3', { className: 'discover-section-title', textContent: 'Browse by Genre' }));
+        const chipWrap = el('div', { className: 'discover-genre-chips' });
+        for (const g of genres) {
+          const chip = el('button', { className: 'discover-genre-chip', textContent: capitalize(g) });
+          chip.addEventListener('click', () => openGenreView(g));
+          chipWrap.appendChild(chip);
+        }
+        genreSection.appendChild(chipWrap);
+        content.appendChild(genreSection);
+      }
+
+      // New Releases shelf
+      const newReleases = newData.releases || [];
+      if (newReleases.length) {
+        content.appendChild(renderShelf('New Releases', newReleases.map(r => ({
+          id: r.mbid, type: 'discover', name: r.title, artist: r.artist, poster: '',
+        })), 'discover'));
+      }
+
+      // Similar Artists (based on library)
+      const artists = library
+        .filter(i => i.type === 'album' && i.artistMbid)
+        .reduce((map, i) => { map.set(i.artistMbid, i.artist); return map; }, new Map());
+      if (artists.size > 0) {
+        const randomArtist = [...artists.entries()][Math.floor(Math.random() * artists.size)];
+        try {
+          const simData = await window.MusicAPI.getSimilarArtists(randomArtist[0]);
+          const similar = simData.similar || [];
+          if (similar.length) {
+            const simSection = el('div', { className: 'discover-section' });
+            simSection.appendChild(el('h3', { className: 'discover-section-title',
+              textContent: `Because you listen to ${randomArtist[1]}` }));
+            const simList = el('div', { className: 'discover-similar-list' });
+            for (const s of similar) {
+              const card = el('button', { className: 'discover-artist-card' });
+              card.appendChild(el('div', { className: 'discover-artist-icon', textContent: (s.name || '?')[0].toUpperCase() }));
+              card.appendChild(el('span', { textContent: s.name }));
+              if (s.mbid) {
+                card.addEventListener('click', () => searchArtistReleases(s.name));
+              }
+              simList.appendChild(card);
+            }
+            simSection.appendChild(simList);
+            content.appendChild(simSection);
+          }
+        } catch {}
+      }
+
+      if (!content.children.length) {
+        content.innerHTML = '<div class="empty-state"><p>Add some music to your library to get personalized recommendations.</p></div>';
+      }
+    } catch (err) {
+      content.innerHTML = `<div class="empty-state"><p>Discovery unavailable: ${escapeHTML(err.message)}</p></div>`;
+    }
+  }
+
+  async function openGenreView(genre) {
+    const content = $('#music-content');
+    content.innerHTML = `<div class="loading-state"><div class="spinner"></div><p>Loading ${escapeHTML(capitalize(genre))}...</p></div>`;
+    try {
+      const data = await window.MusicAPI.getGenreReleases(genre);
+      const releases = data.releases || [];
+      content.innerHTML = '';
+      const header = el('div', { className: 'discover-section' });
+      const backBtn = el('button', { className: 'discover-back-btn', textContent: '← Back to Discover' });
+      backBtn.addEventListener('click', () => renderDiscoverTab());
+      header.appendChild(backBtn);
+      header.appendChild(el('h3', { className: 'discover-section-title', textContent: capitalize(genre) }));
+      content.appendChild(header);
+
+      if (!releases.length) {
+        content.appendChild(el('p', { className: 'setting-hint', textContent: 'No releases found for this genre.' }));
+        return;
+      }
+
+      const grid = el('div', { className: 'discover-grid' });
+      for (const r of releases) {
+        const card = el('div', { className: 'discover-release-card' });
+        card.appendChild(el('div', { className: 'discover-release-title', textContent: r.title }));
+        card.appendChild(el('div', { className: 'discover-release-artist', textContent: r.artist }));
+        if (r.year) card.appendChild(el('div', { className: 'discover-release-year', textContent: r.year }));
+        const searchBtn = el('button', { className: 'discover-search-btn', textContent: 'Search' });
+        searchBtn.addEventListener('click', () => {
+          const searchInput = $('#music-search-input');
+          if (searchInput) { searchInput.value = `${r.artist} ${r.title}`; searchInput.dispatchEvent(new Event('input')); }
+        });
+        card.appendChild(searchBtn);
+        grid.appendChild(card);
+      }
+      content.appendChild(grid);
+    } catch (err) {
+      content.innerHTML = `<div class="empty-state"><p>Failed to load genre: ${escapeHTML(err.message)}</p></div>`;
+    }
+  }
+
+  function searchArtistReleases(artistName) {
+    const searchInput = $('#music-search-input');
+    if (searchInput) { searchInput.value = artistName; searchInput.dispatchEvent(new Event('input')); }
+  }
+
   function renderShelf(title, items, source) {
     const row = el('div', { class: 'music-shelf' });
     row.appendChild(el('h3', { class: 'music-shelf__title' }, title));
@@ -642,6 +761,7 @@
     currentTab = tab;
     $$('.music-tab').forEach(b => b.classList.toggle('active', b.dataset.musicTab === tab));
     if (tab === 'home') renderMusicHome();
+    else if (tab === 'discover') renderDiscoverTab();
     else if (tab === 'playlists') renderPlaylistsTab();
     else if (tab === 'albums') renderAlbumsTab();
     else if (tab === 'artists') renderArtistsTab();

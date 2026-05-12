@@ -1301,6 +1301,67 @@ app.get('/api/music-library/:id/stream', async (req, res) => {
   }
 });
 
+// ─── Music Discovery ────────────────────────────────────────────────
+
+const MUSIC_GENRES = [
+  'rock', 'pop', 'hip hop', 'jazz', 'electronic', 'classical', 'r&b',
+  'country', 'metal', 'punk', 'blues', 'folk', 'soul', 'reggae',
+  'latin', 'indie', 'alternative', 'ambient', 'dance', 'world',
+];
+
+app.get('/api/music/discover/genres', (req, res) => {
+  res.json({ genres: MUSIC_GENRES });
+});
+
+app.get('/api/music/discover/genre/:genre', rateLimit, async (req, res) => {
+  try {
+    const genre = decodeURIComponent(req.params.genre);
+    const results = await mbSearchRelease(`tag:${genre}`, 20);
+    const releases = results.map(r => ({
+      mbid: r.id, title: r.title, artist: r['artist-credit']?.[0]?.name || 'Unknown',
+      year: r.date ? r.date.substring(0, 4) : '', score: r.score,
+    }));
+    res.json({ genre, releases });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/music/discover/new-releases', rateLimit, async (req, res) => {
+  try {
+    const now = new Date();
+    const monthAgo = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate());
+    const dateStr = monthAgo.toISOString().substring(0, 10);
+    const results = await mbSearchRelease(`date:[${dateStr} TO *] AND status:official`, 30);
+    const releases = results.map(r => ({
+      mbid: r.id, title: r.title, artist: r['artist-credit']?.[0]?.name || 'Unknown',
+      date: r.date || '', score: r.score,
+    }));
+    res.json({ releases });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/music/discover/similar/:artistMbid', rateLimit, async (req, res) => {
+  try {
+    const artist = await mbGetArtist(req.params.artistMbid);
+    if (!artist) return res.status(404).json({ error: 'Artist not found' });
+    const relations = (artist.relations || [])
+      .filter(r => r.type === 'similar' || r.type === 'influenced by' || r.type === 'member of band')
+      .map(r => r.artist || r.url?.resource)
+      .filter(Boolean)
+      .slice(0, 15);
+    const similar = relations.map(a => typeof a === 'object'
+      ? { mbid: a.id, name: a.name, type: a.type }
+      : { name: a }
+    );
+    res.json({ artist: { mbid: artist.id, name: artist.name }, similar });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── Music Playlists ────────────────────────────────────────────────
 
 app.get('/api/music/playlists', (req, res) => {

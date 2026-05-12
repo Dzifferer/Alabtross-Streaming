@@ -5354,3 +5354,132 @@ body.music-player-open .music-player-bar { display: none; }
   display: none;
 }
 
+/* ─── Music Discover ─── */
+.discover-section {
+  padding: 0 16px;
+  margin-bottom: 24px;
+}
+
+.discover-section-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0 0 12px;
+}
+
+.discover-genre-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.discover-genre-chip {
+  padding: 8px 16px;
+  border-radius: 20px;
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  background: var(--bg-card, #1a1a2e);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.discover-genre-chip:hover,
+.discover-genre-chip:active {
+  background: var(--bg-elevated, #252540);
+  border-color: var(--accent, #7c5cfc);
+}
+
+.discover-similar-list {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding-bottom: 8px;
+  -webkit-overflow-scrolling: touch;
+}
+
+.discover-artist-card {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-radius: var(--radius-sm, 8px);
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  background: var(--bg-card, #1a1a2e);
+  color: var(--text);
+  font-size: 14px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s;
+}
+
+.discover-artist-card:hover { background: var(--bg-elevated, #252540); }
+
+.discover-artist-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--accent, #7c5cfc);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.discover-back-btn {
+  background: none;
+  border: none;
+  color: var(--accent, #7c5cfc);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0 0 8px;
+}
+
+.discover-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+  padding: 0 16px;
+}
+
+.discover-release-card {
+  padding: 14px;
+  border-radius: var(--radius-sm, 8px);
+  background: var(--bg-card, #1a1a2e);
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+}
+
+.discover-release-title {
+  font-weight: 600;
+  font-size: 14px;
+  margin-bottom: 2px;
+}
+
+.discover-release-artist {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.discover-release-year {
+  font-size: 12px;
+  color: var(--text-dim, rgba(255,255,255,0.35));
+  margin-top: 2px;
+}
+
+.discover-search-btn {
+  margin-top: 8px;
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--accent, #7c5cfc);
+  background: transparent;
+  color: var(--accent, #7c5cfc);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.discover-search-btn:hover { background: rgba(124, 92, 252, 0.1); }
+

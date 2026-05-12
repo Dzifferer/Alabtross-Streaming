@@ -485,6 +485,8 @@ class TorrentEngine {
     // first audio track (the '?' makes audio optional so files without audio
     // don't cause FFmpeg to error out).
     const ffmpeg = spawn('ffmpeg', [
+      '-probesize', '1000000',
+      '-analyzeduration', '1000000',
       '-i', 'pipe:0',
       '-map', '0:v:0',
       '-map', '0:a:0?',
@@ -540,6 +542,7 @@ class TorrentEngine {
 
     res.on('close', () => {
       releaseInFlight();
+      rawSource.destroy();
       source.destroy();
       meter.destroy();
       ffmpeg.kill('SIGTERM');
@@ -609,6 +612,7 @@ class TorrentEngine {
     this._streamStats.set(streamKey, stat);
 
     const meter = new Transform({
+      highWaterMark: 256 * 1024,
       transform(chunk, _enc, cb) {
         stat.bytesSent += chunk.length;
         // Update rolling egress rate every second

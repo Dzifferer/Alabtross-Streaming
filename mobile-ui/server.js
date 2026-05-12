@@ -55,7 +55,7 @@ const app = express();
 // Type we don't want to double-compress. The default filter already
 // skips responses with `Cache-Control: no-transform` and binary MIME
 // types, so this is safe to apply globally.
-app.use(compression());
+app.use(compression({ level: 1 }));
 const PORT = process.env.PORT || 8080;
 const TORRENT_CACHE_PATH = process.env.TORRENT_CACHE || path.join(__dirname, '.torrent-cache');
 const LIBRARY_PATH = process.env.LIBRARY_PATH || path.join(TORRENT_CACHE_PATH, 'library');
@@ -83,6 +83,8 @@ let MAX_CONCURRENT_STREAMS = parseInt(process.env.MAX_CONCURRENT_STREAMS, 10) ||
 // GET /api/library endpoint can return 304 Not Modified when the
 // polling client already has the latest snapshot.
 let _libraryVersion = 0;
+let _libraryCachedJson = null;
+let _libraryCachedVersion = -1;
 
 // Which background work gets right-of-way when downloads and local
 // conversions would contend for CPU. See LibraryManager._taskPriority
@@ -174,7 +176,11 @@ async function persistSettings() {
 }
 
 // JSON body parsing for library POST/DELETE requests
-app.use(express.json({ limit: '10kb' }));
+const jsonParser = express.json({ limit: '10kb' });
+app.use((req, res, next) => {
+  if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return next();
+  jsonParser(req, res, next);
+});
 
 // ─── Rate Limiting (simple in-memory, per-IP) ────────────────────────
 const rateLimitMap = new Map();
@@ -2579,10 +2585,15 @@ app.get('/api/library', (req, res) => {
     if (req.headers['if-none-match'] === etag) {
       return res.status(304).end();
     }
-    const items = library.getAll();
-    const slots = library.getDownloadSlots();
+    const currentVersion = _libraryVersion;
+    if (_libraryCachedVersion !== currentVersion || !_libraryCachedJson) {
+      const items = library.getAll();
+      const slots = library.getDownloadSlots();
+      _libraryCachedJson = JSON.stringify({ items, slots });
+      _libraryCachedVersion = currentVersion;
+    }
     res.set('ETag', etag);
-    res.json({ items, slots });
+    res.type('json').send(_libraryCachedJson);
   } catch (err) {
     console.error('[Library] getAll() failed:', err.message);
     res.status(500).json({ items: [], error: err.message });

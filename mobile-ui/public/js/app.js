@@ -1555,7 +1555,8 @@
       return;
     }
 
-    dom.searchResults.innerHTML = results.map(item => {
+    const displayResults = results.slice(0, 20);
+    dom.searchResults.innerHTML = displayResults.map(item => {
       const type = item.type || 'movie';
       return cardHTML(item, type);
     }).join('');
@@ -1608,7 +1609,8 @@
           <h3>Movies & Shows</h3>
         </div>`;
       }
-      html += results.map(item => {
+      const displayResults = results.slice(0, 20);
+      html += displayResults.map(item => {
         const type = item.type || 'movie';
         return cardHTML(item, type);
       }).join('');
@@ -7131,7 +7133,11 @@
   function init() {
     // Kick off an initial badge refresh on app load so the count shows even
     // when the user hasn't visited the library tab yet.
-    refreshLibraryBadge();
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(() => refreshLibraryBadge());
+    } else {
+      setTimeout(refreshLibraryBadge, 1000);
+    }
 
     // Bottom nav
     dom.navBtns.forEach(btn => {
@@ -7519,7 +7525,7 @@
         const scrollTop = contentEl.scrollTop;
         heroImg.style.transform = `scale(${1 + scrollTop * 0.0003}) translateY(${scrollTop * 0.3}px)`;
       });
-    });
+    }, { passive: true });
 
     // Expose for inline handlers
     window.app = { goBack };

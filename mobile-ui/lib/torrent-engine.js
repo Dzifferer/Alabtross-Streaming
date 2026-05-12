@@ -24,7 +24,7 @@ const path = require('path');
 const { TRACKERS, isFileNameSafe, getMimeType, sanitizeFilename } = require('./file-safety');
 const { PeerManager } = require('./peer-manager');
 
-const IDLE_TIMEOUT = 30 * 60 * 1000; // 30 minutes
+const DEFAULT_IDLE_TIMEOUT = 30 * 60 * 1000; // 30 minutes
 const ACTIVE_DL_RECHECK = 10 * 60 * 1000; // re-check in 10 min if still downloading
 const DEFAULT_MAX_CONCURRENT = 5;
 const MAX_FILE_SIZE = 20 * 1024 * 1024 * 1024; // 20 GB
@@ -54,6 +54,8 @@ class TorrentEngine {
     this._maxFileSize = opts.maxFileSize || MAX_FILE_SIZE;
     this._maxConcurrent = opts.maxConcurrent || DEFAULT_MAX_CONCURRENT;
     this._maxConcurrentRemux = 3;
+    this._reputation = opts.reputation || null;
+    this._idleTimeout = opts.idleTimeout || DEFAULT_IDLE_TIMEOUT;
   }
 
   /**
@@ -107,8 +109,19 @@ class TorrentEngine {
 
       // Ban dead peers so they don't cycle back through on every tracker
       // re-announce. See lib/peer-manager.js for the full rationale.
-      const peerMgr = new PeerManager(engine, { label: hash.slice(0, 8) });
+      const peerMgr = new PeerManager(engine, { label: hash.slice(0, 8), reputation: this._reputation });
       placeholder.peerMgr = peerMgr;
+
+      if (this._reputation) {
+        const badIps = this._reputation.knownBadIps ? this._reputation.knownBadIps() : [];
+        for (const ip of badIps) {
+          try { engine.block(ip); } catch {}
+        }
+        const goodAddrs = this._reputation.topGoodAddrs ? this._reputation.topGoodAddrs(20) : [];
+        for (const addr of goodAddrs) {
+          try { engine.swarm.add(addr); } catch {}
+        }
+      }
 
       // Start a TCP listener so remote peers can initiate connections to
       // us (PEX advertisements, DHT lookups). Without this the engine is
@@ -147,7 +160,18 @@ class TorrentEngine {
         }
       }, 10000);
 
+      const earlyCheck = setTimeout(() => {
+        if (engine.swarm && engine.swarm.wires && engine.swarm.wires.length === 0) {
+          clearTimeout(timeout);
+          clearInterval(peerLog);
+          engine.destroy();
+          this._active.delete(hash);
+          reject(new Error('No peers discovered — torrent appears dead'));
+        }
+      }, 12000);
+
       const timeout = setTimeout(() => {
+        clearTimeout(earlyCheck);
         clearInterval(peerLog);
         if (!this._active.has(hash) || !this._active.get(hash).files) {
           // Snapshot swarm state at the moment of timeout so the log tells
@@ -178,6 +202,7 @@ class TorrentEngine {
 
       engine.on('ready', () => {
         clearTimeout(timeout);
+        clearTimeout(earlyCheck);
         clearInterval(peerLog);
         const peerCount = engine.swarm ? engine.swarm.wires.length : 0;
         console.log(`[TorrentEngine] Torrent ready: "${engine.torrent.name}", ${engine.files.length} files, ${peerCount} peers`);
@@ -222,6 +247,7 @@ class TorrentEngine {
 
       engine.on('error', (err) => {
         clearTimeout(timeout);
+        clearTimeout(earlyCheck);
         clearInterval(peerLog);
         try { peerMgr.destroy(); } catch { /* ignore */ }
         console.error(`[TorrentEngine] Engine error for ${hash}: ${err.message}`);
@@ -790,7 +816,7 @@ class TorrentEngine {
     const entry = this._active.get(hash);
     if (!entry) return;
     if (entry.timer) clearTimeout(entry.timer);
-    entry.timer = setTimeout(() => this._removeTorrent(hash), IDLE_TIMEOUT);
+    entry.timer = setTimeout(() => this._removeTorrent(hash), this._idleTimeout);
   }
 
   _removeTorrent(hash) {

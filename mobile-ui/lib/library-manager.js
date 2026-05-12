@@ -194,6 +194,7 @@ class LibraryManager {
     // doesn't reset the counter. Bounded retry stops the worst case of
     // a genuinely stuck pack from cycling forever.
     this._packStallRecycles = new Map();
+    this._metadataSaveCount = 0;
     this._maxConcurrentDownloads = opts.maxConcurrentDownloads || DEFAULT_MAX_CONCURRENT_DOWNLOADS;
     this._items = new Map();       // id -> library item
     this._engines = new Map();     // id -> torrent engine (active downloads only)
@@ -5331,8 +5332,11 @@ class LibraryManager {
     // mid-playback rebuffering scaling with library size.
     const doWrite = async () => {
       try {
-        // Rotate current -> backup before writing new version. Best-effort.
-        try { await fs.promises.copyFile(this._metadataFile, backupFile); } catch {}
+        // Rotate current -> backup every 10th save instead of every save.
+        this._metadataSaveCount++;
+        if (this._metadataSaveCount % 10 === 0) {
+          try { await fs.promises.copyFile(this._metadataFile, backupFile); } catch {}
+        }
 
         // Atomic + durable write: write to temp file, fsync, rename.
         // Without fsync a power loss between write and rename can leave

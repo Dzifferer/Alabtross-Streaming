@@ -576,14 +576,17 @@
 
   // ─── Home / Catalog Loading ──────────────────────
 
+  let _homeLoadId = 0;
+
   async function loadHome(type) {
+    const thisLoadId = ++_homeLoadId;
     state.currentType = type || null;
     dom.homeCatalogs.innerHTML = '';
     dom.homeLoading.classList.remove('hidden');
 
     // Simple layout: Recently Played, Movies, Shows, Live TV
     if (!type) {
-      await loadHomeCustom();
+      await loadHomeCustom(thisLoadId);
       return;
     }
 
@@ -592,6 +595,7 @@
 
     for (const t of types) {
       const cats = await api.getCatalogs(t);
+      if (thisLoadId !== _homeLoadId) return;
       allCatalogs.push(...cats);
     }
 
@@ -635,6 +639,7 @@
       return { catalog, row };
     });
     await Promise.all(placeholders.map(({ catalog, row }) => loadCatalogRow(catalog, row)));
+    if (thisLoadId !== _homeLoadId) return;
 
     // Live TV — append after catalog rows (same as custom mode)
     if (!type) {
@@ -701,7 +706,7 @@
     }
   }
 
-  async function loadHomeCustom() {
+  async function loadHomeCustom(loadId) {
     // Row 1: Recently Played (sync — from localStorage)
     const recent = getRecentlyPlayed();
     dom.homeLoading.classList.add('hidden');
@@ -806,6 +811,8 @@
       // Live TV
       api.getAllLiveTVChannels(),
     ]);
+
+    if (loadId !== _homeLoadId) return;
 
     // Render Movies row (replace placeholder) — then enrich with collections
     const movieItems = movieResult.status === 'fulfilled' ? movieResult.value : [];

@@ -807,11 +807,15 @@
       api.getAllLiveTVChannels(),
     ]);
 
-    // Remove cached rows now that fresh data is available
-    document.querySelectorAll('[data-cached-section]').forEach(el => el.remove());
-
     // Render Movies row (replace placeholder) — then enrich with collections
     const movieItems = movieResult.status === 'fulfilled' ? movieResult.value : [];
+    const seriesItems = seriesResult.status === 'fulfilled' ? seriesResult.value : [];
+
+    // Only remove cached rows if fresh data actually loaded to replace them
+    if (movieItems.length > 0 || seriesItems.length > 0) {
+      document.querySelectorAll('[data-cached-section]').forEach(el => el.remove());
+    }
+
     if (movieItems.length > 0) {
       // Render individual cards immediately
       const movieSlice = movieItems.slice(0, 20);
@@ -867,7 +871,6 @@
     }
 
     // Render Series row (replace placeholder)
-    const seriesItems = seriesResult.status === 'fulfilled' ? seriesResult.value : [];
     if (seriesItems.length > 0) {
       seriesPlaceholder.innerHTML = `
         <div class="catalog-row-header"><h3 class="catalog-row-title">Shows</h3></div>

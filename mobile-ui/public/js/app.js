@@ -1037,13 +1037,19 @@
     const items = await api.getCatalogItems(
       catalog.addonUrl, catalog.type, catalog.id
     );
-    if (items.length === 0) {
-      if (placeholder) placeholder.remove();
-      return;
-    }
 
     const row = placeholder || document.createElement('div');
     row.className = 'catalog-row';
+
+    if (items.length === 0) {
+      row.innerHTML = `
+        <div class="catalog-row-header">
+          <h3 class="catalog-row-title">${escapeHTML(catalog.name.charAt(0).toUpperCase() + catalog.name.slice(1))}</h3>
+        </div>
+        <div class="catalog-scroll"><div class="row-loading" style="color:var(--text-muted)">Unable to load</div></div>
+      `;
+      return;
+    }
 
     const displayName = catalog.name.charAt(0).toUpperCase() + catalog.name.slice(1);
     const typeLabel = catalog.type === 'movie' ? 'Movies' : 'Series';

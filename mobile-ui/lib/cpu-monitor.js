@@ -29,6 +29,8 @@ function snapshot() {
 class CpuMonitor extends EventEmitter {
   constructor(opts = {}) {
     super();
+    // Injectable snapshot fn for tests; falls back to the os.cpus() snapshot.
+    this._snapshotFn = typeof opts.snapshotFn === 'function' ? opts.snapshotFn : snapshot;
     this._enabled = opts.enabled !== false;
     // Pause when sustained usage exceeds this %. 90 is tight enough to
     // catch true overload but loose enough that a short download spike
@@ -63,7 +65,7 @@ class CpuMonitor extends EventEmitter {
 
   start() {
     if (this._timer) return;
-    this._lastSnap = snapshot();
+    this._lastSnap = this._snapshotFn();
     this._timer = setInterval(() => this._tick(), this._pollMs);
     if (this._timer.unref) this._timer.unref();
   }
@@ -122,7 +124,7 @@ class CpuMonitor extends EventEmitter {
   }
 
   _tick() {
-    const next = snapshot();
+    const next = this._snapshotFn();
     const idleDelta = next.idle - this._lastSnap.idle;
     const totalDelta = next.total - this._lastSnap.total;
     this._lastSnap = next;
@@ -172,4 +174,4 @@ function clampPct(n, fallback) {
   return Math.max(1, Math.min(100, Math.round(v)));
 }
 
-module.exports = { CpuMonitor };
+module.exports = { CpuMonitor, clampPct };

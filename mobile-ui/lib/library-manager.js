@@ -190,8 +190,13 @@ class LibraryManager {
     // later start torrent B, and a peer that reliably delivered bytes
     // gets re-added to the swarm first. Persisted at the torrent-cache
     // path so it survives restarts.
-    this._peerReputation = new PeerReputation({ cacheDir: this._torrentCachePath });
-    this._peerReputation.startPersistTimer();
+    if (opts.noAutoInit) {
+      // skipped for tests when noAutoInit — consumers must null-check
+      this._peerReputation = null;
+    } else {
+      this._peerReputation = new PeerReputation({ cacheDir: this._torrentCachePath });
+      this._peerReputation.startPersistTimer();
+    }
     // Per-pack stall recycle count. Keyed by packId, not by engine, so
     // recycling (which destroys the old engine and creates a new one)
     // doesn't reset the counter. Bounded retry stops the worst case of
@@ -363,7 +368,9 @@ class LibraryManager {
       // it'll no-op if we're still in the cooldown window.
       this._processConversionQueue().catch(() => {});
     });
-    this._cpuMonitor.start();
+    if (!opts.noAutoInit) {
+      this._cpuMonitor.start();
+    } // else skipped for tests when noAutoInit — no setInterval started
 
     // Manual "pause conversions" switch exposed via the settings API.
     // Orthogonal to CPU protection — either gate blocks new conversions
@@ -372,28 +379,33 @@ class LibraryManager {
     this._manualConversionPause = false;
 
     // Ensure library directory exists
-    if (!fs.existsSync(this._libraryPath)) {
-      fs.mkdirSync(this._libraryPath, { recursive: true });
-    }
-    // Ensure the persistent torrent-metadata cache directory exists so
-    // torrent-stream can write .torrent files into it immediately.
-    if (!fs.existsSync(this._torrentCachePath)) {
-      fs.mkdirSync(this._torrentCachePath, { recursive: true });
-    }
-    this._migrateLegacyTorrentCache();
+    if (!opts.noAutoInit) {
+      if (!fs.existsSync(this._libraryPath)) {
+        fs.mkdirSync(this._libraryPath, { recursive: true });
+      }
+      // Ensure the persistent torrent-metadata cache directory exists so
+      // torrent-stream can write .torrent files into it immediately.
+      if (!fs.existsSync(this._torrentCachePath)) {
+        fs.mkdirSync(this._torrentCachePath, { recursive: true });
+      }
+      this._migrateLegacyTorrentCache();
 
-    this._cleanupStaleTmpFiles();
-    this._loadMetadata();
-    this._loadPackCatalog();
-    console.log(`[Library] Initialized at ${this._libraryPath}, ${this._items.size} items loaded`);
+      this._cleanupStaleTmpFiles();
+      this._loadMetadata();
+      this._loadPackCatalog();
+      console.log(`[Library] Initialized at ${this._libraryPath}, ${this._items.size} items loaded`);
 
-    // Disk recovery + resume + metadata repair are deferred to an async
-    // init chain so the constructor (and therefore Express startup) does
-    // not block on hundreds of fs.stat calls. The chain is strictly
-    // ordered: _recoverFromDiskState MUST complete before
-    // _resumeInterruptedDownloads so that items whose files are already
-    // complete on disk don't trigger unnecessary torrent engine spin-up.
-    this._initPromise = this._initAsync();
+      // Disk recovery + resume + metadata repair are deferred to an async
+      // init chain so the constructor (and therefore Express startup) does
+      // not block on hundreds of fs.stat calls. The chain is strictly
+      // ordered: _recoverFromDiskState MUST complete before
+      // _resumeInterruptedDownloads so that items whose files are already
+      // complete on disk don't trigger unnecessary torrent engine spin-up.
+      this._initPromise = this._initAsync();
+    } else {
+      // skipped for tests when noAutoInit — no mkdir/load/_initAsync timers
+      this._initPromise = Promise.resolve();
+    }
   }
 
   async _initAsync() {

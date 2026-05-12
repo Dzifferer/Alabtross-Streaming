@@ -19,12 +19,17 @@ function uuid() {
 }
 
 class MusicPlaylists {
-  constructor(libraryPath) {
+  constructor(libraryPath, opts = {}) {
     this._file = path.join(libraryPath, '_music-playlists.json');
     this._bak = this._file + '.bak';
     this._playlists = [];
     this._saveTimer = null;
-    this._load();
+    // Persist-sync controls whether the synchronous fallback writes execute.
+    // Tests can set this to false to keep the constructor side-effect-free.
+    this._persistSync = opts.persistSync !== false;
+    if (!opts.skipLoad) {
+      this._load();
+    } // else skipped for tests when skipLoad — no disk read
   }
 
   _load() {
@@ -49,6 +54,7 @@ class MusicPlaylists {
   }
 
   _saveNow() {
+    if (!this._persistSync) return; // skipped for tests when persistSync:false
     const tmp = this._file + '.tmp';
     try {
       const json = JSON.stringify({ playlists: this._playlists });

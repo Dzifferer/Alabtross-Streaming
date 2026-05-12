@@ -88,8 +88,12 @@ class PeerReputation {
     this._entries = new Map(); // addr -> { goodBytes, strikes, lastSeenAt }
     this._persistTimer = null;
     this._dirty = false;
+    // Injectable clock for tests; default to Date.now in production.
+    this._now = typeof opts.now === 'function' ? opts.now : Date.now;
 
-    this._load();
+    if (!opts.skipLoad) {
+      this._load();
+    } // else skipped for tests when skipLoad — no disk read
   }
 
   _load() {
@@ -100,7 +104,7 @@ class PeerReputation {
       if (!raw.trim()) return;
       const data = JSON.parse(raw);
       if (!data || typeof data.entries !== 'object') return;
-      const now = Date.now();
+      const now = this._now();
       let kept = 0, dropped = 0;
       for (const [addr, entry] of Object.entries(data.entries)) {
         if (!ADDR_RE.test(addr)) continue;
@@ -148,7 +152,7 @@ class PeerReputation {
       this._expireStale();
       try {
         await fs.promises.mkdir(this._cacheDir, { recursive: true });
-        const out = { version: 1, savedAt: Date.now(), entries: {} };
+        const out = { version: 1, savedAt: this._now(), entries: {} };
         for (const [addr, entry] of this._entries) out.entries[addr] = entry;
         const tmp = this._file + '.tmp';
         await fs.promises.writeFile(tmp, JSON.stringify(out));
@@ -212,7 +216,7 @@ class PeerReputation {
       e = { goodBytes: 0, strikes: 0, lastSeenAt: 0 };
       this._entries.set(addr, e);
     }
-    e.lastSeenAt = Date.now();
+    e.lastSeenAt = this._now();
     this._dirty = true;
     if (this._entries.size > MAX_ENTRIES) this._evictOldest();
     return e;
@@ -234,7 +238,7 @@ class PeerReputation {
   }
 
   _expireStale() {
-    const now = Date.now();
+    const now = this._now();
     for (const [addr, entry] of this._entries) {
       if (now - entry.lastSeenAt > ENTRY_MAX_AGE_MS) this._entries.delete(addr);
     }

@@ -154,18 +154,25 @@ class PeerReputation {
         await fs.promises.writeFile(tmp, JSON.stringify(out));
         await fs.promises.rename(tmp, this._file);
         this._dirty = false;
+        this._lastSaveFailed = false;
       } catch (err) {
         // A failed write means the in-memory state is still ahead of
         // disk; mark dirty so the next tick retries instead of dropping
         // updates silently.
         this._dirty = true;
+        this._lastSaveFailed = true;
         console.warn(`[PeerReputation] save failed: ${err.message}`);
       }
     };
 
     const promise = doSave().then(() => {
       this._saveInFlight = null;
-      if (this._saveQueued) {
+      // Re-arm the queued save only if the in-flight one SUCCEEDED.
+      // If it failed (e.g. read-only FS, full disk), recursing here
+      // would spin into a tight retry loop with no delay. The periodic
+      // timer in startPersistTimer() will pick the work back up at its
+      // own cadence, which is a coarse but free backoff.
+      if (this._saveQueued && !this._lastSaveFailed) {
         this._saveQueued = false;
         return this.save();
       }

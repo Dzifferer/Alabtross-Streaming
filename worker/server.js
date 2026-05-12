@@ -54,7 +54,18 @@ if (!SECRET) {
 }
 const PORT          = parseInt(process.env.WORKER_PORT || '8090', 10);
 const BIND_HOST     = SECRET ? '0.0.0.0' : '127.0.0.1';
-const HOST          = process.env.WORKER_HOST || BIND_HOST;
+// SECURITY: When SECRET is empty, force loopback regardless of any
+// WORKER_HOST override. The previous shape allowed `WORKER_HOST=0.0.0.0`
+// (or any non-loopback IP) to override the protective BIND_HOST=127.0.0.1
+// default, silently exposing an unauthenticated /transcode endpoint to
+// the LAN/tailnet. Refuse to start in that configuration rather than
+// honoring the override.
+const _envHost = process.env.WORKER_HOST;
+if (!SECRET && _envHost && !/^(127\.|::1$|\[::1\]$|localhost$)/i.test(_envHost)) {
+  console.error('[worker] Refusing to bind ' + _envHost + ' without WORKER_SECRET — set WORKER_SECRET or remove WORKER_HOST.');
+  process.exit(1);
+}
+const HOST          = SECRET ? (_envHost || BIND_HOST) : BIND_HOST;
 const TEMP_DIR      = process.env.WORKER_TEMP || path.join(os.tmpdir(), 'alabtross-worker');
 const FFMPEG        = process.env.FFMPEG_PATH || 'ffmpeg';
 const FFPROBE       = process.env.FFPROBE_PATH || 'ffprobe';

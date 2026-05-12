@@ -17,7 +17,10 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
-const { VIDEO_EXTENSIONS, TRACKERS, isFileNameSafe, getMimeType } = require('./file-safety');
+const {
+  VIDEO_EXTENSIONS, TRACKERS, isFileNameSafe, getMimeType,
+  PACK_MIN_FILE_BYTES, MIN_PLAYABLE_VIDEO_BYTES, JUNK_FILE_REGEX,
+} = require('./file-safety');
 const { PeerManager } = require('./peer-manager');
 const { PeerReputation } = require('./peer-reputation');
 const { WorkerClient } = require('./worker-client');
@@ -1191,10 +1194,8 @@ class LibraryManager {
         tm.clear();
 
         // Find all video files, excluding samples/trailers/promos and tiny junk files
-        const PACK_MIN_FILE_SIZE = 10 * 1024 * 1024; // 10 MB — skip promo/ad files
-        const dominated = /\b(sample|trailer|extra|bonus|featurette|interview)\b/i;
         const videoFiles = engine.files.filter(f =>
-          isFileNameSafe(f.name) && !dominated.test(f.name) && f.length >= PACK_MIN_FILE_SIZE
+          isFileNameSafe(f.name) && !JUNK_FILE_REGEX.test(f.name) && f.length >= PACK_MIN_FILE_BYTES
         );
 
         if (videoFiles.length === 0) {
@@ -1385,10 +1386,8 @@ class LibraryManager {
         tm.clear();
 
         // Find all usable video files, excluding samples/trailers/promos and tiny junk files
-        const PACK_MIN_FILE_SIZE = 10 * 1024 * 1024; // 10 MB — skip promo/ad files
-        const dominated = /\b(sample|trailer|extra|bonus|featurette|interview)\b/i;
         const videoFiles = engine.files.filter(f =>
-          isFileNameSafe(f.name) && !dominated.test(f.name) && f.length >= PACK_MIN_FILE_SIZE
+          isFileNameSafe(f.name) && !JUNK_FILE_REGEX.test(f.name) && f.length >= PACK_MIN_FILE_BYTES
         );
 
         if (videoFiles.length === 0) {
@@ -2024,6 +2023,12 @@ class LibraryManager {
       if (allComplete) {
         clearInterval(progressTimer);
         this._stopPackEngine(packId);
+        // Clear the stall-recycle counter on natural completion. Otherwise
+        // it persists across the lifetime of the LibraryManager and a pack
+        // that takes 4 separate retries to finish across days/weeks (each
+        // a legitimate single stall recycle) would hit the per-pack cap on
+        // the next download attempt and give up prematurely.
+        this._packStallRecycles.delete(packId);
         this._saveMetadata();
         this._processQueue();
         return;
@@ -2314,8 +2319,6 @@ class LibraryManager {
    */
   repairPackMetadata() {
     const fixes = { retagged: 0, discovered: 0, errors: [] };
-    const PACK_MIN_FILE_SIZE = 10 * 1024 * 1024;
-    const dominated = /\b(sample|trailer|extra|bonus|featurette|interview)\b/i;
 
     // ── Phase 1: Fix season numbers on existing pack items ──
     const packItems = [...this._items.values()].filter(i => i.packId);
@@ -2376,7 +2379,7 @@ class LibraryManager {
       for (const fullPath of diskFiles) {
         const fileName = path.basename(fullPath);
         if (trackedFileNames.has(fileName)) continue;
-        if (dominated.test(fileName)) continue;
+        if (JUNK_FILE_REGEX.test(fileName)) continue;
 
         let fileSize;
         try {
@@ -2384,7 +2387,7 @@ class LibraryManager {
           fileSize = stat.size;
         } catch { continue; }
 
-        if (fileSize < PACK_MIN_FILE_SIZE) continue;
+        if (fileSize < PACK_MIN_FILE_BYTES) continue;
 
         const parsed = this._parseSeasonEpisode(fileName, first.season || 1);
         const seasonNum = parsed.season || first.season || 1;
@@ -3287,6 +3290,9 @@ class LibraryManager {
     if (this._engines.has(packId)) {
       this._stopPackEngine(packId);
     }
+    // Drop the stall-recycle counter — the pack is gone, future re-adds
+    // shouldn't inherit strikes against this packId.
+    this._packStallRecycles.delete(packId);
 
     for (const item of packItems) {
       this.removeItem(item.id);
@@ -3484,13 +3490,27 @@ class LibraryManager {
     // Kill conversion process if active
     this._stopConversion(id);
 
-    // Delete file(s) — current file and any temp conversion file
+    // Delete file(s) — current file and any temp conversion file.
+    //
+    // Music albums use item.filePath as a DIRECTORY (every track lives
+    // under it; see _startMusicAlbumFromEngine). The plain unlinkSync
+    // below throws EISDIR on a directory, the catch swallows it, and we
+    // silently leave the entire album on disk while telling the UI we
+    // deleted it. Detect the album case and rmSync recursively. We can't
+    // rely on Stats.isDirectory because the rest of this function deals
+    // in relative paths and stat-may-fail-but-we-still-want-cleanup, so
+    // gate on item.type === 'album' which is set at music-album ingest.
+    const isAlbum = item.type === 'album' || item.kind === 'music-album';
     if (item.filePath) {
       const fullPath = path.join(this._libraryPath, item.filePath);
       try {
-        if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
+        if (isAlbum) {
+          fs.rmSync(fullPath, { recursive: true, force: true });
+        } else if (fs.existsSync(fullPath)) {
+          fs.unlinkSync(fullPath);
+        }
       } catch (err) {
-        console.error(`[Library] Failed to delete file: ${err.message}`);
+        console.error(`[Library] Failed to delete ${isAlbum ? 'album dir' : 'file'}: ${err.message}`);
       }
     }
     if (item.originalFilePath && item.originalFilePath !== item.filePath) {
@@ -3499,15 +3519,16 @@ class LibraryManager {
         if (fs.existsSync(origPath)) fs.unlinkSync(origPath);
       } catch { /* ignore */ }
     }
-    // Clean up temp .converting.mp4 file
-    if (item.filePath) {
+    // Clean up temp .converting.mp4 file (video items only — albums have no transcode temp)
+    if (item.filePath && !isAlbum) {
       const tempPath = this._getConvertTempPath(path.join(this._libraryPath, item.filePath));
       try {
         if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
       } catch { /* ignore */ }
     }
-    // Try to remove parent directory if empty
-    if (item.filePath) {
+    // Try to remove parent directory if empty (skip for albums — we
+    // already removed the album dir itself recursively above).
+    if (item.filePath && !isAlbum) {
       const dir = path.dirname(path.join(this._libraryPath, item.filePath));
       if (dir !== this._libraryPath) {
         try { fs.rmdirSync(dir); } catch { /* not empty, fine */ }
@@ -3516,6 +3537,9 @@ class LibraryManager {
 
     this._items.delete(id);
     this._discoveryCache = null; // invalidate discovery cache after deletion
+    // Drop any per-item watchdog state so a re-add doesn't inherit
+    // strike counts against the now-gone id.
+    if (this._autoRetryState) this._autoRetryState.delete(id);
 
     // After removal, fix up the shared pack engine (if any):
     //   - If no other items remain downloading in the pack, stop the engine.
@@ -3577,6 +3601,12 @@ class LibraryManager {
     // Handle discovered (untracked) files
     if (!item && id.startsWith('disk_')) {
       const relPath = id.slice(5); // strip 'disk_' prefix
+      // Require a known media extension on the basename. Without this,
+      // a request for disk_..%2F_metadata.json (or any non-media file
+      // happening to live under LIBRARY_PATH such as pre-repair-*.bak)
+      // would stream that file out of the library directory. _isPathSafe
+      // only prevents escape; it does not constrain file type.
+      if (!isFileNameSafe(path.basename(relPath), 'any')) return null;
       const fullPath = path.join(this._libraryPath, relPath);
       if (!this._isPathSafe(fullPath)) return null;
       try {
@@ -3660,8 +3690,15 @@ class LibraryManager {
     if (!item || item.type !== 'album') return false;
     item.playCount = (item.playCount || 0) + 1;
     item.lastPlayedAt = Date.now();
-    // Don't call _saveMetadata on every play — it's a hot path. Defer to
-    // the existing periodic save (every 30s) to batch these updates.
+    // The "periodic save batches these" comment that used to live here
+    // was wishful thinking: _startPeriodicSave only runs while there are
+    // active downloads or conversions (see _stopPeriodicSave at line
+    // 4228). On a music-only / quiescent server nothing ever flips the
+    // periodic timer on, so playCount / lastPlayedAt sat in RAM until a
+    // crash dropped them. Trigger the debounced save explicitly — it's
+    // already 500ms-throttled and uses fs.promises so it won't block
+    // the hot path.
+    this._saveMetadata();
     return true;
   }
 
@@ -4422,6 +4459,13 @@ class LibraryManager {
       this._peerMgrByEngine.delete(engine);
       try { mgr.destroy(); } catch { /* ignore */ }
     }
+    // Strip our own listeners before destroy(). torrent-stream can fire
+    // 'wire'/'piece'/'download' callbacks on the destroyed engine between
+    // destroy() returning and the next libuv tick, which would otherwise
+    // mutate _recordGoodPeer state for a pack being recycled and leak
+    // listeners across the recycle. removeAllListeners is best-effort —
+    // some torrent-stream versions don't extend EventEmitter directly.
+    try { if (typeof engine.removeAllListeners === 'function') engine.removeAllListeners(); } catch { /* ignore */ }
     try { engine.destroy(); } catch { /* ignore */ }
   }
 
@@ -4431,8 +4475,7 @@ class LibraryManager {
     if (videoFiles.length === 1) return videoFiles[0];
 
     // Filter out samples/trailers, pick largest remaining
-    const dominated = /\b(sample|trailer|extra|bonus|featurette|interview)\b/i;
-    const mainFiles = videoFiles.filter(f => !dominated.test(f.name));
+    const mainFiles = videoFiles.filter(f => !JUNK_FILE_REGEX.test(f.name));
     const candidates = mainFiles.length > 0 ? mainFiles : videoFiles;
 
     // Pick the largest file (likely the main video)
@@ -5405,10 +5448,10 @@ class LibraryManager {
       }
     }
 
-    // Files smaller than this are almost always samples/trailers/featurettes
-    // shipped alongside the real content. Skipping them stops the review
-    // queue from being drowned in noise on the first scan of a big library.
-    const MIN_VIDEO_SIZE = 50 * 1024 * 1024;
+    // Files smaller than MIN_PLAYABLE_VIDEO_BYTES (lib/file-safety) are
+    // almost always samples/trailers/featurettes shipped alongside the
+    // real content. Skipping them stops the review queue from being
+    // drowned in noise on the first scan of a big library.
     const MAX_DEPTH = 6;
     const MAX_DISCOVERED = 5000;
 
@@ -5522,7 +5565,7 @@ class LibraryManager {
         let stat;
         try { stat = fs.statSync(absPath); }
         catch { continue; }
-        if (stat.size < MIN_VIDEO_SIZE) continue;
+        if (stat.size < MIN_PLAYABLE_VIDEO_BYTES) continue;
 
         const built = buildItem(relPath, stat);
         if (built) discovered.push(built);
@@ -5559,7 +5602,7 @@ class LibraryManager {
       }
     }
 
-    const MIN_VIDEO_SIZE = 50 * 1024 * 1024;
+    // MIN_PLAYABLE_VIDEO_BYTES filters samples/trailers — see file-safety.js
     const MAX_DEPTH = 6;
     const MAX_DISCOVERED = 5000;
 
@@ -5657,7 +5700,7 @@ class LibraryManager {
         let stat;
         try { stat = await fs.promises.stat(absPath); }
         catch { continue; }
-        if (stat.size < MIN_VIDEO_SIZE) continue;
+        if (stat.size < MIN_PLAYABLE_VIDEO_BYTES) continue;
 
         const built = buildItem(relPath, stat);
         if (built) discovered.push(built);
@@ -6556,8 +6599,19 @@ class LibraryManager {
         `[Library] Deferring local transcode of "${item.name}" — ` +
         `${this._liveTranscodeCount} live session(s) active`
       );
+      // Roll back the in-flight conversion state the queue stamped before
+      // awaiting us — otherwise status='converting' sticks with no ffmpeg
+      // process behind it, the UI shows a permanent spinner, and on
+      // restart _resumeInterruptedConversions sees a "converting" item
+      // and tries to restart it. Same pattern as
+      // _onConversionPausedForDownloads.
+      item.status = 'complete';
+      item.convertKind = null;
+      item.convertProgress = null;
+      item.convertError = null;
       item._pendingConversion = true;
       item._pendingConvertKind = kind;
+      this._saveMetadata();
       return;
     }
 

@@ -55,7 +55,24 @@
       const raw = localStorage.getItem(STORAGE_KEY);
       if (!raw) return;
       const parsed = JSON.parse(raw);
-      Object.assign(state, parsed);
+      // Schema-validate before merging — a corrupted entry (manual edit,
+      // older app version, hostile XSS dump) could inject arbitrary keys
+      // into state and crash the player (e.g. currentIndex: -999, queue
+      // not-an-array). Only copy known fields with the expected shape.
+      if (parsed && typeof parsed === 'object') {
+        if (Array.isArray(parsed.queue)) state.queue = parsed.queue;
+        if (Number.isInteger(parsed.currentIndex) && parsed.currentIndex >= -1) {
+          state.currentIndex = parsed.currentIndex;
+        }
+        if (typeof parsed.shuffle === 'boolean') state.shuffle = parsed.shuffle;
+        if (parsed.repeat === 'none' || parsed.repeat === 'one' || parsed.repeat === 'all') {
+          state.repeat = parsed.repeat;
+        }
+        if (Array.isArray(parsed.shuffleOrder)) state.shuffleOrder = parsed.shuffleOrder;
+        if (Number.isFinite(parsed.position) && parsed.position >= 0) {
+          state.position = parsed.position;
+        }
+      }
       // Don't autoplay on load — restore state paused.
       state.paused = true;
     } catch {}

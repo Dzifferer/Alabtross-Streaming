@@ -1272,7 +1272,11 @@
 
   function channelCardHTML(channel) {
     const name = escapeHTML(channel.name || 'Channel');
-    const logo = channel.logo || '';
+    // Gate through isSafePosterUrl — a hostile playlist could supply a
+    // logo URL with a javascript: / data: scheme. The other card paths
+    // already do this; channel cards were missing the gate.
+    const rawLogo = channel.logo || '';
+    const logo = isSafePosterUrl(rawLogo) ? rawLogo : '';
     const group = escapeHTML(channel.group || '');
     const url = channel.url || '';
     const sourceType = channel._sourceType || 'playlist';
@@ -1675,7 +1679,11 @@
     // Track recently played
     addRecentlyPlayed(type, meta);
 
-    const bgImage = meta.background || meta.poster || '';
+    // Gate through isSafePosterUrl so a hostile addon manifest can't drop
+    // javascript: / data: URLs into the hero <img src>. Cards already do
+    // this; the hero was missing the gate.
+    const rawBg = meta.background || meta.poster || '';
+    const bgImage = isSafePosterUrl(rawBg) ? rawBg : '';
     const genres = (meta.genres || []).slice(0, 4);
     const rating = meta.imdbRating || meta.rating;
     const year = meta.releaseInfo || meta.year || '';
@@ -2526,9 +2534,11 @@
       return;
     }
 
-    // External URLs — open in new tab
+    // External URLs — open in new tab. noopener,noreferrer prevents the
+    // opened tab from accessing window.opener (reverse-tabnabbing) and
+    // from receiving our Referer header.
     if (stream.externalUrl || stream.ytId) {
-      window.open(url, '_blank');
+      window.open(url, '_blank', 'noopener,noreferrer');
       return;
     }
 
@@ -7159,7 +7169,9 @@
 
         serverList.querySelectorAll('.cast-device-item[data-device]').forEach(btn => {
           btn.addEventListener('click', () => {
-            const device = JSON.parse(btn.dataset.device);
+            let device;
+            try { device = JSON.parse(btn.dataset.device); }
+            catch { showToast('Cast device record is malformed'); return; }
             picker.classList.add('hidden');
             castToServerDevice(device);
           });

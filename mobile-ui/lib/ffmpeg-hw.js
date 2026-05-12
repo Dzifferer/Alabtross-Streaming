@@ -175,8 +175,14 @@ function buildScaleFilter(maxWidth, sourceCodec, sourcePixFmt) {
  * Encoder args for the live transcode / HLS path — latency and wall-clock
  * over compression efficiency. libx264 uses ultrafast+zerolatency, h264_nvenc
  * uses p1+ll (lowest preset, low-latency tune).
+ *
+ * `maxThreads`: cap libx264 worker threads. Without this, libx264 spins up
+ * one thread per logical core, pegging a 4-core Jetson and starving Node's
+ * event loop + BT piece verification. The CPU monitor only governs the
+ * background conversion path; live transcodes need their own ceiling.
+ * NVENC ignores -threads (the encode happens on the GPU).
  */
-function buildLiveEncoderArgs() {
+function buildLiveEncoderArgs(maxThreads = 0) {
   if (_useNvenc()) {
     return [
       '-c:v', 'h264_nvenc',
@@ -192,7 +198,7 @@ function buildLiveEncoderArgs() {
       '-pix_fmt', 'yuv420p',
     ];
   }
-  return [
+  const args = [
     '-c:v', 'libx264',
     '-preset', 'ultrafast',
     '-tune', 'zerolatency',
@@ -201,6 +207,11 @@ function buildLiveEncoderArgs() {
     '-pix_fmt', 'yuv420p',
     '-crf', '23',
   ];
+  const t = Number(maxThreads);
+  if (Number.isFinite(t) && t > 0) {
+    args.push('-threads', String(Math.floor(t)));
+  }
+  return args;
 }
 
 /**

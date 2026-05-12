@@ -140,6 +140,13 @@ function httpGetDirect(url, timeoutMs = 10000, _redirectCount = 0, resolvedIp = 
       res.on('data', chunk => {
         body += chunk;
         if (body.length > MAX_RESPONSE_BODY) {
+          // Clear the deadline timer or it fires after req.destroy() and
+          // keeps the libuv loop alive trying to destroy an already-dead
+          // request, while also racing a stale 'Timeout' rejection against
+          // our 'Response body too large' rejection (the promise has
+          // already settled, but the timer's destroy() call is still
+          // wasted work on every oversize response).
+          clearTimeout(deadline);
           req.destroy();
           reject(new Error('Response body too large'));
         }
@@ -1742,4 +1749,15 @@ module.exports = {
   // share the same keep-alive pool instead of opening fresh sockets.
   httpAgent,
   httpsAgent,
+  // Pure helpers — exposed so the test suite can cover the playback-
+  // correctness funnel (format detection, remux-vs-direct decision,
+  // pack heuristics) without standing up a real provider HTTP server.
+  sanitizeImdbId,
+  buildMagnet,
+  detectFormat,
+  needsRemux,
+  filterAndRank,
+  isSeasonPack,
+  parsePackSizeBytes,
+  isCompletePack,
 };

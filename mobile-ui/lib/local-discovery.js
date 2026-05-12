@@ -147,10 +147,15 @@ function getLocalIP() {
  * Validate that an SSDP LOCATION URL is safe to fetch (not loopback, metadata, etc.)
  */
 function isLocationSafe(locationUrl) {
+  if (typeof locationUrl !== 'string') return false;
   try {
     const u = new URL(locationUrl);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
-    const host = u.hostname;
+    // Node's URL parser keeps IPv6 hostnames in bracketed form
+    // ("[::1]") — strip the brackets so the equality checks below work
+    // on both literal forms.
+    let host = u.hostname;
+    if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
     // Block loopback and metadata endpoints
     if (host === 'localhost' || host.startsWith('127.') || host === '::1') return false;
     if (host.startsWith('169.254.')) return false;
@@ -292,17 +297,26 @@ function discoverDevices(timeout = SEARCH_TIMEOUT) {
       finish();
     }
 
-    // Early completion: if no new SSDP responses for 1.5s, proceed early
+    // Early completion: if no new SSDP responses for 1.5s, proceed early.
+    // Both timers can race to invoke enrichAndFinish — guard with a flag
+    // so we don't fan out a second batch of fetchDeviceDescription HTTP
+    // calls and then try to close the socket twice via finish().
+    let enriching = false;
+    const startEnrich = () => {
+      if (enriching) return;
+      enriching = true;
+      enrichAndFinish();
+    };
     const checkDone = setInterval(() => {
       if (Date.now() - lastResponseTime > 1500) {
         clearInterval(checkDone);
         clearTimeout(mainTimeout);
-        enrichAndFinish();
+        startEnrich();
       }
     }, 500);
     const mainTimeout = setTimeout(() => {
       clearInterval(checkDone);
-      enrichAndFinish();
+      startEnrich();
     }, timeout);
   });
 }
@@ -356,4 +370,11 @@ module.exports = {
   getLocalIP,
   getAVTransportControlURL,
   fetchDeviceDescription,
+  // Pure helpers — exported so tests can exercise them without a real
+  // SSDP socket. parseSSDPResponse and extractXmlTag are exposed for
+  // black-box parser tests; isLocationSafe is the SSRF guard used at
+  // intake and is the most security-critical pure function in the file.
+  parseSSDPResponse,
+  extractXmlTag,
+  isLocationSafe,
 };

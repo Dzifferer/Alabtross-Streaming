@@ -2643,12 +2643,12 @@ app.get('/api/library', (req, res) => {
     if (req.headers['if-none-match'] === etag) {
       return res.status(304).end();
     }
-    const currentVersion = _libraryVersion;
-    if (_libraryCachedVersion !== currentVersion || !_libraryCachedJson) {
+    const cacheKey = `${_libraryVersion}-${epoch}`;
+    if (_libraryCachedVersion !== cacheKey || !_libraryCachedJson) {
       const items = library.getAll();
       const slots = library.getDownloadSlots();
       _libraryCachedJson = JSON.stringify({ items, slots });
-      _libraryCachedVersion = currentVersion;
+      _libraryCachedVersion = cacheKey;
     }
     res.set('ETag', etag);
     res.type('json').send(_libraryCachedJson);

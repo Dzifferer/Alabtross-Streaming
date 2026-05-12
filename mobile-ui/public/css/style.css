@@ -217,12 +217,27 @@ html, body {
   background-color: var(--bg);
   background-image: linear-gradient(135deg, var(--bg), #0f0f1e, var(--bg));
   background-size: 400% 400%;
-  animation: ambientGlow 15s ease infinite;
   color: var(--text);
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
   margin: 0;
   padding: 0;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background: inherit;
+  background-size: inherit;
+  animation: ambientGlow 15s ease infinite;
+  will-change: background-position;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body::before { animation: none; }
 }
 
 @keyframes ambientGlow {

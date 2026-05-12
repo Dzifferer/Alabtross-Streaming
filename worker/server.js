@@ -167,7 +167,7 @@ const CUVID_DECODERS = {
   vc1:        'vc1_cuvid',
 };
 
-function buildFfmpegArgs(inputPath, outputPath, sourceCodec, audioCopy) {
+function buildFfmpegArgs(inputPath, sourceCodec, audioCopy) {
   const cuvid = sourceCodec ? CUVID_DECODERS[sourceCodec.toLowerCase()] : null;
 
   const args = [
@@ -234,9 +234,9 @@ function buildFfmpegArgs(inputPath, outputPath, sourceCodec, audioCopy) {
   }
 
   args.push(
-    '-movflags', '+faststart',
+    '-movflags', 'frag_keyframe+empty_moov',
     '-f', 'mp4',
-    outputPath,
+    'pipe:1',
   );
 
   return args;
@@ -273,9 +273,9 @@ function newJobPaths(extHint) {
 }
 
 function cleanupJob(job) {
-  for (const p of [job.inputPath, job.outputPath]) {
-    try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch { /* ignore */ }
-  }
+  // Only the input file is written to disk; output streams directly to the
+  // client via fragmented MP4 on stdout, so there is no output file to clean.
+  try { if (fs.existsSync(job.inputPath)) fs.unlinkSync(job.inputPath); } catch { /* ignore */ }
 }
 
 // ─── Endpoints ────────────────────────────────────────────────────────
@@ -410,7 +410,7 @@ function handleTranscode(req, res) {
         console.log(`${tag} probed codec=${codec || 'unknown'}`);
       }
 
-      const args = buildFfmpegArgs(job.inputPath, job.outputPath, codec, audioCopyHint);
+      const args = buildFfmpegArgs(job.inputPath, codec, audioCopyHint);
       console.log(`${tag} ffmpeg ${args.join(' ')}`);
 
       ff = spawn(FFMPEG, args);
@@ -420,6 +420,16 @@ function handleTranscode(req, res) {
       if (!res.headersSent) jsonResponse(res, 500, { error: `transcode setup failed: ${err.message}` });
       return;
     }
+
+    // Stream fragmented MP4 from ffmpeg stdout directly to the client.
+    // Headers go out immediately so the client can start consuming chunks
+    // as they arrive — no intermediate disk write required.
+    res.writeHead(200, {
+      'Content-Type': 'video/mp4',
+      'Transfer-Encoding': 'chunked',
+      'X-Worker-Encoder': 'h264_nvenc',
+    });
+    ff.stdout.pipe(res);
 
     let stderrBuf = '';
     ff.stderr.on('data', (d) => {
@@ -445,58 +455,21 @@ function handleTranscode(req, res) {
 
       if (code !== 0) {
         console.log(`${tag} ffmpeg exited ${code}`);
-        releaseSlot();
-        cleanupJob(job);
         if (!res.headersSent) {
           jsonResponse(res, 500, {
             error: `ffmpeg exited ${code}`,
             ffmpegStderr: stderrBuf.slice(-4096),
           });
         }
-        return;
+      } else {
+        const encodeSec = (tEncoded - tUploaded) / 1000;
+        console.log(`${tag} encode done in ${encodeSec.toFixed(0)}s — streamed directly to client`);
       }
 
-      let outStat;
-      try {
-        outStat = fs.statSync(job.outputPath);
-      } catch (e) {
-        releaseSlot();
-        cleanupJob(job);
-        if (!res.headersSent) jsonResponse(res, 500, { error: `output missing: ${e.message}` });
-        return;
-      }
-      if (outStat.size === 0) {
-        releaseSlot();
-        cleanupJob(job);
-        if (!res.headersSent) jsonResponse(res, 500, { error: 'output empty' });
-        return;
-      }
-
-      const encodeSec = (tEncoded - tUploaded) / 1000;
-      const sizeRatio = outStat.size / Math.max(bytesIn, 1);
-      console.log(`${tag} encode done: ${(outStat.size / 1e9).toFixed(2)} GB in ${encodeSec.toFixed(0)}s (${(sizeRatio * 100).toFixed(0)}% of input) — streaming back`);
-
-      // Stream the output file back as the response body.
-      res.writeHead(200, {
-        'Content-Type': 'video/mp4',
-        'Content-Length': outStat.size,
-        'X-Worker-Encoder': 'h264_nvenc',
-        'X-Worker-Codec-Input': codec || 'unknown',
-        'X-Worker-Encode-Sec': String(encodeSec.toFixed(0)),
-      });
-      const rs = fs.createReadStream(job.outputPath);
-      rs.pipe(res);
-      rs.on('close', () => {
-        releaseSlot();
-        cleanupJob(job);
-        const tTotal = (Date.now() - tStart) / 1000;
-        console.log(`${tag} complete in ${tTotal.toFixed(0)}s total`);
-      });
-      rs.on('error', () => {
-        releaseSlot();
-        try { res.destroy(); } catch { /* ignore */ }
-        cleanupJob(job);
-      });
+      releaseSlot();
+      cleanupJob(job);
+      const tTotal = (Date.now() - tStart) / 1000;
+      console.log(`${tag} complete in ${tTotal.toFixed(0)}s total`);
     });
 
     // If the Orin disconnects mid-encode, kill ffmpeg so we don't keep

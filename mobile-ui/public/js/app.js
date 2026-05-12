@@ -1079,7 +1079,7 @@
       <div class="card" data-type="${type}" data-id="${id}" data-name="${rawName}">
         <div class="card-poster">
           ${poster
-            ? `<img src="${escapeHTML(poster)}" alt="${title}" loading="lazy" width="130" height="195" class="loading">`
+            ? `<img src="${escapeHTML(poster)}" alt="${title}" loading="lazy" decoding="async" width="130" height="195" class="loading">`
             : ''}
           <div class="poster-placeholder">${!poster ? title : ''}</div>
         </div>
@@ -1102,8 +1102,8 @@
 
     // Attach load/error handlers to poster images (CSP forbids inline handlers)
     container.querySelectorAll('img.loading').forEach(img => {
-      img.addEventListener('load', () => img.classList.remove('loading'));
-      img.addEventListener('error', () => { img.style.display = 'none'; });
+      img.addEventListener('load', () => img.classList.remove('loading'), { once: true });
+      img.addEventListener('error', () => { img.style.display = 'none'; img.classList.remove('loading'); }, { once: true });
     });
   }
 
@@ -1165,7 +1165,7 @@
       <div class="card card-collection" data-collection-id="${escapeHTML(collection.id)}">
         <div class="card-poster collection-poster-stack">
           ${poster
-            ? `<img src="${escapeHTML(poster)}" alt="${name}" loading="lazy" width="130" height="195" class="loading">`
+            ? `<img src="${escapeHTML(poster)}" alt="${name}" loading="lazy" decoding="async" width="130" height="195" class="loading">`
             : ''}
           <div class="poster-placeholder">${!poster ? name : ''}</div>
           <div class="collection-badge">${count} movies</div>
@@ -1189,7 +1189,7 @@
     return `
       <div class="card library-group-tile" data-group-id="${escapeHTML(group.id)}" data-group-type="${group.type}">
         <div class="card-poster collection-poster-stack">
-          ${poster ? `<img src="${escapeHTML(poster)}" alt="${name}" loading="lazy" width="130" height="195" class="loading">` : ''}
+          ${poster ? `<img src="${escapeHTML(poster)}" alt="${name}" loading="lazy" decoding="async" width="130" height="195" class="loading">` : ''}
           <div class="poster-placeholder">${!poster ? name : ''}</div>
           <div class="collection-badge">${count} ${typeLabel}</div>
         </div>
@@ -1210,8 +1210,8 @@
     });
     // Also attach image load handlers for collection posters
     container.querySelectorAll('.card-collection img.loading').forEach(img => {
-      img.addEventListener('load', () => img.classList.remove('loading'));
-      img.addEventListener('error', () => { img.style.display = 'none'; });
+      img.addEventListener('load', () => img.classList.remove('loading'), { once: true });
+      img.addEventListener('error', () => { img.style.display = 'none'; img.classList.remove('loading'); }, { once: true });
     });
   }
 
@@ -1277,7 +1277,7 @@
            data-stremio-id="${escapeHTML(stremioId)}">
         <div class="channel-poster">
           ${logo
-            ? `<img src="${escapeHTML(logo)}" alt="${name}" loading="lazy" class="loading">`
+            ? `<img src="${escapeHTML(logo)}" alt="${name}" loading="lazy" decoding="async" class="loading">`
             : ''}
           <div class="channel-placeholder">${!logo ? name.substring(0, 3).toUpperCase() : ''}</div>
           <span class="channel-live-badge">LIVE</span>
@@ -1310,8 +1310,8 @@
     }
 
     container.querySelectorAll('.channel-poster img.loading').forEach(img => {
-      img.addEventListener('load', () => img.classList.remove('loading'));
-      img.addEventListener('error', () => { img.style.display = 'none'; });
+      img.addEventListener('load', () => img.classList.remove('loading'), { once: true });
+      img.addEventListener('error', () => { img.style.display = 'none'; img.classList.remove('loading'); }, { once: true });
     });
   }
 
@@ -1423,8 +1423,8 @@
       grid.innerHTML = filtered.slice(0, 100).map(ch => channelCardHTML(ch)).join('');
       // Only re-attach image load/error handlers; click delegation is on the grid once
       grid.querySelectorAll('.channel-poster img.loading').forEach(img => {
-        img.addEventListener('load', () => img.classList.remove('loading'));
-        img.addEventListener('error', () => { img.style.display = 'none'; });
+        img.addEventListener('load', () => img.classList.remove('loading'), { once: true });
+        img.addEventListener('error', () => { img.style.display = 'none'; img.classList.remove('loading'); }, { once: true });
       });
     }
 
@@ -3958,8 +3958,8 @@
 
     // Image load/error handlers
     overlay.querySelectorAll('img.loading').forEach(img => {
-      img.addEventListener('load', () => img.classList.remove('loading'));
-      img.addEventListener('error', () => { img.style.display = 'none'; });
+      img.addEventListener('load', () => img.classList.remove('loading'), { once: true });
+      img.addEventListener('error', () => { img.style.display = 'none'; img.classList.remove('loading'); }, { once: true });
     });
   }
 
@@ -4583,8 +4583,8 @@
 
     // Image load/error handlers for tile poster images
     container.querySelectorAll('.library-group-tile img.loading').forEach(img => {
-      img.addEventListener('load', () => img.classList.remove('loading'));
-      img.addEventListener('error', () => { img.style.display = 'none'; });
+      img.addEventListener('load', () => img.classList.remove('loading'), { once: true });
+      img.addEventListener('error', () => { img.style.display = 'none'; img.classList.remove('loading'); }, { once: true });
     });
   }
 

@@ -266,6 +266,7 @@ class LibraryManager {
     this._metadataSaveDebounce = null;
     this._discoveryCache = null;      // cached result of _discoverUntrackedFiles
     this._discoveryCacheTs = 0;       // timestamp of last discovery scan
+    this._discoveryRefreshInFlight = null; // in-flight async discovery promise
     this._getAllCache = null;          // cached result of getAll()
     this._getAllCacheTs = 0;           // timestamp of last getAll() cache build
 
@@ -2250,21 +2251,21 @@ class LibraryManager {
   getAll() {
     const cacheNow = Date.now();
     if (this._getAllCache && cacheNow - this._getAllCacheTs < 2000) return this._getAllCache;
-    const tracked = [...this._items.values()];
-    const now = Date.now();
-    // Every mutation path (add/remove/convert/music/manual) already sets
-    // _discoveryCache = null explicitly, so the TTL is just a backstop
-    // for files that appear under the library path without going through
-    // LibraryManager (e.g. a drag-drop into the mount or a rename by the
-    // user). A recursive fs walk over a large library on eMMC costs
-    // several seconds — bumping the TTL from 10s to 60s eliminates the
-    // "every tab-switch triggers a re-walk" penalty without changing
-    // the invariants.
-    if (!this._discoveryCache || now - this._discoveryCacheTs > 60000) {
-      this._discoveryCache = this._discoverUntrackedFiles();
-      this._discoveryCacheTs = now;
+
+    // Trigger async discovery refresh in background if stale
+    if (!this._discoveryCache || cacheNow - this._discoveryCacheTs > 60000) {
+      if (!this._discoveryRefreshInFlight) {
+        this._discoveryRefreshInFlight = this._discoverUntrackedFilesAsync().then(result => {
+          this._discoveryCache = result;
+          this._discoveryCacheTs = Date.now();
+          this._getAllCache = null;
+          this._discoveryRefreshInFlight = null;
+        }).catch(() => { this._discoveryRefreshInFlight = null; });
+      }
     }
-    const all = [...tracked, ...this._discoveryCache].sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+
+    const tracked = [...this._items.values()];
+    const all = [...tracked, ...(this._discoveryCache || [])].sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
     const result = all.map(i => this._sanitizeItem(i));
     this._getAllCache = result;
     this._getAllCacheTs = cacheNow;
@@ -3097,9 +3098,13 @@ class LibraryManager {
    * each non-pack 'downloading' item counts as 1 slot.
    */
   _countActiveSlots() {
-    const activeItems = [...this._items.values()].filter(i => i.status === 'downloading');
-    const activePacks = new Set(activeItems.filter(i => i.packId).map(i => i.packId));
-    const activeSingles = activeItems.filter(i => !i.packId).length;
+    const activePacks = new Set();
+    let activeSingles = 0;
+    for (const item of this._items.values()) {
+      if (item.status !== 'downloading') continue;
+      if (item.packId) activePacks.add(item.packId);
+      else activeSingles++;
+    }
     return activePacks.size + activeSingles;
   }
 
@@ -5327,11 +5332,7 @@ class LibraryManager {
     const doWrite = async () => {
       try {
         // Rotate current -> backup before writing new version. Best-effort.
-        try {
-          if (fs.existsSync(this._metadataFile)) {
-            await fs.promises.copyFile(this._metadataFile, backupFile);
-          }
-        } catch { /* non-critical */ }
+        try { await fs.promises.copyFile(this._metadataFile, backupFile); } catch {}
 
         // Atomic + durable write: write to temp file, fsync, rename.
         // Without fsync a power loss between write and rename can leave
@@ -5377,8 +5378,9 @@ class LibraryManager {
   /**
    * Scan the library directory for video files not tracked in metadata.
    * Returns them as synthetic library items so they show up in the UI.
+   * Synchronous version — kept for call sites that need a blocking result.
    */
-  _discoverUntrackedFiles() {
+  _discoverUntrackedFilesSync() {
     const discovered = [];
     const trackedPaths = new Set(
       [...this._items.values()]
@@ -5524,6 +5526,141 @@ class LibraryManager {
     };
 
     walk(this._libraryPath, '', 0);
+
+    if (discovered.length > 0) {
+      console.log(`[Library] Discovered ${discovered.length} untracked file(s) on disk`);
+    }
+    return discovered;
+  }
+
+  /**
+   * Async version of _discoverUntrackedFilesSync — uses fs.promises so the
+   * recursive directory walk runs on the libuv threadpool instead of
+   * blocking the event loop. Called by getAll() via a background-refresh
+   * pattern so the first call returns stale (or empty) results instantly
+   * and the fresh scan lands on the next getAll() after the promise settles.
+   */
+  async _discoverUntrackedFilesAsync() {
+    const discovered = [];
+    const trackedPaths = new Set(
+      [...this._items.values()]
+        .filter(i => i.filePath)
+        .map(i => path.normalize(i.filePath))
+    );
+
+    const trackedEpisodeKeys = new Set();
+    for (const i of this._items.values()) {
+      if (i.imdbId && i.season != null && i.episode != null) {
+        trackedEpisodeKeys.add(`${i.imdbId}|${i.season}|${i.episode}`);
+      }
+    }
+
+    const MIN_VIDEO_SIZE = 50 * 1024 * 1024;
+    const MAX_DEPTH = 6;
+    const MAX_DISCOVERED = 5000;
+
+    const buildItem = (relPath, stat) => {
+      const fileName = path.basename(relPath);
+      const innerParsed = this.parseFileName(fileName);
+      const dirHint = this.deriveSeriesQueryFromPath(relPath);
+      let parsed = innerParsed;
+      const needsDirFallback = !innerParsed.title && !innerParsed.show;
+      if (needsDirFallback && dirHint) {
+        parsed = this.parseFileName(dirHint.query);
+        if (dirHint.year && !parsed.year) parsed = { ...parsed, year: dirHint.year };
+      } else if (innerParsed.type === 'series' && this._weakShowName(innerParsed.show) && dirHint) {
+        parsed = {
+          ...innerParsed,
+          show: dirHint.query,
+          year: innerParsed.year || dirHint.year || null,
+          query: dirHint.query,
+        };
+      }
+      const displayName = parsed.type === 'series'
+        ? (parsed.show || parsed.episodeName || fileName)
+        : (parsed.title || parsed.episodeName || fileName);
+
+      const packEntry = this._findPackCatalogEntryForRelPath(relPath);
+
+      if (packEntry?.imdbId && parsed.season != null && parsed.episode != null) {
+        const key = `${packEntry.imdbId}|${parsed.season}|${parsed.episode}`;
+        if (trackedEpisodeKeys.has(key)) return null;
+      }
+
+      return {
+        id: 'disk_' + relPath,
+        name: displayName,
+        showName: parsed.type === 'series' ? (parsed.show || packEntry?.title || null) : null,
+        type: parsed.type,
+        year: parsed.year || packEntry?.year || '',
+        poster: packEntry?.poster || '',
+        season: parsed.season,
+        episode: parsed.episode,
+        status: 'complete',
+        filePath: relPath,
+        fileName,
+        fileSize: stat.size,
+        addedAt: stat.mtimeMs,
+        matchState: packEntry?.imdbId ? 'matched' : 'unmatched',
+        matchConfidence: 0,
+        parsed,
+        imdbId: packEntry?.imdbId || null,
+        packId: packEntry ? `pack_${packEntry.infoHash}` : undefined,
+        infoHash: packEntry?.infoHash || null,
+        magnetUri: packEntry?.magnetUri || null,
+      };
+    };
+
+    const walk = async (absDir, relDir, depth) => {
+      if (discovered.length >= MAX_DISCOVERED) return;
+      if (depth > MAX_DEPTH) return;
+
+      let entries;
+      try {
+        entries = await fs.promises.readdir(absDir, { withFileTypes: true });
+      } catch (err) {
+        if (depth === 0) console.error(`[Library] Disk scan error: ${err.message}`);
+        return;
+      }
+
+      for (const entry of entries) {
+        if (discovered.length >= MAX_DISCOVERED) return;
+        if (entry.isSymbolicLink()) continue;
+
+        if (depth === 0) {
+          if (entry.name.startsWith('_metadata')) continue;
+          if (entry.name === this._torrentCacheName) continue;
+        }
+        if (entry.name.endsWith('.tmp')) continue;
+        if (entry.name.startsWith('.')) continue;
+
+        const absPath = path.join(absDir, entry.name);
+        const relPath = relDir ? path.join(relDir, entry.name) : entry.name;
+
+        if (entry.isDirectory()) {
+          await walk(absPath, relPath, depth + 1);
+          continue;
+        }
+        if (!entry.isFile()) continue;
+
+        const ext = path.extname(entry.name).toLowerCase();
+        if (!VIDEO_EXTENSIONS.has(ext)) continue;
+
+        const normRel = path.normalize(relPath);
+        if (trackedPaths.has(normRel)) continue;
+        if (trackedPaths.has(entry.name)) continue;
+
+        let stat;
+        try { stat = await fs.promises.stat(absPath); }
+        catch { continue; }
+        if (stat.size < MIN_VIDEO_SIZE) continue;
+
+        const built = buildItem(relPath, stat);
+        if (built) discovered.push(built);
+      }
+    };
+
+    await walk(this._libraryPath, '', 0);
 
     if (discovered.length > 0) {
       console.log(`[Library] Discovered ${discovered.length} untracked file(s) on disk`);

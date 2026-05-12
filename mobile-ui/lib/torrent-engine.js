@@ -18,7 +18,7 @@
 
 const torrentStream = require('torrent-stream');
 const { spawn } = require('child_process');
-const { Transform } = require('stream');
+const { Transform, PassThrough } = require('stream');
 const fs = require('fs');
 const path = require('path');
 const { TRACKERS, isFileNameSafe, getMimeType, sanitizeFilename } = require('./file-safety');
@@ -355,11 +355,13 @@ class TorrentEngine {
         'Content-Length': end - start + 1,
       });
 
-      const stream = file.createReadStream({ start, end });
+      const rawStream = file.createReadStream({ start, end });
+      const stream = new PassThrough({ highWaterMark: 256 * 1024 });
+      rawStream.pipe(stream);
       const meter = this._createMeter(hash, 'direct');
       stream.pipe(meter).pipe(res);
-      stream.on('error', (err) => { console.error(`[TorrentEngine] Stream error: ${err.message}`); stream.destroy(); meter.destroy(); if (!res.destroyed) res.end(); });
-      res.on('close', () => { stream.destroy(); meter.destroy(); });
+      rawStream.on('error', (err) => { console.error(`[TorrentEngine] Stream error: ${err.message}`); rawStream.destroy(); stream.destroy(); meter.destroy(); if (!res.destroyed) res.end(); });
+      res.on('close', () => { rawStream.destroy(); stream.destroy(); meter.destroy(); });
     } else {
       res.status(200);
       res.set({
@@ -368,11 +370,13 @@ class TorrentEngine {
         'Content-Length': fileSize,
       });
 
-      const stream = file.createReadStream();
+      const rawStream = file.createReadStream();
+      const stream = new PassThrough({ highWaterMark: 256 * 1024 });
+      rawStream.pipe(stream);
       const meter = this._createMeter(hash, 'direct');
       stream.pipe(meter).pipe(res);
-      stream.on('error', (err) => { console.error(`[TorrentEngine] Stream error: ${err.message}`); stream.destroy(); meter.destroy(); if (!res.destroyed) res.end(); });
-      res.on('close', () => { stream.destroy(); meter.destroy(); });
+      rawStream.on('error', (err) => { console.error(`[TorrentEngine] Stream error: ${err.message}`); rawStream.destroy(); stream.destroy(); meter.destroy(); if (!res.destroyed) res.end(); });
+      res.on('close', () => { rawStream.destroy(); stream.destroy(); meter.destroy(); });
     }
   }
 
@@ -481,6 +485,8 @@ class TorrentEngine {
     // first audio track (the '?' makes audio optional so files without audio
     // don't cause FFmpeg to error out).
     const ffmpeg = spawn('ffmpeg', [
+      '-probesize', '1000000',
+      '-analyzeduration', '1000000',
       '-i', 'pipe:0',
       '-map', '0:v:0',
       '-map', '0:a:0?',
@@ -493,13 +499,15 @@ class TorrentEngine {
       'pipe:1',
     ]);
 
-    const source = file.createReadStream();
+    const rawSource = file.createReadStream();
+    const source = new PassThrough({ highWaterMark: 256 * 1024 });
+    rawSource.pipe(source);
     source.pipe(ffmpeg.stdin);
 
     const meter = this._createMeter(hash, 'remux');
     ffmpeg.stdout.pipe(meter).pipe(res);
 
-    source.on('error', (err) => {
+    rawSource.on('error', (err) => {
       console.error(`[TorrentEngine] Source stream error during remux: ${err.message}`);
       try { ffmpeg.stdin.end(); } catch(e) {}
       ffmpeg.kill('SIGTERM');
@@ -534,6 +542,7 @@ class TorrentEngine {
 
     res.on('close', () => {
       releaseInFlight();
+      rawSource.destroy();
       source.destroy();
       meter.destroy();
       ffmpeg.kill('SIGTERM');
@@ -603,6 +612,7 @@ class TorrentEngine {
     this._streamStats.set(streamKey, stat);
 
     const meter = new Transform({
+      highWaterMark: 256 * 1024,
       transform(chunk, _enc, cb) {
         stat.bytesSent += chunk.length;
         // Update rolling egress rate every second

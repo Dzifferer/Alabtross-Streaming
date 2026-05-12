@@ -43,6 +43,9 @@ class WorkerClient {
     this.secret       = opts.secret || '';
     this.stallMs      = opts.stallMs || DEFAULT_STALL_MS;
     this.encodeMaxMs  = opts.encodeMaxMs || DEFAULT_ENCODE_MAX_MS;
+    this._healthCache    = undefined;
+    this._healthCacheTs  = 0;
+    this._healthCacheTTL = 30000; // 30s negative cache
   }
 
   enabled() {
@@ -60,11 +63,22 @@ class WorkerClient {
    */
   async checkHealth() {
     if (!this.workerUrl) return null;
+
+    const now = Date.now();
+    if (this._healthCache !== undefined && now - this._healthCacheTs < this._healthCacheTTL) {
+      return this._healthCache;
+    }
+
     let urlObj;
     try { urlObj = new URL('/health', this.workerUrl); }
-    catch { return null; }
+    catch {
+      this._healthCache = null;
+      this._healthCacheTs = Date.now();
+      this._healthCacheTTL = 30000;
+      return null;
+    }
 
-    return new Promise((resolve) => {
+    const result = await new Promise((resolve) => {
       const req = this._module(urlObj).get({
         protocol: urlObj.protocol,
         hostname: urlObj.hostname,
@@ -91,6 +105,11 @@ class WorkerClient {
       req.setTimeout(HEALTH_TIMEOUT_MS, () => { try { req.destroy(); } catch {} resolve(null); });
       req.on('error', () => resolve(null));
     });
+
+    this._healthCache = result;
+    this._healthCacheTs = Date.now();
+    this._healthCacheTTL = result ? 60000 : 30000; // 60s positive, 30s negative
+    return result;
   }
 
   /**

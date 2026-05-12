@@ -555,6 +555,7 @@ const TMDB_CACHE_MAX        = 2048;
 const TMDB_CACHE_TTL_OK_MS  = 30 * 60 * 1000;
 const TMDB_CACHE_TTL_ERR_MS = 60 * 60 * 1000;
 const _tmdbCache = new Map();   // url -> { ok, value, expiresAt }
+const _tmdbInflight = new Map();
 function _tmdbCacheGet(url) {
   const hit = _tmdbCache.get(url);
   if (!hit) return null;
@@ -586,41 +587,47 @@ function tmdbFetch(endpoint, params = {}) {
     return Promise.reject(cached.value);
   }
 
-  return new Promise((resolve, reject) => {
-    const deadline = setTimeout(() => {
-      if (req) req.destroy();
-      reject(new Error('Timeout'));
-    }, 10000);
-    // Reuse the keep-alive agent from stream-providers so per-page-load TMDB
-    // calls (search, details, season metadata) skip the TLS handshake on
-    // the Orin's CPU after the first one.
-    const req = https.get(url, { timeout: 10000, family: 4, agent: providersHttpsAgent }, (res) => {
-      if (res.statusCode !== 200) {
-        clearTimeout(deadline);
-        res.resume();
-        const err = new Error(`TMDB HTTP ${res.statusCode}`);
-        // Remember non-200s so we don't hammer TMDB on broken ids /
-        // transient server errors. Rate-limit replies (429) get the
-        // same cache; the 1-hr miss window is shorter than a TMDB
-        // cool-off anyway.
-        _tmdbCacheSet(url, false, err, TMDB_CACHE_TTL_ERR_MS);
-        return reject(err);
-      }
-      let body = '';
-      res.on('data', chunk => body += chunk);
-      res.on('end', () => {
-        clearTimeout(deadline);
-        try {
-          const value = JSON.parse(body);
-          _tmdbCacheSet(url, true, value, TMDB_CACHE_TTL_OK_MS);
-          resolve(value);
+  if (_tmdbInflight.has(url)) return _tmdbInflight.get(url);
+
+  const p = (async () => {
+    return new Promise((resolve, reject) => {
+      const deadline = setTimeout(() => {
+        if (req) req.destroy();
+        reject(new Error('Timeout'));
+      }, 10000);
+      // Reuse the keep-alive agent from stream-providers so per-page-load TMDB
+      // calls (search, details, season metadata) skip the TLS handshake on
+      // the Orin's CPU after the first one.
+      const req = https.get(url, { timeout: 10000, family: 4, agent: providersHttpsAgent }, (res) => {
+        if (res.statusCode !== 200) {
+          clearTimeout(deadline);
+          res.resume();
+          const err = new Error(`TMDB HTTP ${res.statusCode}`);
+          // Remember non-200s so we don't hammer TMDB on broken ids /
+          // transient server errors. Rate-limit replies (429) get the
+          // same cache; the 1-hr miss window is shorter than a TMDB
+          // cool-off anyway.
+          _tmdbCacheSet(url, false, err, TMDB_CACHE_TTL_ERR_MS);
+          return reject(err);
         }
-        catch (e) { reject(e); }
+        let body = '';
+        res.on('data', chunk => body += chunk);
+        res.on('end', () => {
+          clearTimeout(deadline);
+          try {
+            const value = JSON.parse(body);
+            _tmdbCacheSet(url, true, value, TMDB_CACHE_TTL_OK_MS);
+            resolve(value);
+          }
+          catch (e) { reject(e); }
+        });
       });
+      req.on('error', (e) => { clearTimeout(deadline); reject(e); });
+      req.on('timeout', () => { clearTimeout(deadline); req.destroy(); reject(new Error('Timeout')); });
     });
-    req.on('error', (e) => { clearTimeout(deadline); reject(e); });
-    req.on('timeout', () => { clearTimeout(deadline); req.destroy(); reject(new Error('Timeout')); });
-  });
+  })().finally(() => _tmdbInflight.delete(url));
+  _tmdbInflight.set(url, p);
+  return p;
 }
 
 // Lowercase + strip diacritics so titles with macrons/accents (e.g. TMDB's
@@ -1023,7 +1030,7 @@ app.get('/api/mb-meta/:type/:mbid', rateLimit, async (req, res) => {
 
 const _coverCache = new Map();              // mbid@size -> { buf, type, ts }
 const _coverMisses = new Map();             // mbid@size -> ts (404s)
-const COVER_CACHE_MAX = 256;                // ~256 * 500KB ≈ 130MB worst case
+const COVER_CACHE_MAX = 64;                 // ~64 * 500KB ≈ 32MB worst case
 const COVER_CACHE_TTL = 7 * 24 * 3600 * 1000;   // 1 week
 const COVER_MISS_TTL = 60 * 60 * 1000;          // 1 hour
 
@@ -1045,8 +1052,6 @@ function _coverCacheSet(key, buf, type) {
 
 function _fetchImage(url, maxRedirects = 3) {
   return new Promise((resolve, reject) => {
-    const https = require('https');
-    const http = require('http');
     const mod = url.startsWith('https:') ? https : http;
     const req = mod.get(url, {
       headers: { 'User-Agent': 'AlabtrossStreaming/1.0', 'Accept': 'image/*' },
@@ -4413,7 +4418,7 @@ app.get('/api/library/:id/stream/transcode', rateLimit, transcodeGate, async (re
 // blocks until the first .ts segment is on disk, then serves the m3u8
 // playlist so the browser can start pulling segments. The playlist uses
 // relative URLs so /segment requests resolve under this same path.
-app.get('/api/library/:id/stream/hls/playlist.m3u8', rateLimit, async (req, res) => {
+app.get('/api/library/:id/stream/hls/playlist.m3u8', async (req, res) => {
   const item = library.getItem(req.params.id);
   if (!item) return res.status(404).json({ error: 'Item not found' });
   if (item.status !== 'complete' && item.status !== 'converting') {
@@ -4533,7 +4538,7 @@ app.get('/api/library/:id/stream/hls/playlist.m3u8', rateLimit, async (req, res)
 // If a segment hasn't been written yet (client is asking ahead of the
 // transcoder), block briefly for it to appear. Segment requests keep the
 // session alive so the idle cleanup doesn't kill ffmpeg mid-watch.
-app.get('/api/library/:id/stream/hls/:segment', rateLimit, async (req, res) => {
+app.get('/api/library/:id/stream/hls/:segment', async (req, res) => {
   // Pin the segment name to the exact pattern ffmpeg writes so a client
   // can't use this endpoint to read arbitrary files under the cache dir.
   const name = req.params.segment;
@@ -5280,8 +5285,9 @@ app.get('/api/cast/sessions', (req, res) => {
 app.use(express.static(path.join(__dirname, 'public'), {
   etag: true,
   lastModified: true,
+  maxAge: '1d',
   setHeaders: (res, filePath) => {
-    if (filePath.endsWith('.js') || filePath.endsWith('.css') || filePath.endsWith('.html')) {
+    if (filePath.endsWith('.html')) {
       res.setHeader('Cache-Control', 'no-cache');
     }
   },

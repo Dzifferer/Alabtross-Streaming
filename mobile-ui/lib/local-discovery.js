@@ -152,9 +152,9 @@ function isLocationSafe(locationUrl) {
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
     const host = u.hostname;
     // Block loopback and metadata endpoints
-    if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return false;
-    if (host === '169.254.169.254') return false;
-    if (host.startsWith('::ffff:127.')) return false;
+    if (host === 'localhost' || host.startsWith('127.') || host === '::1') return false;
+    if (host.startsWith('169.254.')) return false;
+    if (host.startsWith('::ffff:127.') || host.startsWith('::ffff:169.254.')) return false;
     // Only allow ports commonly used by UPnP devices (above 1024)
     const port = parseInt(u.port || (u.protocol === 'https:' ? '443' : '80'), 10);
     if (port < 1024 && port !== 80 && port !== 443) return false;

@@ -94,7 +94,7 @@ async function castToDLNA(device, mediaUrl, title = 'Albatross', mimeType = 'vid
   }
 
   // Set the media URI
-  const didlMetadata = escapeXml([
+  const didlMetadata = [
     '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"',
     ' xmlns:dc="http://purl.org/dc/elements/1.1/"',
     ' xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">',
@@ -104,7 +104,7 @@ async function castToDLNA(device, mediaUrl, title = 'Albatross', mimeType = 'vid
     '<upnp:class>object.item.videoItem.movie</upnp:class>',
     '</item>',
     '</DIDL-Lite>',
-  ].join(''));
+  ].join('');
 
   await soapAction(controlUrl, 'SetAVTransportURI', [
     '<InstanceID>0</InstanceID>',
@@ -292,6 +292,8 @@ async function castToChromecast(device, mediaUrl, title = 'Albatross', mimeType 
             _client: client,
             _player: player,
           };
+          const oldSession = activeSessions.get(device.id);
+          if (oldSession && oldSession._healthCheck) clearInterval(oldSession._healthCheck);
           activeSessions.set(device.id, session);
 
           // Periodic health-check: clean up stale sessions

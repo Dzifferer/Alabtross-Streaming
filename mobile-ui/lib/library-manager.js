@@ -466,6 +466,7 @@ class LibraryManager {
    * Prevents path traversal attacks via crafted IDs (e.g. disk_../../etc/passwd).
    */
   _isPathSafe(fullPath) {
+    if (typeof fullPath !== 'string' || fullPath.includes('\0')) return false;
     const resolved = path.resolve(fullPath);
     const libraryRoot = path.resolve(this._libraryPath);
     return resolved === libraryRoot || resolved.startsWith(libraryRoot + path.sep);

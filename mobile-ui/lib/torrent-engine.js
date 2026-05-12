@@ -644,7 +644,7 @@ class TorrentEngine {
     if (videoFile) {
       try {
         const fullPath = path.join(this._downloadPath, videoFile.path);
-        if (!fullPath.startsWith(this._downloadPath)) return null;
+        if (!fullPath.startsWith(this._downloadPath + path.sep) && fullPath !== this._downloadPath) return null;
         const diskSize = fs.existsSync(fullPath) ? fs.statSync(fullPath).size : 0;
         progress = { downloaded: diskSize, total: videoFile.length, pct: +(diskSize / videoFile.length * 100).toFixed(1) };
       } catch {}

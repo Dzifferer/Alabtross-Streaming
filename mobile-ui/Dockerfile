@@ -218,9 +218,8 @@ RUN ldconfig
 
 WORKDIR /app
 
-COPY package.json package-lock.json* ./
-RUN npm ci --production 2>/dev/null || npm install --production && \
-    npm cache clean --force
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
 
 COPY . .
 

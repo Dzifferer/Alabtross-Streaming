@@ -292,15 +292,28 @@ async function castToChromecast(device, mediaUrl, title = 'Albatross', mimeType 
             _client: client,
             _player: player,
           };
+          // Tear down any prior session for this device — strip its
+          // 'status' listener, kill the health-check, close its client.
+          // Otherwise the old player's status callback can fire AFTER we
+          // install the new session and unconditionally delete it from
+          // activeSessions (the closure captures device.id, not session).
           const oldSession = activeSessions.get(device.id);
-          if (oldSession && oldSession._healthCheck) clearInterval(oldSession._healthCheck);
+          if (oldSession) {
+            if (oldSession._healthCheck) clearInterval(oldSession._healthCheck);
+            try { if (oldSession._player) oldSession._player.removeAllListeners('status'); } catch { /* ignore */ }
+            try { if (oldSession._client && !oldSession._client.destroyed) oldSession._client.close(); } catch { /* ignore */ }
+          }
           activeSessions.set(device.id, session);
 
           // Periodic health-check: clean up stale sessions
           session._healthCheck = setInterval(() => {
             if (!session._client || session._client.destroyed) {
               clearInterval(session._healthCheck);
-              activeSessions.delete(device.id);
+              // Only delete from the map if we're still the active session
+              // for this device — a newer cast may have replaced us.
+              if (activeSessions.get(device.id) === session) {
+                activeSessions.delete(device.id);
+              }
             }
           }, 60000);
 
@@ -309,8 +322,12 @@ async function castToChromecast(device, mediaUrl, title = 'Albatross', mimeType 
             if (status.playerState === 'IDLE' && status.idleReason === 'FINISHED') {
               session.status = 'finished';
               if (session._healthCheck) clearInterval(session._healthCheck);
-              activeSessions.delete(device.id);
-              client.close();
+              // Identity check: do not wipe a newer session that's reused
+              // the same device.id slot.
+              if (activeSessions.get(device.id) === session) {
+                activeSessions.delete(device.id);
+              }
+              try { client.close(); } catch { /* ignore */ }
             } else if (status.playerState) {
               session.status = status.playerState.toLowerCase();
             }

@@ -3577,6 +3577,12 @@ class LibraryManager {
     // Handle discovered (untracked) files
     if (!item && id.startsWith('disk_')) {
       const relPath = id.slice(5); // strip 'disk_' prefix
+      // Require a known media extension on the basename. Without this,
+      // a request for disk_..%2F_metadata.json (or any non-media file
+      // happening to live under LIBRARY_PATH such as pre-repair-*.bak)
+      // would stream that file out of the library directory. _isPathSafe
+      // only prevents escape; it does not constrain file type.
+      if (!isFileNameSafe(path.basename(relPath), 'any')) return null;
       const fullPath = path.join(this._libraryPath, relPath);
       if (!this._isPathSafe(fullPath)) return null;
       try {
@@ -4422,6 +4428,13 @@ class LibraryManager {
       this._peerMgrByEngine.delete(engine);
       try { mgr.destroy(); } catch { /* ignore */ }
     }
+    // Strip our own listeners before destroy(). torrent-stream can fire
+    // 'wire'/'piece'/'download' callbacks on the destroyed engine between
+    // destroy() returning and the next libuv tick, which would otherwise
+    // mutate _recordGoodPeer state for a pack being recycled and leak
+    // listeners across the recycle. removeAllListeners is best-effort —
+    // some torrent-stream versions don't extend EventEmitter directly.
+    try { if (typeof engine.removeAllListeners === 'function') engine.removeAllListeners(); } catch { /* ignore */ }
     try { engine.destroy(); } catch { /* ignore */ }
   }
 
@@ -6556,8 +6569,19 @@ class LibraryManager {
         `[Library] Deferring local transcode of "${item.name}" — ` +
         `${this._liveTranscodeCount} live session(s) active`
       );
+      // Roll back the in-flight conversion state the queue stamped before
+      // awaiting us — otherwise status='converting' sticks with no ffmpeg
+      // process behind it, the UI shows a permanent spinner, and on
+      // restart _resumeInterruptedConversions sees a "converting" item
+      // and tries to restart it. Same pattern as
+      // _onConversionPausedForDownloads.
+      item.status = 'complete';
+      item.convertKind = null;
+      item.convertProgress = null;
+      item.convertError = null;
       item._pendingConversion = true;
       item._pendingConvertKind = kind;
+      this._saveMetadata();
       return;
     }
 

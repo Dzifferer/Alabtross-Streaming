@@ -5,6 +5,7 @@ const http = require('http');
 const https = require('https');
 const { URL } = require('url');
 const dns = require('dns');
+const net = require('net');
 const { spawn } = require('child_process');
 
 // ─── DNS Fallback (matches stream-providers.js) ──────────────────────
@@ -228,17 +229,32 @@ if (API_KEY) {
 }
 
 // ─── CSRF Origin Header Validation ───────────────────────────────────
+// State-changing requests must either carry a same-origin Origin header
+// (browser requests) or be authenticated with a valid API key (CLI / non-
+// browser callers). The previous "missing Origin = trusted" path was a
+// CSRF bypass — browsers can omit Origin in some form-POST contexts and
+// every non-browser client omits it by default, so a malicious page on
+// the LAN could drive state-changing endpoints when API_KEY was unset.
 app.use('/api', (req, res, next) => {
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
   const origin = req.headers['origin'];
-  if (!origin) return next();
   const host = req.headers['host'] || '';
-  if (origin === `http://${host}` || origin === `https://${host}`
-      || /^https?:\/\/localhost(:\d+)?$/.test(origin)
-      || /^https?:\/\/127\.0\.0\.1(:\d+)?$/.test(origin)) {
-    return next();
+  if (origin) {
+    if (origin === `http://${host}` || origin === `https://${host}`
+        || /^https?:\/\/localhost(:\d+)?$/.test(origin)
+        || /^https?:\/\/127\.0\.0\.1(:\d+)?$/.test(origin)) {
+      return next();
+    }
+    return res.status(403).json({ error: 'Forbidden: cross-origin request' });
   }
-  return res.status(403).json({ error: 'Forbidden: cross-origin request' });
+  // No Origin header. Only allow when the request carries a valid API
+  // key — CLI tools and curl scripts must opt in via API_KEY.
+  if (API_KEY) {
+    const provided = req.headers['authorization']?.replace('Bearer ', '')
+                  || req.query.apiKey;
+    if (provided === API_KEY) return next();
+  }
+  return res.status(403).json({ error: 'Forbidden: missing Origin header on state-changing request' });
 });
 
 // ─── Concurrency Gate (per-IP + global) ──────────────────────────────
@@ -373,6 +389,19 @@ function _stopHlsSession(itemId, reason) {
   console.log(`[HLS] Session ended for ${itemId}: ${reason}`);
 }
 
+// Cap libx264 worker threads for live transcode and HLS so a single
+// live session can't pin every core. Mirrors the maxConversionCores
+// ceiling that the background conversion path uses; the CPU monitor
+// already governs background work but ignored the live path. NVENC
+// returns 0 (no -threads emitted) because the encode is GPU-side.
+function _liveTranscodeThreadsCap() {
+  try {
+    const n = library.getCpuProtection().maxConversionCores;
+    if (Number.isFinite(n) && n >= 1) return n;
+  } catch { /* fall through */ }
+  return 0;
+}
+
 function _startHlsSession(itemId, filePath) {
   const dir = _hlsSessionDirFor(itemId);
   // Wipe any stale contents from a previous run of the same id.
@@ -404,7 +433,7 @@ function _startHlsSession(itemId, filePath) {
     '-map', '0:a:0?',
     '-sn',
     '-dn',
-    ...ffmpegHw.buildLiveEncoderArgs(),
+    ...ffmpegHw.buildLiveEncoderArgs(_liveTranscodeThreadsCap()),
     '-vf', ffmpegHw.buildScaleFilter(1280, probe.codec, probe.pixFmt),
     '-g', String(gop),
     '-keyint_min', String(gop),
@@ -4362,7 +4391,7 @@ app.get('/api/library/:id/stream/transcode', rateLimit, transcodeGate, async (re
     '-sn',
     '-dn',
 
-    ...ffmpegHw.buildLiveEncoderArgs(),
+    ...ffmpegHw.buildLiveEncoderArgs(_liveTranscodeThreadsCap()),
     '-vf', ffmpegHw.buildScaleFilter(1280, probe.codec, probe.pixFmt),
     // Short GOP so we get an IDR — and therefore a flushable fragment —
     // within ~2 seconds regardless of the source's native keyframe
@@ -4566,6 +4595,11 @@ app.get('/api/library/:id/stream/hls/playlist.m3u8', rateLimit, async (req, res)
       lockReject(err);
       throw err;
     } finally {
+      // Guard against early-return paths above (disk full, _startHlsSession
+      // throw) that exit before lockResolve() is called — waiters captured
+      // existingLock and must not hang forever. resolve-after-resolve and
+      // resolve-after-reject are both no-ops.
+      lockResolve();
       _hlsLocks.delete(req.params.id);
     }
   }
@@ -4815,19 +4849,117 @@ const PLAYLIST_CACHE_MAX = 20;
 const PLAYLIST_CACHE_TTL = 60 * 60 * 1000; // 1 hour
 
 // ─── SSRF Protection ──────────────────────────────────────────────────
-const BLOCKED_IP_RANGES = [
-  /^127\./, /^10\./, /^172\.(1[6-9]|2\d|3[01])\./, /^192\.168\./,
-  /^169\.254\./, /^0\./, /^100\.(6[4-9]|[7-9]\d|1[0-2]\d)\./, /^::1$/,
-  /^fc00:/, /^fe80:/, /^fd/, /^localhost$/i,
-  // IPv4-mapped IPv6 addresses
-  /^::ffff:127\./, /^::ffff:10\./, /^::ffff:192\.168\./,
-  /^::ffff:172\.(1[6-9]|2\d|3[01])\./,
-  /^::ffff:169\.254\./, /^::ffff:0\./,
-  /^::ffff:100\.(6[4-9]|[7-9]\d|1[0-2]\d)\./,
+// Block hostnames that point at private / link-local / cloud-metadata
+// addresses. Regex-on-the-string is brittle: it misses decimal-encoded
+// IPv4 (e.g. http://2130706433/ == 127.0.0.1), mixed IPv6 forms like
+// ::ffff:a9fe:a9fe == 169.254.169.254 (AWS IMDS), and shortened ULA
+// forms like fc12::1. Parse to a BigInt and compare against CIDRs.
+
+const _DENY_HOST_NAMES = new Set([
+  'localhost',
+  'localhost.localdomain',
+  // Cloud-provider instance metadata DNS names. The corresponding IP
+  // ranges are also blocked below, but blocking the name avoids the
+  // resolve hop and protects against DNS-rebinding tricks.
+  'metadata.google.internal',
+  'metadata.azure.com',
+]);
+
+// IPv4 ranges: each entry is [networkBigInt, prefix].
+function _v4(ip) {
+  const parts = ip.split('.').map(Number);
+  return (BigInt(parts[0]) << 24n) | (BigInt(parts[1]) << 16n) | (BigInt(parts[2]) << 8n) | BigInt(parts[3]);
+}
+const _BLOCKED_V4 = [
+  [_v4('0.0.0.0'),       8],   // 0.0.0.0/8 — "this host" range
+  [_v4('10.0.0.0'),      8],   // RFC 1918
+  [_v4('127.0.0.0'),     8],   // loopback
+  [_v4('169.254.0.0'),   16],  // link-local incl. 169.254.169.254 IMDS
+  [_v4('172.16.0.0'),    12],  // RFC 1918
+  [_v4('192.0.0.0'),     24],  // IETF protocol assignments
+  [_v4('192.168.0.0'),   16],  // RFC 1918
+  [_v4('100.64.0.0'),    10],  // CGNAT
+  [_v4('224.0.0.0'),     4],   // multicast
+  [_v4('240.0.0.0'),     4],   // reserved + 255.255.255.255 broadcast
 ];
 
+// IPv6 prefixes: each is [networkBigInt, prefix].
+function _v6(ip) {
+  // Accept fully-expanded or shortened form; rely on Node's parser via
+  // a Buffer-of-bytes conversion through dns lookup. Simpler approach:
+  // expand manually using URL or a small parser.
+  // Use a lightweight expansion: split on "::", pad to 8 groups, then
+  // walk groups. Handles IPv4-mapped (::ffff:1.2.3.4) by converting the
+  // trailing dotted-quad to two hex groups.
+  let s = ip.toLowerCase();
+  const dot = s.lastIndexOf('.');
+  if (dot >= 0) {
+    const colon = s.lastIndexOf(':', dot);
+    const v4 = s.slice(colon + 1).split('.').map(Number);
+    if (v4.length === 4 && v4.every(n => n >= 0 && n <= 255)) {
+      const hi = ((v4[0] << 8) | v4[1]).toString(16);
+      const lo = ((v4[2] << 8) | v4[3]).toString(16);
+      s = s.slice(0, colon + 1) + hi + ':' + lo;
+    }
+  }
+  const [lhs, rhs] = s.split('::');
+  const l = lhs ? lhs.split(':') : [];
+  const r = rhs !== undefined ? (rhs ? rhs.split(':') : []) : null;
+  let groups;
+  if (r === null) {
+    groups = l;
+  } else {
+    const pad = 8 - l.length - r.length;
+    groups = [...l, ...Array(pad).fill('0'), ...r];
+  }
+  if (groups.length !== 8) return 0n;
+  let v = 0n;
+  for (const g of groups) {
+    const n = parseInt(g || '0', 16);
+    if (!Number.isFinite(n) || n < 0 || n > 0xffff) return 0n;
+    v = (v << 16n) | BigInt(n);
+  }
+  return v;
+}
+const _BLOCKED_V6 = [
+  [_v6('::'),          128], // unspecified
+  [_v6('::1'),         128], // loopback
+  [_v6('fc00::'),      7],   // ULA fc00::/7 (covers fc00–fdff)
+  [_v6('fe80::'),      10],  // link-local
+  [_v6('ff00::'),      8],   // multicast
+];
+
+function _inRange(addr, network, prefix, totalBits) {
+  if (prefix === 0) return true;
+  const shift = BigInt(totalBits - prefix);
+  return (addr >> shift) === (network >> shift);
+}
+
 function isBlockedHost(hostname) {
-  return BLOCKED_IP_RANGES.some(re => re.test(hostname));
+  if (!hostname) return true;
+  const lc = String(hostname).toLowerCase();
+  if (_DENY_HOST_NAMES.has(lc)) return true;
+  const kind = net.isIP(lc);
+  if (kind === 4) {
+    const a = _v4(lc);
+    return _BLOCKED_V4.some(([n, p]) => _inRange(a, n, p, 32));
+  }
+  if (kind === 6) {
+    const a = _v6(lc);
+    // IPv4-mapped IPv6 (::ffff:0:0/96) — extract the V4 portion and
+    // check it against the IPv4 deny-list too. _v6 already converts a
+    // trailing dotted quad into hex groups, so the low 32 bits are the
+    // mapped V4 address.
+    const v4Mapped = (a >> 32n) === 0xffffn;
+    if (v4Mapped) {
+      const v4 = a & 0xffffffffn;
+      if (_BLOCKED_V4.some(([n, p]) => _inRange(v4, n, p, 32))) return true;
+    }
+    return _BLOCKED_V6.some(([n, p]) => _inRange(a, n, p, 128));
+  }
+  // Not a literal IP — let the resolver decide. Defer to the caller's
+  // DNS-lookup-and-recheck path.
+  return false;
 }
 
 async function validateUrlNotSSRF(urlStr) {
@@ -4840,16 +4972,27 @@ async function validateUrlNotSSRF(urlStr) {
   }
   // Resolve DNS to check the actual IP and return it so callers can
   // connect to the validated IP directly (prevents TOCTOU re-resolution).
+  // If literal-IP host, the earlier isBlockedHost check already covered
+  // the address; just return it. Otherwise resolve via system DNS first,
+  // fall back to the public resolver used elsewhere in this file. Either
+  // way the resolved IP must pass isBlockedHost — a name that resolves
+  // only via the fallback to a private address must still be blocked.
+  if (net.isIP(parsed.hostname)) {
+    return { hostname: parsed.hostname, resolvedIp: parsed.hostname };
+  }
   let resolvedIp = null;
   try {
     const { address } = await dns.promises.lookup(parsed.hostname);
-    if (isBlockedHost(address)) {
-      throw new Error('Blocked host (resolved IP)');
-    }
     resolvedIp = address;
-  } catch (err) {
-    if (err.message.includes('Blocked')) throw err;
-    // DNS resolution failure — allow the request to fail naturally
+  } catch {
+    try { resolvedIp = await resolveWithFallback(parsed.hostname); }
+    catch { /* both resolvers failed */ }
+  }
+  if (!resolvedIp) {
+    throw new Error('DNS resolution failed');
+  }
+  if (isBlockedHost(resolvedIp)) {
+    throw new Error('Blocked host (resolved IP)');
   }
   return { hostname: parsed.hostname, resolvedIp };
 }
@@ -5275,18 +5418,35 @@ app.get('/api/cast/devices', rateLimit, async (req, res) => {
 
 // POST /api/cast/play — start casting to a device
 // Body: { device, streamUrl, title, mimeType }
-//   - device: a device object from /api/cast/devices
+//   - device: a device object from /api/cast/devices (only `id` is trusted)
 //   - streamUrl: the path to the stream (e.g. /api/play/<hash> or /api/library/<id>/stream)
 //   - title: display title
 //   - mimeType: optional, defaults to video/mp4
+//
+// SECURITY: never forward client-supplied device.host / device.location to
+// the cast layer — those fields would let a LAN/internet caller drive the
+// server (or the cast device) at arbitrary intranet addresses. We look the
+// device up in discoveryCache by `id` and only forward the trusted record.
+// streamPath is constrained to known internal stream routes so the server
+// cannot be tricked into asking the TV to fetch arbitrary same-origin URLs.
+const _STREAM_PATH_RE = /^\/api\/(play|library|music-library)\/[A-Za-z0-9._/~-]+(\?[A-Za-z0-9._~%&=+-]*)?$/;
+
 app.post('/api/cast/play', rateLimit, async (req, res) => {
   const { device, streamPath, title, mimeType } = req.body;
 
-  if (!device || !device.id || !device.type) {
+  if (!device || typeof device.id !== 'string' || !device.id) {
     return res.status(400).json({ error: 'Invalid device' });
   }
-  if (!streamPath) {
-    return res.status(400).json({ error: 'Missing streamPath' });
+  if (typeof streamPath !== 'string' || !_STREAM_PATH_RE.test(streamPath)) {
+    return res.status(400).json({ error: 'Invalid streamPath' });
+  }
+
+  // Resolve the trusted device record by id; ignore any other body fields.
+  const trustedDevice = discoveryCache.devices.find(d => d && d.id === device.id);
+  if (!trustedDevice) {
+    return res.status(404).json({
+      error: 'Unknown device — run /api/cast/devices first',
+    });
   }
 
   // Build a LAN-reachable URL for the cast device
@@ -5296,9 +5456,9 @@ app.post('/api/cast/play', rateLimit, async (req, res) => {
   const mediaUrl = `http://${lanIP}:${PORT}${streamPath}`;
 
   try {
-    console.log(`[Cast API] Casting to ${device.friendlyName}: ${mediaUrl}`);
-    await castManager.castToDevice(device, mediaUrl, title || 'Albatross', mimeType || 'video/mp4');
-    res.json({ success: true, mediaUrl, device: device.friendlyName });
+    console.log(`[Cast API] Casting to ${trustedDevice.friendlyName}: ${mediaUrl}`);
+    await castManager.castToDevice(trustedDevice, mediaUrl, title || 'Albatross', mimeType || 'video/mp4');
+    res.json({ success: true, mediaUrl, device: trustedDevice.friendlyName });
   } catch (err) {
     console.error(`[Cast API] Cast failed: ${err.message}`);
     res.status(500).json({ error: `Cast failed: ${err.message}` });

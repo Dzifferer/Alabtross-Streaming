@@ -869,7 +869,7 @@
           console.warn('[Collections] Enrichment failed:', err.message);
         });
       }
-    } else {
+    } else if (!document.querySelector('[data-cached-section="movies"]')) {
       moviePlaceholder.innerHTML = `
         <div class="catalog-row-header"><h3 class="catalog-row-title">Movies</h3></div>
         <div class="catalog-scroll"><div class="row-loading" style="color:var(--text-muted)">Unable to load — check connection or try searching</div></div>
@@ -885,7 +885,7 @@
       `;
       if (!seriesPlaceholder.parentNode) dom.homeCatalogs.appendChild(seriesPlaceholder);
       attachCardListeners(seriesPlaceholder);
-    } else {
+    } else if (!document.querySelector('[data-cached-section="series"]')) {
       seriesPlaceholder.innerHTML = `
         <div class="catalog-row-header"><h3 class="catalog-row-title">Shows</h3></div>
         <div class="catalog-scroll"><div class="row-loading" style="color:var(--text-muted)">Unable to load — check connection or try searching</div></div>
@@ -2398,8 +2398,8 @@
           ${poster ? `<img src="${escapeHTML(poster)}" alt="">` : ''}
           ${title ? `<div class="curtain-poster-title">${escapeHTML(title)}</div>` : ''}
           <div class="curtain-loading-bar"><div class="loading-bar"></div></div>
-          <div class="curtain-poster-status loading-status">${status}</div>
-          ${subtitle ? `<div class="curtain-poster-status" style="opacity:0.5">${subtitle}</div>` : ''}
+          <div class="curtain-poster-status loading-status">${escapeHTML(status)}</div>
+          ${subtitle ? `<div class="curtain-poster-status" style="opacity:0.5">${escapeHTML(subtitle)}</div>` : ''}
         </div>
         <div class="curtain-panel curtain-panel-left"></div>
         <div class="curtain-panel curtain-panel-right"></div>

@@ -35,7 +35,7 @@ function soapAction(controlUrl, action, bodyXml) {
   // Validate controlUrl to prevent SSRF via crafted control URLs
   try {
     const u = new URL(controlUrl);
-    if (u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '::1') {
+    if (u.hostname === 'localhost' || u.hostname.startsWith('127.') || u.hostname === '::1' || u.hostname.startsWith('169.254.')) {
       throw new Error('SOAP action to loopback address blocked');
     }
   } catch(e) {

@@ -3490,13 +3490,27 @@ class LibraryManager {
     // Kill conversion process if active
     this._stopConversion(id);
 
-    // Delete file(s) — current file and any temp conversion file
+    // Delete file(s) — current file and any temp conversion file.
+    //
+    // Music albums use item.filePath as a DIRECTORY (every track lives
+    // under it; see _startMusicAlbumFromEngine). The plain unlinkSync
+    // below throws EISDIR on a directory, the catch swallows it, and we
+    // silently leave the entire album on disk while telling the UI we
+    // deleted it. Detect the album case and rmSync recursively. We can't
+    // rely on Stats.isDirectory because the rest of this function deals
+    // in relative paths and stat-may-fail-but-we-still-want-cleanup, so
+    // gate on item.type === 'album' which is set at music-album ingest.
+    const isAlbum = item.type === 'album' || item.kind === 'music-album';
     if (item.filePath) {
       const fullPath = path.join(this._libraryPath, item.filePath);
       try {
-        if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
+        if (isAlbum) {
+          fs.rmSync(fullPath, { recursive: true, force: true });
+        } else if (fs.existsSync(fullPath)) {
+          fs.unlinkSync(fullPath);
+        }
       } catch (err) {
-        console.error(`[Library] Failed to delete file: ${err.message}`);
+        console.error(`[Library] Failed to delete ${isAlbum ? 'album dir' : 'file'}: ${err.message}`);
       }
     }
     if (item.originalFilePath && item.originalFilePath !== item.filePath) {
@@ -3505,15 +3519,16 @@ class LibraryManager {
         if (fs.existsSync(origPath)) fs.unlinkSync(origPath);
       } catch { /* ignore */ }
     }
-    // Clean up temp .converting.mp4 file
-    if (item.filePath) {
+    // Clean up temp .converting.mp4 file (video items only — albums have no transcode temp)
+    if (item.filePath && !isAlbum) {
       const tempPath = this._getConvertTempPath(path.join(this._libraryPath, item.filePath));
       try {
         if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
       } catch { /* ignore */ }
     }
-    // Try to remove parent directory if empty
-    if (item.filePath) {
+    // Try to remove parent directory if empty (skip for albums — we
+    // already removed the album dir itself recursively above).
+    if (item.filePath && !isAlbum) {
       const dir = path.dirname(path.join(this._libraryPath, item.filePath));
       if (dir !== this._libraryPath) {
         try { fs.rmdirSync(dir); } catch { /* not empty, fine */ }
@@ -3522,6 +3537,9 @@ class LibraryManager {
 
     this._items.delete(id);
     this._discoveryCache = null; // invalidate discovery cache after deletion
+    // Drop any per-item watchdog state so a re-add doesn't inherit
+    // strike counts against the now-gone id.
+    if (this._autoRetryState) this._autoRetryState.delete(id);
 
     // After removal, fix up the shared pack engine (if any):
     //   - If no other items remain downloading in the pack, stop the engine.
@@ -3672,8 +3690,15 @@ class LibraryManager {
     if (!item || item.type !== 'album') return false;
     item.playCount = (item.playCount || 0) + 1;
     item.lastPlayedAt = Date.now();
-    // Don't call _saveMetadata on every play — it's a hot path. Defer to
-    // the existing periodic save (every 30s) to batch these updates.
+    // The "periodic save batches these" comment that used to live here
+    // was wishful thinking: _startPeriodicSave only runs while there are
+    // active downloads or conversions (see _stopPeriodicSave at line
+    // 4228). On a music-only / quiescent server nothing ever flips the
+    // periodic timer on, so playCount / lastPlayedAt sat in RAM until a
+    // crash dropped them. Trigger the debounced save explicitly — it's
+    // already 500ms-throttled and uses fs.promises so it won't block
+    // the hot path.
+    this._saveMetadata();
     return true;
   }
 

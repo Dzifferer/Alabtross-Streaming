@@ -7,12 +7,22 @@
 
 const path = require('path');
 
+// Video container extensions accepted by the streaming hot path. Includes
+// the long tail (Blu-ray .m2ts/.mts, legacy .divx/.vob/.asf/.f4v, mobile
+// .3gp/.3g2) so disk-discovered files in real-world libraries aren't
+// silently rejected by the disk_* isFileNameSafe gate.
 const VIDEO_EXTENSIONS = new Set([
-  '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg', '.ts',
+  '.mp4', '.m4v', '.mkv', '.mov', '.webm', '.ts', '.m2ts', '.mts',
+  '.avi', '.divx', '.vob', '.flv', '.f4v', '.wmv', '.asf',
+  '.mpg', '.mpeg', '.mp2', '.m2v', '.3gp', '.3g2', '.ogv', '.rm', '.rmvb', '.dat',
 ]);
 
+// Audio extensions used for music-library streaming. Lossless formats
+// (FLAC, WAV, ALAC, APE, DSF) were missing pre-fix, which broke any
+// disk-discovered FLAC library after the security gate was added.
 const AUDIO_EXTENSIONS = new Set([
-  '.mp3', '.m4a', '.aac', '.ogg', '.opus', '.oga',
+  '.mp3', '.m4a', '.m4b', '.aac', '.ogg', '.oga', '.opus',
+  '.flac', '.wav', '.wma', '.alac', '.ape', '.dsf', '.dff', '.aiff', '.aif',
 ]);
 
 const DANGEROUS_EXTENSIONS = new Set([
@@ -60,23 +70,49 @@ const TRACKERS = [
 ];
 
 const MIME_TYPES = {
+  // Video
   '.mp4': 'video/mp4',
-  '.mkv': 'video/x-matroska',
-  '.avi': 'video/x-msvideo',
-  '.mov': 'video/quicktime',
-  '.wmv': 'video/x-ms-wmv',
-  '.flv': 'video/x-flv',
-  '.webm': 'video/webm',
   '.m4v': 'video/mp4',
+  '.mkv': 'video/x-matroska',
+  '.mov': 'video/quicktime',
+  '.webm': 'video/webm',
+  '.ts': 'video/mp2t',
+  '.m2ts': 'video/mp2t',
+  '.mts': 'video/mp2t',
+  '.avi': 'video/x-msvideo',
+  '.divx': 'video/x-msvideo',
+  '.vob': 'video/dvd',
+  '.flv': 'video/x-flv',
+  '.f4v': 'video/mp4',
+  '.wmv': 'video/x-ms-wmv',
+  '.asf': 'video/x-ms-asf',
   '.mpg': 'video/mpeg',
   '.mpeg': 'video/mpeg',
-  '.ts': 'video/mp2t',
+  '.mp2': 'video/mpeg',
+  '.m2v': 'video/mpeg',
+  '.3gp': 'video/3gpp',
+  '.3g2': 'video/3gpp2',
+  '.ogv': 'video/ogg',
+  '.rm': 'application/vnd.rn-realmedia',
+  '.rmvb': 'application/vnd.rn-realmedia-vbr',
+  '.dat': 'application/octet-stream',
+  // Audio
   '.mp3': 'audio/mpeg',
   '.m4a': 'audio/mp4',
+  '.m4b': 'audio/mp4',
   '.aac': 'audio/aac',
   '.ogg': 'audio/ogg',
   '.oga': 'audio/ogg',
   '.opus': 'audio/ogg',
+  '.flac': 'audio/flac',
+  '.wav': 'audio/wav',
+  '.wma': 'audio/x-ms-wma',
+  '.alac': 'audio/mp4',
+  '.ape': 'audio/x-monkeys-audio',
+  '.dsf': 'audio/x-dsf',
+  '.dff': 'audio/x-dff',
+  '.aiff': 'audio/aiff',
+  '.aif': 'audio/aiff',
 };
 
 /**

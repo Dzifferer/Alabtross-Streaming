@@ -5316,3 +5316,41 @@ body.music-player-open .music-player-bar { display: none; }
   border-color: var(--danger, #ff6b6b);
 }
 
+/* Storage bar */
+.storage-bar-wrap {
+  margin-top: 4px;
+}
+
+.storage-bar {
+  height: 8px;
+  background: var(--bg-elevated, #252540);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+
+.storage-bar-fill {
+  height: 100%;
+  background: var(--accent, #7c5cfc);
+  border-radius: 4px;
+  transition: width 0.3s;
+  min-width: 0;
+}
+
+.storage-bar-fill.storage-warning {
+  background: #f0a030;
+}
+
+.storage-bar-fill.storage-critical {
+  background: var(--danger, #ff6b6b);
+}
+
+/* Compact source list */
+.source-list--compact .source-item {
+  padding: 6px 0;
+}
+
+.source-list--compact .source-desc {
+  display: none;
+}
+

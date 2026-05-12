@@ -47,6 +47,12 @@ const ffmpegHw = require('./lib/ffmpeg-hw');
 
 const compression = require('compression');
 
+// createApp builds the Express app + LibraryManager + engine wiring. Pulled
+// out as a factory so tests can spin up an ephemeral instance with injected
+// paths / dependencies without binding to a port. When server.js is executed
+// directly (require.main === module) the factory is constructed with no opts
+// and the listen() call lives in the guard at the bottom of this file.
+function createApp(opts = {}) {
 const app = express();
 // Gzip JSON / text responses. /api/library alone can ship 50-200 KB
 // of metadata for a mid-sized library; gzip compresses that down to
@@ -57,13 +63,13 @@ const app = express();
 // skips responses with `Cache-Control: no-transform` and binary MIME
 // types, so this is safe to apply globally.
 app.use(compression({ level: 1 }));
-const PORT = process.env.PORT || 8080;
-const TORRENT_CACHE_PATH = process.env.TORRENT_CACHE || path.join(__dirname, '.torrent-cache');
-const LIBRARY_PATH = process.env.LIBRARY_PATH || path.join(TORRENT_CACHE_PATH, 'library');
+const PORT = opts.port || process.env.PORT || 8080;
+const TORRENT_CACHE_PATH = opts.torrentCachePath || process.env.TORRENT_CACHE || path.join(__dirname, '.torrent-cache');
+const LIBRARY_PATH = opts.libraryPath || process.env.LIBRARY_PATH || path.join(TORRENT_CACHE_PATH, 'library');
 // Music library defaults to a sibling folder on the same drive so music
 // albums don't commingle with movie folders on disk. Override with
 // MUSIC_LIBRARY_PATH if you want them elsewhere entirely.
-const MUSIC_LIBRARY_PATH = process.env.MUSIC_LIBRARY_PATH
+const MUSIC_LIBRARY_PATH = opts.musicLibraryPath || process.env.MUSIC_LIBRARY_PATH
   || path.join(path.dirname(LIBRARY_PATH), 'music-library');
 const SETTINGS_PATH = path.join(TORRENT_CACHE_PATH, 'settings.json');
 
@@ -508,7 +514,7 @@ const hlsCleanupTimer = setInterval(() => {
 hlsCleanupTimer.unref();
 
 // ─── Torrent Engine (lazy-initialized on first custom-mode request) ───
-let engine = null;
+let engine = opts.engine || null;
 function getEngine() {
   if (!engine) {
     engine = new TorrentEngine({ downloadPath: TORRENT_CACHE_PATH, maxConcurrent: MAX_CONCURRENT_STREAMS });
@@ -532,7 +538,7 @@ const DISK_RESERVE_BYTES = (() => {
   return Number.isFinite(n) && n >= 0 ? n : 1 * 1024 * 1024 * 1024;
 })();
 const MAX_CONCURRENT_REMOTE_CONVERSIONS = parseInt(process.env.MAX_CONCURRENT_REMOTE_CONVERSIONS, 10) || 3;
-const library = new LibraryManager({
+const library = opts.library || new LibraryManager({
   libraryPath: LIBRARY_PATH,
   maxConcurrentDownloads: MAX_CONCURRENT_STREAMS,
   workerUrl: WORKER_URL,
@@ -546,8 +552,10 @@ const library = new LibraryManager({
 // Music items are type: 'album' and take a different completion path
 // internally (multi-file audio download, tracks[] scan, no video transcode).
 // Workers aren't useful for audio so it doesn't receive the worker config.
-fs.mkdirSync(MUSIC_LIBRARY_PATH, { recursive: true });
-const musicLibrary = new LibraryManager({
+if (!opts.musicLibrary) {
+  fs.mkdirSync(MUSIC_LIBRARY_PATH, { recursive: true });
+}
+const musicLibrary = opts.musicLibrary || new LibraryManager({
   libraryPath: MUSIC_LIBRARY_PATH,
   maxConcurrentDownloads: MAX_CONCURRENT_STREAMS,
   diskReserveBytes: DISK_RESERVE_BYTES,
@@ -555,6 +563,11 @@ const musicLibrary = new LibraryManager({
 });
 const MusicPlaylists = require('./lib/music-playlists');
 const musicPlaylists = new MusicPlaylists(MUSIC_LIBRARY_PATH);
+const cpuMonitor = opts.cpuMonitor || library._cpuMonitor;
+// Optional injectable SSDP discovery for tests — production uses the imported
+// discoverDevices(); tests can pass a fake that resolves to [] to avoid the
+// 5-second SSDP probe and the LAN socket bind.
+const discoverDevicesFn = typeof opts.discoverDevices === 'function' ? opts.discoverDevices : discoverDevices;
 
 // Security headers
 app.use((req, res, next) => {
@@ -5524,7 +5537,7 @@ app.get('/api/cast/devices', rateLimit, async (req, res) => {
 
   try {
     console.log('[Cast API] Scanning for local devices...');
-    const devices = await discoverDevices(5000);
+    const devices = await discoverDevicesFn(5000);
     discoveryCache = { devices, fetchedAt: Date.now() };
     console.log(`[Cast API] Found ${devices.length} castable device(s)`);
     res.json({
@@ -5746,11 +5759,6 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Albatross Mobile UI running on http://0.0.0.0:${PORT}`);
-  console.log(`Stream endpoints: /api/streams/* and /api/play/*`);
-});
-
 // Graceful shutdown with timeout to ensure metadata is saved even if engines hang
 let shuttingDown = false;
 async function shutdown() {
@@ -5790,8 +5798,24 @@ async function shutdown() {
   try { if (engine) engine.destroy(); } catch (err) {
     console.error(`[Server] Engine shutdown error: ${err.message}`);
   }
-  process.exit(0);
+  if (!opts.skipExit) process.exit(0);
 }
 
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
+// engine is lazy — expose both the current handle (possibly null) and the
+// getter so tests and callers can pick whichever fits.
+const handles = { app, library, musicLibrary, cpuMonitor, shutdown, PORT, getEngine };
+Object.defineProperty(handles, 'engine', { get: () => engine, enumerable: true });
+return handles;
+} // end createApp
+
+if (require.main === module) {
+  const { app, shutdown, PORT } = createApp();
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Albatross Mobile UI running on http://0.0.0.0:${PORT}`);
+    console.log(`Stream endpoints: /api/streams/* and /api/play/*`);
+  });
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+}
+
+module.exports = { createApp };

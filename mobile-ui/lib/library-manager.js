@@ -25,6 +25,7 @@ const { CpuMonitor } = require('./cpu-monitor');
 
 const DEFAULT_MAX_CONCURRENT_DOWNLOADS = 5;
 const METADATA_SAVE_INTERVAL = 30 * 1000; // Save metadata every 30s during active downloads
+const ENGINE_HEARTBEAT_INTERVAL = 30 * 1000; // Log per-engine swarm activity every 30s during active downloads
 
 // Pack (season/multi-episode) torrents have info dicts an order of
 // magnitude bigger than single-file torrents — 100-episode packs
@@ -98,6 +99,16 @@ function _probeCacheDeleteByPath(filePath) {
 // is collected automatically when the torrent-stream engine drops the file
 // object — and so we never mutate a third-party object with our own field.
 const _completedFileProgress = new WeakMap();
+// Partial-progress cache: tracks the contiguous-verified prefix endpoint
+// per file. The bitfield is monotonic, so any piece previously confirmed
+// in the prefix is still confirmed on a subsequent call — we resume the
+// scan from the prefix endpoint instead of restarting at firstPiece every
+// tick. On a 5 GB file with 4 MB pieces (~1250 pieces) at 80% sequential
+// progress, this skips ~1000 bitfield reads per tick per active item.
+// New engines create new file objects, so a recycle naturally resets the
+// cache without explicit invalidation.
+//   file -> { prefixEndPiece, prefixBytes }
+const _partialFileProgress = new WeakMap();
 
 /**
  * Compute file download progress from torrent-stream's bitfield.
@@ -132,9 +143,43 @@ function computeFileProgress(engine, file) {
   const firstPiece = Math.floor(fileStart / pieceLength);
   const lastPiece = Math.floor((fileEnd - 1) / pieceLength);
 
+  // Resume from the verified-prefix endpoint cached on the previous
+  // tick. Pieces strictly before partial.prefixEndPiece were all set
+  // last call and the bitfield is monotonic, so they're still set.
+  // Skip re-reading them.
+  let scanStart = firstPiece;
   let downloadedBytes = 0;
-  let allPiecesPresent = true;
-  for (let i = firstPiece; i <= lastPiece; i++) {
+  const partial = _partialFileProgress.get(file);
+  if (partial && partial.prefixEndPiece > firstPiece) {
+    scanStart = partial.prefixEndPiece;
+    downloadedBytes = partial.prefixBytes;
+  }
+
+  // Walk the prefix forward as far as it now extends.
+  while (scanStart <= lastPiece && engine.bitfield.get(scanStart)) {
+    const pieceStart = scanStart * pieceLength;
+    const pieceEnd = Math.min(pieceStart + pieceLength, torrentLength);
+    const overlapStart = Math.max(pieceStart, fileStart);
+    const overlapEnd = Math.min(pieceEnd, fileEnd);
+    if (overlapEnd > overlapStart) downloadedBytes += overlapEnd - overlapStart;
+    scanStart++;
+  }
+
+  const newPrefixEndPiece = scanStart;
+  const newPrefixBytes = downloadedBytes;
+  // Persist the new prefix endpoint immediately so an early return from
+  // a fully-prefix-covered file (scanStart > lastPiece) still gets the
+  // benefit on the next call.
+  _partialFileProgress.set(file, {
+    prefixEndPiece: newPrefixEndPiece,
+    prefixBytes: newPrefixBytes,
+  });
+
+  // Tail scan: pick up any out-of-order pieces that landed past the
+  // prefix. These contribute to downloadedBytes but can't extend the
+  // contiguous prefix (the gap immediately before them is still unset).
+  let allPiecesPresent = scanStart > lastPiece;
+  for (let i = scanStart; i <= lastPiece; i++) {
     if (engine.bitfield.get(i)) {
       const pieceStart = i * pieceLength;
       const pieceEnd = Math.min(pieceStart + pieceLength, torrentLength);
@@ -154,6 +199,9 @@ function computeFileProgress(engine, file) {
 
   if (allPiecesPresent) {
     _completedFileProgress.set(file, result);
+    // Partial cache is redundant once the completion cache is set —
+    // drop the entry so the WeakMap stays lean.
+    _partialFileProgress.delete(file);
   }
 
   return result;
@@ -194,6 +242,15 @@ class LibraryManager {
     // doesn't reset the counter. Bounded retry stops the worst case of
     // a genuinely stuck pack from cycling forever.
     this._packStallRecycles = new Map();
+    // Per-engine "last seen swarm.downloaded" used by the dead-swarm
+    // short-circuit in the progress timers. When peers === 0 AND total
+    // bytes downloaded haven't advanced since the previous tick, no
+    // piece could have just verified, so the bitfield scan in
+    // computeFileProgress is guaranteed to return the same result.
+    // Skipping it spares O(piece-count) work per item per tick — most
+    // visibly during long peer-discovery stalls on cold torrents.
+    // WeakMap so a recycled engine's entry GCs automatically.
+    this._engineLastDownloaded = new WeakMap();
     this._metadataSaveCount = 0;
     this._maxConcurrentDownloads = opts.maxConcurrentDownloads || DEFAULT_MAX_CONCURRENT_DOWNLOADS;
     this._items = new Map();       // id -> library item
@@ -257,6 +314,27 @@ class LibraryManager {
       failRemote:    0,
     };
     this._metadataSaveTimer = null;
+    // Periodic per-engine swarm-activity log. Spun up alongside the
+    // metadata-save timer (so it shares the "any engine is alive"
+    // lifecycle) and prints one line per active engine every
+    // ENGINE_HEARTBEAT_INTERVAL. Lets the operator confirm bytes are
+    // actually flowing even when the per-item UI is hiding speed (the
+    // UI shows blank for downloadSpeed === 0, and in sequential pack
+    // mode every queued-within-pack item reads as 0).
+    this._engineHeartbeatTimer = null;
+    // Per-engine last-seen swarm.downloaded byte counter so each tick
+    // can decide "moved" vs "stalled" without needing wallclock state.
+    // Keyed by engine reference so a recycle resets the baseline.
+    this._engineHeartbeatLastBytes = new WeakMap();
+    // Dirty bit gating the periodic save: progress-tick mutations
+    // (downloadSpeed, numPeers, progress) do NOT call _saveMetadata,
+    // but the 30s periodic timer used to fire _writeMetadataNow
+    // unconditionally — writing a multi-MB JSON to disk every 30s
+    // during a long download even though every byte was unchanged.
+    // _saveMetadata() now flips this flag and _writeMetadataNow()
+    // clears it after snapshotting; the periodic tick skips entirely
+    // when there's nothing to persist.
+    this._metadataDirty = false;
     // Trailing-debounce handle for _saveMetadata. Every state transition
     // (download complete, progress tick, conversion done, manual edit)
     // used to synchronously JSON.stringify the whole library, write a
@@ -268,6 +346,12 @@ class LibraryManager {
     this._discoveryCache = null;      // cached result of _discoverUntrackedFiles
     this._discoveryCacheTs = 0;       // timestamp of last discovery scan
     this._discoveryRefreshInFlight = null; // in-flight async discovery promise
+    // Per-directory listing cache keyed by absolute path. Lets the
+    // recursive disk scan skip readdir() AND per-file stat() on every
+    // subdirectory whose mtime hasn't changed since the previous scan
+    // — typically every leaf directory in a steady-state library.
+    //   absDir -> { mtimeMs, candidates: [{ relPath, stat }], subdirs: [{ absPath, relPath }] }
+    this._discoveryDirCache = new Map();
     this._getAllCache = null;          // cached result of getAll()
     this._getAllCacheTs = 0;           // timestamp of last getAll() cache build
 
@@ -425,6 +509,17 @@ class LibraryManager {
       // to let it run alongside Express and active downloads.
       this._scanCompleteItemsForConversion().catch(err => {
         console.error('[Library] Conversion sweep failed:', err);
+      });
+      // Bulk repair sweep: scan every 'complete' item, flip the sparse
+      // ones (<90% of expected bytes on disk) back into the download
+      // pipeline. The per-item auto-repair inside _checkAndConvert is
+      // gated by a once-per-item-lifetime flag, so without this startup
+      // sweep an item whose first auto-repair attempt failed would sit
+      // broken until the user manually clicked Repair. Fire-and-forget;
+      // yields between scans and respects the same concurrency caps as
+      // any other download.
+      this.repairAllIncomplete().catch(err => {
+        console.error('[Library] Startup repair sweep failed:', err);
       });
       // Drop .torrent metadata files for items the user has since deleted
       // so the cache doesn't grow forever. Only touches files older than
@@ -1942,6 +2037,13 @@ class LibraryManager {
       const sw = engine.swarm;
       const speed = sw ? sw.downloadSpeed() : 0;
       const peers = sw ? sw.wires.length : 0;
+      // Dead-swarm short-circuit: when nothing landed since the last
+      // tick and no peers are connected, no piece could have verified,
+      // so the bitfield scan in computeFileProgress would return the
+      // same result it did last time. Skip it for every item that
+      // isn't already flagged near-complete (those still need a per-
+      // tick file.select() to keep prodding the piece picker).
+      const swarmStale = this._swarmStaleSinceLastTick(engine);
 
       // In sequential mode, only one file at a time is selected in the engine,
       // so attribute speed only to the currently-active item. Other "downloading"
@@ -1967,6 +2069,14 @@ class LibraryManager {
         const file = filesByName.get(item.fileName);
         if (!file) {
           // File not in this engine — leave alone, allComplete stays false
+          allComplete = false;
+          continue;
+        }
+
+        if (swarmStale && !item._nearCompleteSince) {
+          // Nothing could have just verified for this file. Don't
+          // touch item.progress — the previous value is still
+          // correct.
           allComplete = false;
           continue;
         }
@@ -2513,6 +2623,10 @@ class LibraryManager {
 
     // Stop engine but only remove non-complete items (preserve already downloaded episodes)
     this._stopPackEngine(packId);
+    // packId is `pack_${infoHash}` and is stable across restarts, so the
+    // recycle counter from the previous attempt would otherwise persist
+    // and immediately fail the next attempt on the first stall.
+    this._packStallRecycles.delete(packId);
     const completedCount = packItems.filter(i => i.status === 'complete' || i.status === 'converting').length;
     for (const item of packItems) {
       if (item.status === 'complete' || item.status === 'converting') continue;
@@ -2806,6 +2920,93 @@ class LibraryManager {
   }
 
   /**
+   * Last-resort recovery for true orphans: items whose own magnet is gone
+   * AND no pack/dir sibling has one AND no _packCatalog entry rescued it.
+   * The user supplies a fresh magnet URI (typically by searching for the
+   * same content again) and we write it onto the existing library entry
+   * — preserving any partial bytes already on disk — then kick off a
+   * retry. torrent-stream's verify pass will hash whatever is on disk
+   * against the new torrent's piece map and fill in the rest.
+   *
+   * Inputs:
+   *   id         — library item id (single OR pack episode)
+   *   magnetUri  — magnet URI string starting with "magnet:?"
+   *
+   * Returns:
+   *   { ok: true,  queued: bool, infoHash, name }
+   *   { ok: false, reason: string }
+   */
+  relinkItemMagnet(id, magnetUri) {
+    const item = this._items.get(id);
+    if (!item) return { ok: false, reason: 'item not found' };
+
+    if (typeof magnetUri !== 'string' || !magnetUri.startsWith('magnet:?')) {
+      return { ok: false, reason: 'magnet URI must start with magnet:?' };
+    }
+
+    // Accept either hex (40) or Base32 (32) info hashes — same parser
+    // shape as POST /api/torrents (server.js) so users can paste either
+    // format without surprise.
+    let infoHash = null;
+    const hexMatch = magnetUri.match(/xt=urn:btih:([a-f0-9]{40})/i);
+    if (hexMatch) {
+      infoHash = hexMatch[1].toLowerCase();
+    } else {
+      const b32Match = magnetUri.match(/xt=urn:btih:([A-Za-z2-7]{32})/);
+      if (b32Match) {
+        try { infoHash = Buffer.from(b32Match[1], 'base32').toString('hex').toLowerCase(); } catch { /* ignore */ }
+      }
+    }
+    if (!infoHash || !/^[0-9a-f]{40}$/.test(infoHash)) {
+      return { ok: false, reason: 'could not extract a valid info hash from the magnet URI' };
+    }
+
+    // If this item is part of a pack, every episode shares one engine
+    // keyed by packId. Re-linking a single episode to a *different*
+    // infoHash than its siblings would silently break the shared engine
+    // (the engine's torrent doesn't have the file the new magnet
+    // promises). Either re-link the whole pack at once, or refuse and
+    // tell the user.
+    if (item.packId) {
+      const siblings = [...this._items.values()].filter(i => i.packId === item.packId && i.id !== id);
+      const conflictingSibling = siblings.find(i => i.infoHash && i.infoHash.toLowerCase() !== infoHash);
+      if (conflictingSibling) {
+        return {
+          ok: false,
+          reason: 'this item is part of a pack — re-link via "Restart pack" with the new magnet instead of a single episode',
+        };
+      }
+      // Sweep the rest of the pack onto the new magnet too. They were
+      // all linked to the same torrent before this loss event.
+      for (const sib of siblings) {
+        sib.magnetUri = magnetUri;
+        sib.infoHash  = infoHash;
+      }
+    }
+
+    const prevInfo = item.infoHash || '(none)';
+    item.magnetUri = magnetUri;
+    item.infoHash  = infoHash;
+    // Clear repair-blocking state so retryItem doesn't bail and the
+    // next stall check doesn't insta-fail under the previous attempt's
+    // counters.
+    item.error = null;
+    item._stallRecycles = 0;
+    delete item._nearCompleteSince;
+    item._autoRepairAttempted = false;
+    if (item.packId) this._packStallRecycles.delete(item.packId);
+    // Flip to failed so retryItem accepts the request regardless of
+    // prior status (downloading-stuck, complete-but-incomplete-on-disk,
+    // queued, paused, etc.). retryItem handles the engine work.
+    item.status = 'failed';
+    this._invalidateRecoveryIndex();
+    this._saveMetadata();
+    console.log(`[Library] Re-linked "${item.name}" to new magnet (was ${prevInfo}, now ${infoHash})`);
+    const queued = this.retryItem(id);
+    return { ok: true, queued: !!queued, infoHash, name: item.name };
+  }
+
+  /**
    * Scan every 'complete' item, flag the sparse ones (blocks*512/size < 90%),
    * and kick off repair re-downloads for anything that still has a magnet
    * on file. Runs serially with small yields so the HTTP loop stays
@@ -2917,6 +3118,29 @@ class LibraryManager {
     return null;
   }
 
+  // Boolean fast-path for canRepair: returns true iff a recovery magnet
+  // exists for this item, without allocating the source-tagged object
+  // _findRecoveryMagnet returns. Called by _sanitizeItem on every
+  // incompleteOnDisk item in every getAll() — N items × N getAll() calls
+  // per second, the allocation churn shows up in V8 GC traces.
+  _hasRecoveryMagnet(brokenItem) {
+    if (!brokenItem) return false;
+    if (brokenItem.magnetUri && brokenItem.infoHash) return true;
+    const now = Date.now();
+    if (!this._recoveryIndex || now - this._recoveryIndexBuiltAt > 30000) {
+      // Cold cache — defer to the full method so the rebuild logic
+      // stays single-sourced. The full method also returns a boolean
+      // truthy/null shape that maps cleanly to our return type.
+      return !!this._findRecoveryMagnet(brokenItem);
+    }
+    if (brokenItem.packId && this._recoveryIndex.byPackId.has(brokenItem.packId)) return true;
+    if (brokenItem.filePath) {
+      const rootDir = String(brokenItem.filePath).split('/')[0];
+      if (rootDir && this._recoveryIndex.byRootDir.has(rootDir)) return true;
+    }
+    return false;
+  }
+
   // Invalidate the recovery index when we add/remove items or mutate magnet
   // metadata. Called from the main mutation paths below.
   _invalidateRecoveryIndex() {
@@ -2979,8 +3203,25 @@ class LibraryManager {
     // and progress will be recalculated from disk size on the next poll cycle.
     item.downloadSpeed = 0;
     item.numPeers = 0;
+    // Clear retry-blocking residue from the previous attempt:
+    //   - _stallRecycles is the per-item recycle cap consumed by stall
+    //     detection (_shouldRecycleOnStall). If the previous attempt hit
+    //     the cap, the engine would fail on the first stall after retry
+    //     without even attempting a recycle.
+    //   - _nearCompleteSince timestamps the moment a pack episode first
+    //     reached 99%. If that timestamp survives into the retry attempt
+    //     and is older than 5 min, the next progress tick marks the item
+    //     failed immediately ("stuck near-complete for >5min").
+    item._stallRecycles = 0;
+    delete item._nearCompleteSince;
 
     if (item.packId) {
+      // Pack engines share a stall-recycle counter keyed by packId
+      // (_packStallRecycles). If the previous attempt burned through
+      // MAX_PACK_RECYCLES, the shared engine fails every item on the
+      // first stall check after retry. Reset on user-initiated retry so
+      // the pack actually gets a fresh shot.
+      this._packStallRecycles.delete(item.packId);
       const engine = this._engines.get(item.packId);
       if (!engine) {
         // No engine yet — start one for all downloading items in this pack
@@ -3262,11 +3503,18 @@ class LibraryManager {
     const packAlreadyActive = activePacks.has(packId);
     const atCapacity = !packAlreadyActive && this._countActiveSlots() >= this._maxConcurrentDownloads;
 
+    // Clear retry-blocking residue (see retryItem for the same reset).
+    // Pack-level recycle counter is keyed by packId and shared across
+    // every episode; per-item counters and near-complete timestamps live
+    // on the items themselves.
+    this._packStallRecycles.delete(packId);
     for (const item of failedItems) {
       item.status = atCapacity ? 'queued' : 'downloading';
       item.error = null;
       item.downloadSpeed = 0;
       item.numPeers = 0;
+      item._stallRecycles = 0;
+      delete item._nearCompleteSince;
     }
 
     if (!atCapacity) {
@@ -3849,6 +4097,7 @@ class LibraryManager {
       clearInterval(this._metadataSaveTimer);
       this._metadataSaveTimer = null;
     }
+    this._stopEngineHeartbeat();
     this._stopAutoRetryDaemon();
     // Flush cross-torrent peer reputation before we destroy engines
     // (engine destruction triggers peer-cache writes which may create
@@ -4048,6 +4297,29 @@ class LibraryManager {
         item.downloadSpeed = sw ? sw.downloadSpeed() : 0;
         item.numPeers = sw ? sw.wires.length : 0;
 
+        // Dead-swarm short-circuit (see pack timer for rationale).
+        // _checkEngineStall below still tracks its own counters on
+        // engine.swarm.downloaded, so the long-stall watchdog keeps
+        // working even when we skip the bitfield scan.
+        if (this._swarmStaleSinceLastTick(engine)) {
+          const stall = this._checkEngineStall(engine, `dl ${item.infoHash.slice(0, 8)}`);
+          if (stall.stalled) {
+            if (this._shouldRecycleOnStall(item)) {
+              console.log(`[Library] Recycling engine for "${item.name}" (stall recycle #${item._stallRecycles})`);
+              clearInterval(progressTimer);
+              this._stopDownload(id);
+              setTimeout(() => { if (item.status === 'downloading') this._startDownload(id); }, 1000);
+            } else {
+              console.warn(`[Library] Giving up on "${item.name}" — too many stall recycles`);
+              clearInterval(progressTimer);
+              this._stopDownload(id);
+              this._saveMetadata();
+              this._processQueue();
+            }
+          }
+          return;
+        }
+
         // Use bitfield for progress, NOT fs.statSync — see computeFileProgress()
         // for why. Briefly: torrent-stream writes pieces in-place at their byte
         // offsets, so the on-disk file size is unrelated to actual progress.
@@ -4166,6 +4438,11 @@ class LibraryManager {
       const sw = engine.swarm;
       item.downloadSpeed = sw ? sw.downloadSpeed() : 0;
       item.numPeers = sw ? sw.wires.length : 0;
+
+      // Dead-swarm short-circuit: no bytes landed, no peers, so no
+      // track could have just verified. Leave item.progress alone and
+      // skip the bitfield scan across every audio file.
+      if (this._swarmStaleSinceLastTick(engine)) return;
 
       let completedBytes = 0;
       let allComplete = true;
@@ -4458,11 +4735,98 @@ class LibraryManager {
   _startPeriodicSave() {
     if (this._metadataSaveTimer) return;
     this._metadataSaveTimer = setInterval(() => {
+      // Skip the periodic write when nothing has actually changed since
+      // the last save. Progress-tick fields (downloadSpeed, numPeers,
+      // progress) intentionally do NOT call _saveMetadata, so during a
+      // long download with no transitions there is genuinely no new
+      // state to persist — the previous unconditional write churned a
+      // multi-MB JSON every 30s for nothing.
+      if (!this._metadataDirty) return;
       // Force an immediate write rather than scheduling another debounce
       // tick — the periodic save is itself the durability guarantee, so
       // going through the 500ms debounce would just add latency.
       this._writeMetadataNow();
     }, METADATA_SAVE_INTERVAL);
+    this._startEngineHeartbeat();
+  }
+
+  // Print one log line per active engine on a fixed interval, with the
+  // swarm-level download speed, peer count, and bytes-this-session.
+  // Operators wondering "is anything actually downloading?" can confirm
+  // from the service log without needing the localhost-only diag
+  // endpoint. The per-item /api/library response can read 0 for a real
+  // engine — sequential pack mode only attributes speed to the active
+  // episode, and a freshly-started swarm with peers but no completed
+  // pieces still has downloadSpeed === 0 — so the UI alone is not a
+  // reliable signal of whether bytes are flowing.
+  _startEngineHeartbeat() {
+    if (this._engineHeartbeatTimer) return;
+    this._engineHeartbeatTimer = setInterval(() => {
+      this._logEngineHeartbeat();
+    }, ENGINE_HEARTBEAT_INTERVAL);
+    // Best-effort: also fire one immediately so the first activity
+    // shows up in the log without waiting a full interval.
+    try { this._logEngineHeartbeat(); } catch { /* ignore */ }
+  }
+
+  _logEngineHeartbeat() {
+    if (this._engines.size === 0) return;
+    for (const [engineKey, engine] of this._engines) {
+      if (!engine || !engine.swarm) {
+        console.log(`[Library] heartbeat ${engineKey}: engine alive but swarm not ready yet`);
+        continue;
+      }
+      const sw = engine.swarm;
+      const bps = (sw.downloadSpeed && sw.downloadSpeed()) || 0;
+      const ups = (sw.uploadSpeed && sw.uploadSpeed()) || 0;
+      const wires = sw.wires ? sw.wires.length : 0;
+      const queued = sw.queued || 0;
+      const total = sw.downloaded || 0;
+      const prev = this._engineHeartbeatLastBytes.get(engine) || 0;
+      const delta = Math.max(0, total - prev);
+      this._engineHeartbeatLastBytes.set(engine, total);
+
+      // Identify the engine by the friendliest name we can find. Pack
+      // engines share one swarm across many items; single engines map
+      // 1:1. Fall back to engineKey if neither is set.
+      let label = engineKey;
+      let activeFile = null;
+      for (const item of this._items.values()) {
+        if (item.packId === engineKey) {
+          label = item.showName || item.name || label;
+          break;
+        }
+        if (item.id === engineKey) {
+          label = item.name || label;
+          activeFile = item.fileName || null;
+          break;
+        }
+      }
+      if (!activeFile) {
+        const activeItem = this._pickNextPackItem(engineKey);
+        if (activeItem) activeFile = activeItem.fileName || activeItem.name || null;
+      }
+
+      const mbps = (bps / 1e6).toFixed(2);
+      const upMbps = (ups / 1e6).toFixed(2);
+      const totalMB = (total / 1e6).toFixed(1);
+      const deltaMB = (delta / 1e6).toFixed(1);
+      const activeStr = activeFile ? ` active="${activeFile}"` : '';
+      const movement = delta > 0
+        ? `+${deltaMB} MB since last tick`
+        : (wires > 0 ? 'NO BYTES this tick (swarm idle or all wires choked)' : 'no peers');
+      console.log(
+        `[Library] heartbeat "${label}": ${mbps} MB/s dn · ${upMbps} MB/s up · ${wires} wire(s)`
+        + ` · ${queued} queued · ${totalMB} MB total this session · ${movement}${activeStr}`,
+      );
+    }
+  }
+
+  _stopEngineHeartbeat() {
+    if (this._engineHeartbeatTimer) {
+      clearInterval(this._engineHeartbeatTimer);
+      this._engineHeartbeatTimer = null;
+    }
   }
 
   // ─── Auto-retry daemon ────────────────────────────────────────────────
@@ -4590,6 +4954,7 @@ class LibraryManager {
       clearInterval(this._metadataSaveTimer);
       this._metadataSaveTimer = null;
     }
+    this._stopEngineHeartbeat();
   }
 
   // ─── Torrent metadata cache ────────────────────
@@ -4747,6 +5112,25 @@ class LibraryManager {
       this._engineStallState.set(engine, st);
     }
     return st;
+  }
+
+  // Returns true when the swarm has zero peers AND no new bytes landed
+  // since the previous tick. The progress timers use this to skip the
+  // per-file bitfield scan in computeFileProgress, since no piece
+  // could possibly have just verified. Updates the last-seen counter
+  // as a side effect so consecutive calls give a correct delta.
+  //
+  // Returns false on the first tick after engine creation (no baseline
+  // yet) so the timer always runs at least once before short-circuiting.
+  _swarmStaleSinceLastTick(engine) {
+    if (!engine || !engine.swarm) return false;
+    const sw = engine.swarm;
+    const peers = sw.wires ? sw.wires.length : 0;
+    const downloaded = sw.downloaded || 0;
+    const prev = this._engineLastDownloaded.get(engine);
+    this._engineLastDownloaded.set(engine, downloaded);
+    if (prev === undefined) return false;
+    return peers === 0 && downloaded === prev;
   }
 
   _checkEngineStall(engine, label, opts = {}) {
@@ -5271,6 +5655,9 @@ class LibraryManager {
    * debounced write doesn't get dropped.
    */
   _saveMetadata() {
+    // Mark the in-memory state as having something the disk doesn't
+    // yet. Read by the periodic-save tick to decide whether to fire.
+    this._metadataDirty = true;
     // Invalidate the getAll() cache eagerly so the next read sees fresh data,
     // even before the debounced write fires.
     this._getAllCache = null;
@@ -5314,6 +5701,14 @@ class LibraryManager {
     // mutations made during that window to leak into the JSON we're
     // about to publish (or, conversely, get lost when the next call
     // overwrites our partial snapshot).
+    //
+    // Clear the dirty bit at snapshot time — any mutation that lands
+    // after this point will set it back to true via _saveMetadata(),
+    // which schedules a follow-up via the existing
+    // _metadataWriteQueued mechanism. Clearing later (after the async
+    // write completes) would lose mid-write mutations to a subsequent
+    // periodic-tick "clean" check.
+    this._metadataDirty = false;
     const data = [...this._items.values()].map(item => {
       const {
         _needsResume,
@@ -5336,7 +5731,15 @@ class LibraryManager {
     // No pretty-print: the file isn't human-edited, and indented JSON
     // ~2× the byte count of the file we have to fsync. On a multi-MB
     // metadata.json this measurably reduces event-loop occupancy.
-    const json = JSON.stringify(data);
+    //
+    // We deliberately do NOT call JSON.stringify(data) up front: a
+    // monolithic stringify on a multi-MB library is a single contiguous
+    // CPU burn (100-300 ms on Orin) that stalls every concurrent
+    // request — including in-flight video bytes — for the duration.
+    // doWrite() below streams items one-by-one into the file, batching
+    // ~64 KB at a time, so each await fh.write() also yields the event
+    // loop between batches. Stringify cost is now amortized over many
+    // ticks with no single long stall.
     const tmpFile = this._metadataFile + '.tmp.' + process.pid;
     const backupFile = this._metadataFile + '.bak';
 
@@ -5361,7 +5764,21 @@ class LibraryManager {
         // pattern for durable small-file updates.
         const fh = await fs.promises.open(tmpFile, 'w');
         try {
-          await fh.writeFile(json, 'utf8');
+          // Stream the JSON array one item at a time. Each await yields
+          // the event loop between ~64 KB batches, so stringify cost is
+          // spread across many ticks instead of one long stall.
+          const FLUSH_AT = 64 * 1024;
+          let buffer = '[';
+          for (let i = 0; i < data.length; i++) {
+            if (i > 0) buffer += ',';
+            buffer += JSON.stringify(data[i]);
+            if (buffer.length >= FLUSH_AT) {
+              await fh.write(buffer, null, 'utf8');
+              buffer = '';
+            }
+          }
+          buffer += ']';
+          await fh.write(buffer, null, 'utf8');
           try { await fh.sync(); } catch { /* fsync unsupported on some FS */ }
         } finally {
           await fh.close();
@@ -5631,22 +6048,35 @@ class LibraryManager {
       };
     };
 
-    const walk = async (absDir, relDir, depth) => {
-      if (discovered.length >= MAX_DISCOVERED) return;
-      if (depth > MAX_DEPTH) return;
+    // Scan a single directory, reusing the cached listing when its
+    // mtime is unchanged. Per-file stat() is the dominant cost on a
+    // cold scan of a few-thousand-file library; the cache eliminates
+    // it (and the readdir()) on every leaf directory that's stable
+    // between calls. Tracked-path filtering and buildItem() run against
+    // the cached candidates fresh each call, since library mutations
+    // (new items, new pack catalog entries) don't bump directory mtime.
+    const seenAbsDirs = new Set();
+    const scanDir = async (absDir, relDir, depth) => {
+      let dirStat;
+      try { dirStat = await fs.promises.stat(absDir); }
+      catch (err) {
+        if (depth === 0) console.error(`[Library] Disk scan error: ${err.message}`);
+        return null;
+      }
+      const cached = this._discoveryDirCache.get(absDir);
+      if (cached && cached.mtimeMs === dirStat.mtimeMs) return cached;
 
       let entries;
-      try {
-        entries = await fs.promises.readdir(absDir, { withFileTypes: true });
-      } catch (err) {
+      try { entries = await fs.promises.readdir(absDir, { withFileTypes: true }); }
+      catch (err) {
         if (depth === 0) console.error(`[Library] Disk scan error: ${err.message}`);
-        return;
+        return null;
       }
 
+      const candidates = [];
+      const subdirs = [];
       for (const entry of entries) {
-        if (discovered.length >= MAX_DISCOVERED) return;
         if (entry.isSymbolicLink()) continue;
-
         if (depth === 0) {
           if (entry.name.startsWith('_metadata')) continue;
           if (entry.name === this._torrentCacheName) continue;
@@ -5658,7 +6088,7 @@ class LibraryManager {
         const relPath = relDir ? path.join(relDir, entry.name) : entry.name;
 
         if (entry.isDirectory()) {
-          await walk(absPath, relPath, depth + 1);
+          subdirs.push({ absPath, relPath });
           continue;
         }
         if (!entry.isFile()) continue;
@@ -5666,21 +6096,52 @@ class LibraryManager {
         const ext = path.extname(entry.name).toLowerCase();
         if (!VIDEO_EXTENSIONS.has(ext)) continue;
 
-        const normRel = path.normalize(relPath);
-        if (trackedPaths.has(normRel)) continue;
-        if (trackedPaths.has(entry.name)) continue;
-
-        let stat;
-        try { stat = await fs.promises.stat(absPath); }
+        let fStat;
+        try { fStat = await fs.promises.stat(absPath); }
         catch { continue; }
-        if (stat.size < MIN_VIDEO_SIZE) continue;
+        if (fStat.size < MIN_VIDEO_SIZE) continue;
 
-        const built = buildItem(relPath, stat);
+        candidates.push({ relPath, stat: fStat });
+      }
+
+      const result = { mtimeMs: dirStat.mtimeMs, candidates, subdirs };
+      this._discoveryDirCache.set(absDir, result);
+      return result;
+    };
+
+    const walk = async (absDir, relDir, depth) => {
+      if (discovered.length >= MAX_DISCOVERED) return;
+      if (depth > MAX_DEPTH) return;
+      seenAbsDirs.add(absDir);
+
+      const dir = await scanDir(absDir, relDir, depth);
+      if (!dir) return;
+
+      for (const c of dir.candidates) {
+        if (discovered.length >= MAX_DISCOVERED) return;
+        const normRel = path.normalize(c.relPath);
+        if (trackedPaths.has(normRel)) continue;
+        if (trackedPaths.has(path.basename(c.relPath))) continue;
+        const built = buildItem(c.relPath, c.stat);
         if (built) discovered.push(built);
+      }
+
+      for (const sd of dir.subdirs) {
+        if (discovered.length >= MAX_DISCOVERED) return;
+        await walk(sd.absPath, sd.relPath, depth + 1);
       }
     };
 
     await walk(this._libraryPath, '', 0);
+
+    // Evict cache entries for directories that no longer exist
+    // (renamed, deleted, moved out from under us). Without this the
+    // map grows without bound on a library that churns directories.
+    if (this._discoveryDirCache.size > seenAbsDirs.size) {
+      for (const key of this._discoveryDirCache.keys()) {
+        if (!seenAbsDirs.has(key)) this._discoveryDirCache.delete(key);
+      }
+    }
 
     if (discovered.length > 0) {
       console.log(`[Library] Discovered ${discovered.length} untracked file(s) on disk`);
@@ -7286,7 +7747,7 @@ class LibraryManager {
       // event loop on large libraries and surfaces as buffering.
       canRepair: item.status !== 'downloading' &&
         (!!(item.magnetUri && item.infoHash) ||
-          (!!item.incompleteOnDisk && !!this._findRecoveryMagnet(item))),
+          (!!item.incompleteOnDisk && this._hasRecoveryMagnet(item))),
       // Broken-state flag + ratio, set by the probe sweep when stat.blocks
       // says < 90% of the file is actually on disk. Used by the UI to show
       // an "Incomplete" badge so the user knows what to act on.

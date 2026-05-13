@@ -3855,15 +3855,28 @@
         ? Math.round(item.completenessRatio * 100)
         : null;
       const pctText = pct !== null ? `${pct}% downloaded` : 'Incomplete download';
-      const actionHint = item.canRepair ? ' &middot; tap to repair' : ' &middot; re-import needed';
-      overlayHtml = `
-        <div class="library-card-overlay failed">Broken &middot; ${pctText}</div>
-        ${item.canRepair ? `
+      const actionHint = item.canRepair ? ' &middot; tap to repair' : ' &middot; tap to re-link magnet';
+      // When the item is repairable from a sibling/own magnet, show the
+      // refresh-arrow overlay that fires the standard /repair endpoint.
+      // When it's a true orphan (no recoverable magnet anywhere) show
+      // a chain-link overlay that prompts the user for a fresh magnet
+      // URI and re-links the item — preserving partial bytes on disk.
+      const repairOverlay = item.canRepair
+        ? `
         <div class="library-card-play library-card-repair-overlay" data-id="${escapeHTML(item.id)}">
           <div class="library-card-play-circle">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10"/><path d="M20.49 15a9 9 0 01-14.85 3.36L1 14"/></svg>
           </div>
-        </div>` : ''}`;
+        </div>`
+        : `
+        <div class="library-card-play library-card-relink-magnet-overlay" data-id="${escapeHTML(item.id)}">
+          <div class="library-card-play-circle">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>
+          </div>
+        </div>`;
+      overlayHtml = `
+        <div class="library-card-overlay failed">Broken &middot; ${pctText}</div>
+        ${repairOverlay}`;
       metaHtml = `<div class="library-card-meta failed">${pctText}${actionHint}</div>`;
     } else if (item.status === 'complete') {
       const size = item.fileSize ? formatSize(item.fileSize) : item.size || '';
@@ -4113,7 +4126,10 @@
         ${item.canRepair ? `
         <button class="library-episode-repair" data-id="${escapeHTML(item.id)}" title="Repair / re-download">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10"/><path d="M20.49 15a9 9 0 01-14.85 3.36L1 14"/></svg>
-        </button>` : ''}
+        </button>` : (item.incompleteOnDisk ? `
+        <button class="library-episode-relink-magnet" data-id="${escapeHTML(item.id)}" title="Re-link by magnet URI (orphan — no sibling magnet available)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>
+        </button>` : '')}
         <button class="library-episode-remove" data-id="${escapeHTML(item.id)}" title="Remove">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
         </button>
@@ -4168,6 +4184,43 @@
           showToast('Repair queued — re-downloading missing pieces…');
           loadLibrary();
         } catch { showToast('Repair request failed'); }
+      });
+    }
+
+    // Orphan episode (incompleteOnDisk + !canRepair): re-link by magnet
+    // URI. Re-linking any episode in a pack auto-applies the new magnet
+    // to every other episode in that pack so the shared engine stays
+    // consistent (see relinkItemMagnet in library-manager.js).
+    const relinkMagnetBtn = row.querySelector('.library-episode-relink-magnet');
+    if (relinkMagnetBtn) {
+      relinkMagnetBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = relinkMagnetBtn.dataset.id;
+        const magnet = window.prompt(
+          'Paste a magnet URI for this title.\n\n'
+          + 'Existing bytes on disk are kept; torrent-stream will hash them '
+          + 'against the new torrent and download whatever is missing. '
+          + 'For pack episodes, the new magnet applies to the entire pack.',
+        );
+        if (!magnet) return;
+        if (!magnet.startsWith('magnet:?')) {
+          showToast('Re-link failed: not a valid magnet URI');
+          return;
+        }
+        try {
+          const r = await fetch(`/api/library/${encodeURIComponent(id)}/relink-magnet`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ magnetUri: magnet }),
+          });
+          const j = await r.json().catch(() => ({}));
+          if (!r.ok) {
+            showToast(j.error ? `Re-link failed: ${j.error}` : 'Re-link failed');
+            return;
+          }
+          showToast('Re-linked — verifying on-disk bytes against new torrent…');
+          loadLibrary();
+        } catch { showToast('Re-link request failed'); }
       });
     }
   }
@@ -4815,6 +4868,42 @@
       });
     });
 
+    // Orphan recovery: incompleteOnDisk items whose canRepair is false
+    // (no own magnet, no pack/dir sibling magnet) show this overlay
+    // instead of the standard refresh-arrow. Prompt the user for a fresh
+    // magnet URI and POST to /relink-magnet, which preserves the partial
+    // bytes already on disk and kicks off a verify-then-fill download.
+    container.querySelectorAll('.library-card-relink-magnet-overlay').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = btn.dataset.id;
+        const magnet = window.prompt(
+          'Paste a magnet URI for this title.\n\n'
+          + 'The existing bytes on disk are kept; torrent-stream will hash them '
+          + 'against the new torrent and download whatever is missing.',
+        );
+        if (!magnet) return;
+        if (!magnet.startsWith('magnet:?')) {
+          showToast('Re-link failed: not a valid magnet URI');
+          return;
+        }
+        try {
+          const r = await fetch(`/api/library/${encodeURIComponent(id)}/relink-magnet`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ magnetUri: magnet }),
+          });
+          const j = await r.json().catch(() => ({}));
+          if (!r.ok) {
+            showToast(j.error ? `Re-link failed: ${j.error}` : 'Re-link failed');
+            return;
+          }
+          showToast('Re-linked — verifying on-disk bytes against new torrent…');
+          loadLibrary();
+        } catch { showToast('Re-link request failed'); }
+      });
+    });
+
     // Click on card to play if complete or converting (converting items still play via remux)
     container.querySelectorAll('.card[data-status="complete"], .card[data-status="converting"]').forEach(card => {
       card.addEventListener('click', () => {
@@ -5276,6 +5365,59 @@
     }
   }
 
+  // Shared /api/library poller. The library view and the downloads
+  // settings panel both used to spin up their own setInterval at 3s,
+  // each doing its own fetch + JSON.parse. They're mutually exclusive
+  // by view in steady state, but pay the full cost again on every view
+  // toggle and during overlay+view co-renders, and would diverge if
+  // ever shown together.
+  //
+  // Subscribers register a callback that receives the parsed
+  // { items, slots } payload. The timer is reference-counted: it spins
+  // up on first subscribe and stops on last unsubscribe.
+  const _libraryFeed = {
+    timer: null,
+    subscribers: new Set(),
+    lastData: null,
+    lastTs: 0,
+  };
+  async function _libraryFeedTick() {
+    if (_libraryFeed.subscribers.size === 0) return;
+    try {
+      const resp = await fetch('/api/library');
+      if (!resp.ok) return;
+      const data = await resp.json();
+      _libraryFeed.lastData = data;
+      _libraryFeed.lastTs = Date.now();
+      // Iterate over a snapshot so a subscriber that unsubscribes
+      // mid-broadcast doesn't skip another subscriber.
+      for (const sub of [..._libraryFeed.subscribers]) {
+        try { sub(data); } catch (err) { console.error('[LibraryFeed] subscriber threw:', err); }
+      }
+    } catch { /* ignore transient fetch errors */ }
+  }
+  function subscribeLibraryFeed(callback) {
+    _libraryFeed.subscribers.add(callback);
+    // Hand the freshest snapshot to a late subscriber immediately so
+    // the UI doesn't blank for up to 3s after a view switch.
+    if (_libraryFeed.lastData && Date.now() - _libraryFeed.lastTs < 5000) {
+      try { callback(_libraryFeed.lastData); } catch (err) { console.error('[LibraryFeed] initial dispatch:', err); }
+    }
+    if (!_libraryFeed.timer) {
+      _libraryFeed.timer = setInterval(_libraryFeedTick, 3000);
+      // Fire one immediate tick so a fresh subscriber doesn't wait a
+      // full interval for the first update when the cache is empty.
+      if (!_libraryFeed.lastData) _libraryFeedTick();
+    }
+    return () => {
+      _libraryFeed.subscribers.delete(callback);
+      if (_libraryFeed.subscribers.size === 0 && _libraryFeed.timer) {
+        clearInterval(_libraryFeed.timer);
+        _libraryFeed.timer = null;
+      }
+    };
+  }
+
   let _libraryPollTimer = null;
 
   // Re-render a single library card in place after a status transition.
@@ -5317,14 +5459,12 @@
 
   function startLibraryProgressPoll() {
     stopLibraryProgressPoll();
-    _libraryPollTimer = setInterval(async () => {
+    _libraryPollTimer = subscribeLibraryFeed((data) => {
       if (state.currentView !== 'library') {
         stopLibraryProgressPoll();
         return;
       }
       try {
-        const resp = await fetch('/api/library');
-        const data = await resp.json();
         const items = data.items || [];
 
         // Build per-tick element caches so item lookup is O(1). The
@@ -5418,12 +5558,16 @@
           stopLibraryProgressPoll();
         }
       } catch { /* ignore polling errors */ }
-    }, 3000);
+    });
   }
 
+  // _libraryPollTimer here is the unsubscribe handle returned by
+  // subscribeLibraryFeed, not a setInterval id — calling it removes
+  // this subscriber and stops the shared timer if no one else is
+  // listening.
   function stopLibraryProgressPoll() {
     if (_libraryPollTimer) {
-      clearInterval(_libraryPollTimer);
+      try { _libraryPollTimer(); } catch { /* ignore */ }
       _libraryPollTimer = null;
     }
   }
@@ -5988,23 +6132,24 @@
   let _downloadsTimer = null;
 
   function refreshDownloads() {
-    // Stop any existing timer
+    // _downloadsTimer here is an unsubscribe handle from the shared
+    // library feed, not a setInterval id. The shared feed deduplicates
+    // /api/library traffic between this panel and the library view.
     if (_downloadsTimer) {
-      clearInterval(_downloadsTimer);
+      try { _downloadsTimer(); } catch { /* ignore */ }
       _downloadsTimer = null;
     }
 
     renderDownloads();
 
-    // Auto-refresh while on settings view
-    _downloadsTimer = setInterval(() => {
+    _downloadsTimer = subscribeLibraryFeed((data) => {
       if (state.currentView === 'settings') {
-        renderDownloads();
-      } else {
-        clearInterval(_downloadsTimer);
+        renderDownloads(data);
+      } else if (_downloadsTimer) {
+        try { _downloadsTimer(); } catch { /* ignore */ }
         _downloadsTimer = null;
       }
-    }, 3000);
+    });
   }
 
   // Group items by packId — pack items become a single aggregate row
@@ -6122,14 +6267,24 @@
   // Track which packs are expanded so state survives re-renders
   const _expandedPacks = new Set();
 
-  async function renderDownloads() {
+  // Optional preFetched param lets the shared library feed hand in the
+  // already-parsed payload from a single /api/library request — saves
+  // a duplicate fetch + parse on every tick while settings is open.
+  // Direct callers (button handlers triggering an immediate re-render)
+  // pass nothing and we fetch fresh.
+  async function renderDownloads(preFetched) {
     const panel = $('#downloads-panel');
     if (!panel) return;
 
     try {
-      const resp = await fetch('/api/library');
-      if (!resp.ok) throw new Error('Failed');
-      const data = await resp.json();
+      let data;
+      if (preFetched && typeof preFetched === 'object') {
+        data = preFetched;
+      } else {
+        const resp = await fetch('/api/library');
+        if (!resp.ok) throw new Error('Failed');
+        data = await resp.json();
+      }
       const items = data.items || [];
       const slots = data.slots || { active: 0, max: 5 };
       const hasSlots = slots.active < slots.max;

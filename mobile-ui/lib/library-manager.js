@@ -2251,7 +2251,17 @@ class LibraryManager {
    */
   getAll() {
     const cacheNow = Date.now();
-    if (this._getAllCache && cacheNow - this._getAllCacheTs < 2000) return this._getAllCache;
+    const tracked = [...this._items.values()];
+    // Bypass the cache while any item is in a transient state. Download
+    // progress, speed, peer count and convert progress mutate on the
+    // _items entries every poll tick without bumping _libraryVersion, so
+    // a stale _getAllCache snapshot freezes the UI's progress bars even
+    // though the server's /api/library cache rebuilds every 2s on the
+    // epoch boundary — it just re-serializes the stale snapshot.
+    const hasActive = tracked.some(i => i.status === 'downloading' || i.status === 'converting');
+    if (!hasActive && this._getAllCache && cacheNow - this._getAllCacheTs < 2000) {
+      return this._getAllCache;
+    }
 
     // Trigger async discovery refresh in background if stale
     if (!this._discoveryCache || cacheNow - this._discoveryCacheTs > 60000) {
@@ -2265,11 +2275,17 @@ class LibraryManager {
       }
     }
 
-    const tracked = [...this._items.values()];
     const all = [...tracked, ...(this._discoveryCache || [])].sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
     const result = all.map(i => this._sanitizeItem(i));
-    this._getAllCache = result;
-    this._getAllCacheTs = cacheNow;
+    // Don't persist the snapshot while active items are present — caching
+    // it would let a subsequent idle-state read get back the stale active
+    // progress values.
+    if (!hasActive) {
+      this._getAllCache = result;
+      this._getAllCacheTs = cacheNow;
+    } else {
+      this._getAllCache = null;
+    }
     return result;
   }
 

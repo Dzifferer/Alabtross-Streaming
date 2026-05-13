@@ -25,6 +25,7 @@ const { CpuMonitor } = require('./cpu-monitor');
 
 const DEFAULT_MAX_CONCURRENT_DOWNLOADS = 5;
 const METADATA_SAVE_INTERVAL = 30 * 1000; // Save metadata every 30s during active downloads
+const ENGINE_HEARTBEAT_INTERVAL = 30 * 1000; // Log per-engine swarm activity every 30s during active downloads
 
 // Pack (season/multi-episode) torrents have info dicts an order of
 // magnitude bigger than single-file torrents — 100-episode packs
@@ -257,6 +258,18 @@ class LibraryManager {
       failRemote:    0,
     };
     this._metadataSaveTimer = null;
+    // Periodic per-engine swarm-activity log. Spun up alongside the
+    // metadata-save timer (so it shares the "any engine is alive"
+    // lifecycle) and prints one line per active engine every
+    // ENGINE_HEARTBEAT_INTERVAL. Lets the operator confirm bytes are
+    // actually flowing even when the per-item UI is hiding speed (the
+    // UI shows blank for downloadSpeed === 0, and in sequential pack
+    // mode every queued-within-pack item reads as 0).
+    this._engineHeartbeatTimer = null;
+    // Per-engine last-seen swarm.downloaded byte counter so each tick
+    // can decide "moved" vs "stalled" without needing wallclock state.
+    // Keyed by engine reference so a recycle resets the baseline.
+    this._engineHeartbeatLastBytes = new WeakMap();
     // Trailing-debounce handle for _saveMetadata. Every state transition
     // (download complete, progress tick, conversion done, manual edit)
     // used to synchronously JSON.stringify the whole library, write a
@@ -3849,6 +3862,7 @@ class LibraryManager {
       clearInterval(this._metadataSaveTimer);
       this._metadataSaveTimer = null;
     }
+    this._stopEngineHeartbeat();
     this._stopAutoRetryDaemon();
     // Flush cross-torrent peer reputation before we destroy engines
     // (engine destruction triggers peer-cache writes which may create
@@ -4463,6 +4477,86 @@ class LibraryManager {
       // going through the 500ms debounce would just add latency.
       this._writeMetadataNow();
     }, METADATA_SAVE_INTERVAL);
+    this._startEngineHeartbeat();
+  }
+
+  // Print one log line per active engine on a fixed interval, with the
+  // swarm-level download speed, peer count, and bytes-this-session.
+  // Operators wondering "is anything actually downloading?" can confirm
+  // from the service log without needing the localhost-only diag
+  // endpoint. The per-item /api/library response can read 0 for a real
+  // engine — sequential pack mode only attributes speed to the active
+  // episode, and a freshly-started swarm with peers but no completed
+  // pieces still has downloadSpeed === 0 — so the UI alone is not a
+  // reliable signal of whether bytes are flowing.
+  _startEngineHeartbeat() {
+    if (this._engineHeartbeatTimer) return;
+    this._engineHeartbeatTimer = setInterval(() => {
+      this._logEngineHeartbeat();
+    }, ENGINE_HEARTBEAT_INTERVAL);
+    // Best-effort: also fire one immediately so the first activity
+    // shows up in the log without waiting a full interval.
+    try { this._logEngineHeartbeat(); } catch { /* ignore */ }
+  }
+
+  _logEngineHeartbeat() {
+    if (this._engines.size === 0) return;
+    for (const [engineKey, engine] of this._engines) {
+      if (!engine || !engine.swarm) {
+        console.log(`[Library] heartbeat ${engineKey}: engine alive but swarm not ready yet`);
+        continue;
+      }
+      const sw = engine.swarm;
+      const bps = (sw.downloadSpeed && sw.downloadSpeed()) || 0;
+      const ups = (sw.uploadSpeed && sw.uploadSpeed()) || 0;
+      const wires = sw.wires ? sw.wires.length : 0;
+      const queued = sw.queued || 0;
+      const total = sw.downloaded || 0;
+      const prev = this._engineHeartbeatLastBytes.get(engine) || 0;
+      const delta = Math.max(0, total - prev);
+      this._engineHeartbeatLastBytes.set(engine, total);
+
+      // Identify the engine by the friendliest name we can find. Pack
+      // engines share one swarm across many items; single engines map
+      // 1:1. Fall back to engineKey if neither is set.
+      let label = engineKey;
+      let activeFile = null;
+      for (const item of this._items.values()) {
+        if (item.packId === engineKey) {
+          label = item.showName || item.name || label;
+          break;
+        }
+        if (item.id === engineKey) {
+          label = item.name || label;
+          activeFile = item.fileName || null;
+          break;
+        }
+      }
+      if (!activeFile) {
+        const activeItem = this._pickNextPackItem(engineKey);
+        if (activeItem) activeFile = activeItem.fileName || activeItem.name || null;
+      }
+
+      const mbps = (bps / 1e6).toFixed(2);
+      const upMbps = (ups / 1e6).toFixed(2);
+      const totalMB = (total / 1e6).toFixed(1);
+      const deltaMB = (delta / 1e6).toFixed(1);
+      const activeStr = activeFile ? ` active="${activeFile}"` : '';
+      const movement = delta > 0
+        ? `+${deltaMB} MB since last tick`
+        : (wires > 0 ? 'NO BYTES this tick (swarm idle or all wires choked)' : 'no peers');
+      console.log(
+        `[Library] heartbeat "${label}": ${mbps} MB/s dn · ${upMbps} MB/s up · ${wires} wire(s)`
+        + ` · ${queued} queued · ${totalMB} MB total this session · ${movement}${activeStr}`,
+      );
+    }
+  }
+
+  _stopEngineHeartbeat() {
+    if (this._engineHeartbeatTimer) {
+      clearInterval(this._engineHeartbeatTimer);
+      this._engineHeartbeatTimer = null;
+    }
   }
 
   // ─── Auto-retry daemon ────────────────────────────────────────────────
@@ -4590,6 +4684,7 @@ class LibraryManager {
       clearInterval(this._metadataSaveTimer);
       this._metadataSaveTimer = null;
     }
+    this._stopEngineHeartbeat();
   }
 
   // ─── Torrent metadata cache ────────────────────

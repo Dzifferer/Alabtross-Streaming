@@ -2526,6 +2526,10 @@ class LibraryManager {
 
     // Stop engine but only remove non-complete items (preserve already downloaded episodes)
     this._stopPackEngine(packId);
+    // packId is `pack_${infoHash}` and is stable across restarts, so the
+    // recycle counter from the previous attempt would otherwise persist
+    // and immediately fail the next attempt on the first stall.
+    this._packStallRecycles.delete(packId);
     const completedCount = packItems.filter(i => i.status === 'complete' || i.status === 'converting').length;
     for (const item of packItems) {
       if (item.status === 'complete' || item.status === 'converting') continue;
@@ -2992,8 +2996,25 @@ class LibraryManager {
     // and progress will be recalculated from disk size on the next poll cycle.
     item.downloadSpeed = 0;
     item.numPeers = 0;
+    // Clear retry-blocking residue from the previous attempt:
+    //   - _stallRecycles is the per-item recycle cap consumed by stall
+    //     detection (_shouldRecycleOnStall). If the previous attempt hit
+    //     the cap, the engine would fail on the first stall after retry
+    //     without even attempting a recycle.
+    //   - _nearCompleteSince timestamps the moment a pack episode first
+    //     reached 99%. If that timestamp survives into the retry attempt
+    //     and is older than 5 min, the next progress tick marks the item
+    //     failed immediately ("stuck near-complete for >5min").
+    item._stallRecycles = 0;
+    delete item._nearCompleteSince;
 
     if (item.packId) {
+      // Pack engines share a stall-recycle counter keyed by packId
+      // (_packStallRecycles). If the previous attempt burned through
+      // MAX_PACK_RECYCLES, the shared engine fails every item on the
+      // first stall check after retry. Reset on user-initiated retry so
+      // the pack actually gets a fresh shot.
+      this._packStallRecycles.delete(item.packId);
       const engine = this._engines.get(item.packId);
       if (!engine) {
         // No engine yet — start one for all downloading items in this pack
@@ -3275,11 +3296,18 @@ class LibraryManager {
     const packAlreadyActive = activePacks.has(packId);
     const atCapacity = !packAlreadyActive && this._countActiveSlots() >= this._maxConcurrentDownloads;
 
+    // Clear retry-blocking residue (see retryItem for the same reset).
+    // Pack-level recycle counter is keyed by packId and shared across
+    // every episode; per-item counters and near-complete timestamps live
+    // on the items themselves.
+    this._packStallRecycles.delete(packId);
     for (const item of failedItems) {
       item.status = atCapacity ? 'queued' : 'downloading';
       item.error = null;
       item.downloadSpeed = 0;
       item.numPeers = 0;
+      item._stallRecycles = 0;
+      delete item._nearCompleteSince;
     }
 
     if (!atCapacity) {

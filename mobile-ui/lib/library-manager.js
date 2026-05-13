@@ -1955,6 +1955,14 @@ class LibraryManager {
       // filtering by status alone is the authoritative "done" check.
       candidates.push(item);
     }
+    return this._pickActiveFromPackItems(candidates);
+  }
+
+  // Sort + pick helper extracted from _pickNextPackItem so the pack
+  // progress timer can pass an already-filtered candidate list and
+  // avoid walking the full _items map a second time per tick. Caller
+  // must guarantee candidates are pre-filtered to status='downloading'.
+  _pickActiveFromPackItems(candidates) {
     if (candidates.length === 0) return null;
     candidates.sort((a, b) => {
       const sa = a.season ?? 999;
@@ -2045,18 +2053,31 @@ class LibraryManager {
       // tick file.select() to keep prodding the piece picker).
       const swarmStale = this._swarmStaleSinceLastTick(engine);
 
+      // Walk _items once per tick and collect every downloading item
+      // belonging to this pack. The old code walked _items twice — once
+      // inside _pickNextPackItem to find the active episode, then again
+      // here in the update loop. On a large library (hundreds of items,
+      // many non-pack), iterating the full Map twice every 3s shows up
+      // in CPU traces. _pickActiveFromPackItems sorts an already-filtered
+      // list, so we get the active id without the second walk.
+      const packDownloading = [];
+      for (const item of this._items.values()) {
+        if (item.packId === packId && item.status === 'downloading') {
+          packDownloading.push(item);
+        }
+      }
       // In sequential mode, only one file at a time is selected in the engine,
       // so attribute speed only to the currently-active item. Other "downloading"
       // items in the pack are queued behind it and stay at 0 KB/s in the UI.
-      const activeItem = this._pickNextPackItem(packId);
+      const activeItem = this._pickActiveFromPackItems(packDownloading);
       const activeId = activeItem ? activeItem.id : null;
 
       let allComplete = true;
       let advanceToNext = false;
       let anyJustCompleted = false;
 
-      for (const [itemId, item] of this._items) {
-        if (item.packId !== packId || item.status !== 'downloading') continue;
+      for (const item of packDownloading) {
+        const itemId = item.id;
 
         if (itemId === activeId) {
           item.downloadSpeed = speed;
@@ -2148,10 +2169,13 @@ class LibraryManager {
       // a near-complete item specifically, mark IT failed so the pack
       // aggregates to 'failed' and the user gets a Retry button instead
       // of watching a permanent 100%/N-1 of N display.
+      // Iterate the per-pack list we already built above instead of
+      // walking the full _items map a third time. Items whose status
+      // flipped to 'complete' during the first loop are skipped by the
+      // explicit status check.
       const NEAR_COMPLETE_STUCK_MS = 5 * 60 * 1000;
       let markedNearCompleteFailed = false;
-      for (const [, item] of this._items) {
-        if (item.packId !== packId) continue;
+      for (const item of packDownloading) {
         if (item.status !== 'downloading') continue;
         if (!item._nearCompleteSince) continue;
         if (Date.now() - item._nearCompleteSince < NEAR_COMPLETE_STUCK_MS) continue;
@@ -2191,9 +2215,10 @@ class LibraryManager {
       // "100%" and is waiting on what looks like a finished download. Use
       // a 2-min threshold in that case so we recycle aggressively to find
       // peers that have the missing pieces.
-      const remaining = [...this._items.values()].filter(
-        (i) => i.packId === packId && i.status === 'downloading'
-      );
+      // packDownloading is the same superset we built above; items whose
+      // status flipped to 'complete' or 'failed' during this tick are
+      // filtered out by the status check. Avoids another full _items walk.
+      const remaining = packDownloading.filter((i) => i.status === 'downloading');
       const allRemainingNearComplete = remaining.length > 0
         && remaining.every((i) => (i.progress || 0) >= 99);
       const stallThresholdMs = allRemainingNearComplete ? 2 * 60 * 1000 : 15 * 60 * 1000;

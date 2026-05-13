@@ -270,6 +270,15 @@ class LibraryManager {
     // can decide "moved" vs "stalled" without needing wallclock state.
     // Keyed by engine reference so a recycle resets the baseline.
     this._engineHeartbeatLastBytes = new WeakMap();
+    // Dirty bit gating the periodic save: progress-tick mutations
+    // (downloadSpeed, numPeers, progress) do NOT call _saveMetadata,
+    // but the 30s periodic timer used to fire _writeMetadataNow
+    // unconditionally — writing a multi-MB JSON to disk every 30s
+    // during a long download even though every byte was unchanged.
+    // _saveMetadata() now flips this flag and _writeMetadataNow()
+    // clears it after snapshotting; the periodic tick skips entirely
+    // when there's nothing to persist.
+    this._metadataDirty = false;
     // Trailing-debounce handle for _saveMetadata. Every state transition
     // (download complete, progress tick, conversion done, manual edit)
     // used to synchronously JSON.stringify the whole library, write a
@@ -281,6 +290,12 @@ class LibraryManager {
     this._discoveryCache = null;      // cached result of _discoverUntrackedFiles
     this._discoveryCacheTs = 0;       // timestamp of last discovery scan
     this._discoveryRefreshInFlight = null; // in-flight async discovery promise
+    // Per-directory listing cache keyed by absolute path. Lets the
+    // recursive disk scan skip readdir() AND per-file stat() on every
+    // subdirectory whose mtime hasn't changed since the previous scan
+    // — typically every leaf directory in a steady-state library.
+    //   absDir -> { mtimeMs, candidates: [{ relPath, stat }], subdirs: [{ absPath, relPath }] }
+    this._discoveryDirCache = new Map();
     this._getAllCache = null;          // cached result of getAll()
     this._getAllCacheTs = 0;           // timestamp of last getAll() cache build
 
@@ -4598,6 +4613,13 @@ class LibraryManager {
   _startPeriodicSave() {
     if (this._metadataSaveTimer) return;
     this._metadataSaveTimer = setInterval(() => {
+      // Skip the periodic write when nothing has actually changed since
+      // the last save. Progress-tick fields (downloadSpeed, numPeers,
+      // progress) intentionally do NOT call _saveMetadata, so during a
+      // long download with no transitions there is genuinely no new
+      // state to persist — the previous unconditional write churned a
+      // multi-MB JSON every 30s for nothing.
+      if (!this._metadataDirty) return;
       // Force an immediate write rather than scheduling another debounce
       // tick — the periodic save is itself the durability guarantee, so
       // going through the 500ms debounce would just add latency.
@@ -5492,6 +5514,9 @@ class LibraryManager {
    * debounced write doesn't get dropped.
    */
   _saveMetadata() {
+    // Mark the in-memory state as having something the disk doesn't
+    // yet. Read by the periodic-save tick to decide whether to fire.
+    this._metadataDirty = true;
     // Invalidate the getAll() cache eagerly so the next read sees fresh data,
     // even before the debounced write fires.
     this._getAllCache = null;
@@ -5535,6 +5560,14 @@ class LibraryManager {
     // mutations made during that window to leak into the JSON we're
     // about to publish (or, conversely, get lost when the next call
     // overwrites our partial snapshot).
+    //
+    // Clear the dirty bit at snapshot time — any mutation that lands
+    // after this point will set it back to true via _saveMetadata(),
+    // which schedules a follow-up via the existing
+    // _metadataWriteQueued mechanism. Clearing later (after the async
+    // write completes) would lose mid-write mutations to a subsequent
+    // periodic-tick "clean" check.
+    this._metadataDirty = false;
     const data = [...this._items.values()].map(item => {
       const {
         _needsResume,
@@ -5557,7 +5590,15 @@ class LibraryManager {
     // No pretty-print: the file isn't human-edited, and indented JSON
     // ~2× the byte count of the file we have to fsync. On a multi-MB
     // metadata.json this measurably reduces event-loop occupancy.
-    const json = JSON.stringify(data);
+    //
+    // We deliberately do NOT call JSON.stringify(data) up front: a
+    // monolithic stringify on a multi-MB library is a single contiguous
+    // CPU burn (100-300 ms on Orin) that stalls every concurrent
+    // request — including in-flight video bytes — for the duration.
+    // doWrite() below streams items one-by-one into the file, batching
+    // ~64 KB at a time, so each await fh.write() also yields the event
+    // loop between batches. Stringify cost is now amortized over many
+    // ticks with no single long stall.
     const tmpFile = this._metadataFile + '.tmp.' + process.pid;
     const backupFile = this._metadataFile + '.bak';
 
@@ -5582,7 +5623,21 @@ class LibraryManager {
         // pattern for durable small-file updates.
         const fh = await fs.promises.open(tmpFile, 'w');
         try {
-          await fh.writeFile(json, 'utf8');
+          // Stream the JSON array one item at a time. Each await yields
+          // the event loop between ~64 KB batches, so stringify cost is
+          // spread across many ticks instead of one long stall.
+          const FLUSH_AT = 64 * 1024;
+          let buffer = '[';
+          for (let i = 0; i < data.length; i++) {
+            if (i > 0) buffer += ',';
+            buffer += JSON.stringify(data[i]);
+            if (buffer.length >= FLUSH_AT) {
+              await fh.write(buffer, null, 'utf8');
+              buffer = '';
+            }
+          }
+          buffer += ']';
+          await fh.write(buffer, null, 'utf8');
           try { await fh.sync(); } catch { /* fsync unsupported on some FS */ }
         } finally {
           await fh.close();
@@ -5852,22 +5907,35 @@ class LibraryManager {
       };
     };
 
-    const walk = async (absDir, relDir, depth) => {
-      if (discovered.length >= MAX_DISCOVERED) return;
-      if (depth > MAX_DEPTH) return;
+    // Scan a single directory, reusing the cached listing when its
+    // mtime is unchanged. Per-file stat() is the dominant cost on a
+    // cold scan of a few-thousand-file library; the cache eliminates
+    // it (and the readdir()) on every leaf directory that's stable
+    // between calls. Tracked-path filtering and buildItem() run against
+    // the cached candidates fresh each call, since library mutations
+    // (new items, new pack catalog entries) don't bump directory mtime.
+    const seenAbsDirs = new Set();
+    const scanDir = async (absDir, relDir, depth) => {
+      let dirStat;
+      try { dirStat = await fs.promises.stat(absDir); }
+      catch (err) {
+        if (depth === 0) console.error(`[Library] Disk scan error: ${err.message}`);
+        return null;
+      }
+      const cached = this._discoveryDirCache.get(absDir);
+      if (cached && cached.mtimeMs === dirStat.mtimeMs) return cached;
 
       let entries;
-      try {
-        entries = await fs.promises.readdir(absDir, { withFileTypes: true });
-      } catch (err) {
+      try { entries = await fs.promises.readdir(absDir, { withFileTypes: true }); }
+      catch (err) {
         if (depth === 0) console.error(`[Library] Disk scan error: ${err.message}`);
-        return;
+        return null;
       }
 
+      const candidates = [];
+      const subdirs = [];
       for (const entry of entries) {
-        if (discovered.length >= MAX_DISCOVERED) return;
         if (entry.isSymbolicLink()) continue;
-
         if (depth === 0) {
           if (entry.name.startsWith('_metadata')) continue;
           if (entry.name === this._torrentCacheName) continue;
@@ -5879,7 +5947,7 @@ class LibraryManager {
         const relPath = relDir ? path.join(relDir, entry.name) : entry.name;
 
         if (entry.isDirectory()) {
-          await walk(absPath, relPath, depth + 1);
+          subdirs.push({ absPath, relPath });
           continue;
         }
         if (!entry.isFile()) continue;
@@ -5887,21 +5955,52 @@ class LibraryManager {
         const ext = path.extname(entry.name).toLowerCase();
         if (!VIDEO_EXTENSIONS.has(ext)) continue;
 
-        const normRel = path.normalize(relPath);
-        if (trackedPaths.has(normRel)) continue;
-        if (trackedPaths.has(entry.name)) continue;
-
-        let stat;
-        try { stat = await fs.promises.stat(absPath); }
+        let fStat;
+        try { fStat = await fs.promises.stat(absPath); }
         catch { continue; }
-        if (stat.size < MIN_VIDEO_SIZE) continue;
+        if (fStat.size < MIN_VIDEO_SIZE) continue;
 
-        const built = buildItem(relPath, stat);
+        candidates.push({ relPath, stat: fStat });
+      }
+
+      const result = { mtimeMs: dirStat.mtimeMs, candidates, subdirs };
+      this._discoveryDirCache.set(absDir, result);
+      return result;
+    };
+
+    const walk = async (absDir, relDir, depth) => {
+      if (discovered.length >= MAX_DISCOVERED) return;
+      if (depth > MAX_DEPTH) return;
+      seenAbsDirs.add(absDir);
+
+      const dir = await scanDir(absDir, relDir, depth);
+      if (!dir) return;
+
+      for (const c of dir.candidates) {
+        if (discovered.length >= MAX_DISCOVERED) return;
+        const normRel = path.normalize(c.relPath);
+        if (trackedPaths.has(normRel)) continue;
+        if (trackedPaths.has(path.basename(c.relPath))) continue;
+        const built = buildItem(c.relPath, c.stat);
         if (built) discovered.push(built);
+      }
+
+      for (const sd of dir.subdirs) {
+        if (discovered.length >= MAX_DISCOVERED) return;
+        await walk(sd.absPath, sd.relPath, depth + 1);
       }
     };
 
     await walk(this._libraryPath, '', 0);
+
+    // Evict cache entries for directories that no longer exist
+    // (renamed, deleted, moved out from under us). Without this the
+    // map grows without bound on a library that churns directories.
+    if (this._discoveryDirCache.size > seenAbsDirs.size) {
+      for (const key of this._discoveryDirCache.keys()) {
+        if (!seenAbsDirs.has(key)) this._discoveryDirCache.delete(key);
+      }
+    }
 
     if (discovered.length > 0) {
       console.log(`[Library] Discovered ${discovered.length} untracked file(s) on disk`);

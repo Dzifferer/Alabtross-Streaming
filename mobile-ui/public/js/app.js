@@ -5365,6 +5365,59 @@
     }
   }
 
+  // Shared /api/library poller. The library view and the downloads
+  // settings panel both used to spin up their own setInterval at 3s,
+  // each doing its own fetch + JSON.parse. They're mutually exclusive
+  // by view in steady state, but pay the full cost again on every view
+  // toggle and during overlay+view co-renders, and would diverge if
+  // ever shown together.
+  //
+  // Subscribers register a callback that receives the parsed
+  // { items, slots } payload. The timer is reference-counted: it spins
+  // up on first subscribe and stops on last unsubscribe.
+  const _libraryFeed = {
+    timer: null,
+    subscribers: new Set(),
+    lastData: null,
+    lastTs: 0,
+  };
+  async function _libraryFeedTick() {
+    if (_libraryFeed.subscribers.size === 0) return;
+    try {
+      const resp = await fetch('/api/library');
+      if (!resp.ok) return;
+      const data = await resp.json();
+      _libraryFeed.lastData = data;
+      _libraryFeed.lastTs = Date.now();
+      // Iterate over a snapshot so a subscriber that unsubscribes
+      // mid-broadcast doesn't skip another subscriber.
+      for (const sub of [..._libraryFeed.subscribers]) {
+        try { sub(data); } catch (err) { console.error('[LibraryFeed] subscriber threw:', err); }
+      }
+    } catch { /* ignore transient fetch errors */ }
+  }
+  function subscribeLibraryFeed(callback) {
+    _libraryFeed.subscribers.add(callback);
+    // Hand the freshest snapshot to a late subscriber immediately so
+    // the UI doesn't blank for up to 3s after a view switch.
+    if (_libraryFeed.lastData && Date.now() - _libraryFeed.lastTs < 5000) {
+      try { callback(_libraryFeed.lastData); } catch (err) { console.error('[LibraryFeed] initial dispatch:', err); }
+    }
+    if (!_libraryFeed.timer) {
+      _libraryFeed.timer = setInterval(_libraryFeedTick, 3000);
+      // Fire one immediate tick so a fresh subscriber doesn't wait a
+      // full interval for the first update when the cache is empty.
+      if (!_libraryFeed.lastData) _libraryFeedTick();
+    }
+    return () => {
+      _libraryFeed.subscribers.delete(callback);
+      if (_libraryFeed.subscribers.size === 0 && _libraryFeed.timer) {
+        clearInterval(_libraryFeed.timer);
+        _libraryFeed.timer = null;
+      }
+    };
+  }
+
   let _libraryPollTimer = null;
 
   // Re-render a single library card in place after a status transition.
@@ -5406,14 +5459,12 @@
 
   function startLibraryProgressPoll() {
     stopLibraryProgressPoll();
-    _libraryPollTimer = setInterval(async () => {
+    _libraryPollTimer = subscribeLibraryFeed((data) => {
       if (state.currentView !== 'library') {
         stopLibraryProgressPoll();
         return;
       }
       try {
-        const resp = await fetch('/api/library');
-        const data = await resp.json();
         const items = data.items || [];
 
         // Build per-tick element caches so item lookup is O(1). The
@@ -5507,12 +5558,16 @@
           stopLibraryProgressPoll();
         }
       } catch { /* ignore polling errors */ }
-    }, 3000);
+    });
   }
 
+  // _libraryPollTimer here is the unsubscribe handle returned by
+  // subscribeLibraryFeed, not a setInterval id — calling it removes
+  // this subscriber and stops the shared timer if no one else is
+  // listening.
   function stopLibraryProgressPoll() {
     if (_libraryPollTimer) {
-      clearInterval(_libraryPollTimer);
+      try { _libraryPollTimer(); } catch { /* ignore */ }
       _libraryPollTimer = null;
     }
   }
@@ -6077,23 +6132,24 @@
   let _downloadsTimer = null;
 
   function refreshDownloads() {
-    // Stop any existing timer
+    // _downloadsTimer here is an unsubscribe handle from the shared
+    // library feed, not a setInterval id. The shared feed deduplicates
+    // /api/library traffic between this panel and the library view.
     if (_downloadsTimer) {
-      clearInterval(_downloadsTimer);
+      try { _downloadsTimer(); } catch { /* ignore */ }
       _downloadsTimer = null;
     }
 
     renderDownloads();
 
-    // Auto-refresh while on settings view
-    _downloadsTimer = setInterval(() => {
+    _downloadsTimer = subscribeLibraryFeed((data) => {
       if (state.currentView === 'settings') {
-        renderDownloads();
-      } else {
-        clearInterval(_downloadsTimer);
+        renderDownloads(data);
+      } else if (_downloadsTimer) {
+        try { _downloadsTimer(); } catch { /* ignore */ }
         _downloadsTimer = null;
       }
-    }, 3000);
+    });
   }
 
   // Group items by packId — pack items become a single aggregate row
@@ -6211,14 +6267,24 @@
   // Track which packs are expanded so state survives re-renders
   const _expandedPacks = new Set();
 
-  async function renderDownloads() {
+  // Optional preFetched param lets the shared library feed hand in the
+  // already-parsed payload from a single /api/library request — saves
+  // a duplicate fetch + parse on every tick while settings is open.
+  // Direct callers (button handlers triggering an immediate re-render)
+  // pass nothing and we fetch fresh.
+  async function renderDownloads(preFetched) {
     const panel = $('#downloads-panel');
     if (!panel) return;
 
     try {
-      const resp = await fetch('/api/library');
-      if (!resp.ok) throw new Error('Failed');
-      const data = await resp.json();
+      let data;
+      if (preFetched && typeof preFetched === 'object') {
+        data = preFetched;
+      } else {
+        const resp = await fetch('/api/library');
+        if (!resp.ok) throw new Error('Failed');
+        data = await resp.json();
+      }
       const items = data.items || [];
       const slots = data.slots || { active: 0, max: 5 };
       const hasSlots = slots.active < slots.max;

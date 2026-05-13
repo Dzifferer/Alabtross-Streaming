@@ -99,6 +99,16 @@ function _probeCacheDeleteByPath(filePath) {
 // is collected automatically when the torrent-stream engine drops the file
 // object — and so we never mutate a third-party object with our own field.
 const _completedFileProgress = new WeakMap();
+// Partial-progress cache: tracks the contiguous-verified prefix endpoint
+// per file. The bitfield is monotonic, so any piece previously confirmed
+// in the prefix is still confirmed on a subsequent call — we resume the
+// scan from the prefix endpoint instead of restarting at firstPiece every
+// tick. On a 5 GB file with 4 MB pieces (~1250 pieces) at 80% sequential
+// progress, this skips ~1000 bitfield reads per tick per active item.
+// New engines create new file objects, so a recycle naturally resets the
+// cache without explicit invalidation.
+//   file -> { prefixEndPiece, prefixBytes }
+const _partialFileProgress = new WeakMap();
 
 /**
  * Compute file download progress from torrent-stream's bitfield.
@@ -133,9 +143,43 @@ function computeFileProgress(engine, file) {
   const firstPiece = Math.floor(fileStart / pieceLength);
   const lastPiece = Math.floor((fileEnd - 1) / pieceLength);
 
+  // Resume from the verified-prefix endpoint cached on the previous
+  // tick. Pieces strictly before partial.prefixEndPiece were all set
+  // last call and the bitfield is monotonic, so they're still set.
+  // Skip re-reading them.
+  let scanStart = firstPiece;
   let downloadedBytes = 0;
-  let allPiecesPresent = true;
-  for (let i = firstPiece; i <= lastPiece; i++) {
+  const partial = _partialFileProgress.get(file);
+  if (partial && partial.prefixEndPiece > firstPiece) {
+    scanStart = partial.prefixEndPiece;
+    downloadedBytes = partial.prefixBytes;
+  }
+
+  // Walk the prefix forward as far as it now extends.
+  while (scanStart <= lastPiece && engine.bitfield.get(scanStart)) {
+    const pieceStart = scanStart * pieceLength;
+    const pieceEnd = Math.min(pieceStart + pieceLength, torrentLength);
+    const overlapStart = Math.max(pieceStart, fileStart);
+    const overlapEnd = Math.min(pieceEnd, fileEnd);
+    if (overlapEnd > overlapStart) downloadedBytes += overlapEnd - overlapStart;
+    scanStart++;
+  }
+
+  const newPrefixEndPiece = scanStart;
+  const newPrefixBytes = downloadedBytes;
+  // Persist the new prefix endpoint immediately so an early return from
+  // a fully-prefix-covered file (scanStart > lastPiece) still gets the
+  // benefit on the next call.
+  _partialFileProgress.set(file, {
+    prefixEndPiece: newPrefixEndPiece,
+    prefixBytes: newPrefixBytes,
+  });
+
+  // Tail scan: pick up any out-of-order pieces that landed past the
+  // prefix. These contribute to downloadedBytes but can't extend the
+  // contiguous prefix (the gap immediately before them is still unset).
+  let allPiecesPresent = scanStart > lastPiece;
+  for (let i = scanStart; i <= lastPiece; i++) {
     if (engine.bitfield.get(i)) {
       const pieceStart = i * pieceLength;
       const pieceEnd = Math.min(pieceStart + pieceLength, torrentLength);
@@ -155,6 +199,9 @@ function computeFileProgress(engine, file) {
 
   if (allPiecesPresent) {
     _completedFileProgress.set(file, result);
+    // Partial cache is redundant once the completion cache is set —
+    // drop the entry so the WeakMap stays lean.
+    _partialFileProgress.delete(file);
   }
 
   return result;
@@ -195,6 +242,15 @@ class LibraryManager {
     // doesn't reset the counter. Bounded retry stops the worst case of
     // a genuinely stuck pack from cycling forever.
     this._packStallRecycles = new Map();
+    // Per-engine "last seen swarm.downloaded" used by the dead-swarm
+    // short-circuit in the progress timers. When peers === 0 AND total
+    // bytes downloaded haven't advanced since the previous tick, no
+    // piece could have just verified, so the bitfield scan in
+    // computeFileProgress is guaranteed to return the same result.
+    // Skipping it spares O(piece-count) work per item per tick — most
+    // visibly during long peer-discovery stalls on cold torrents.
+    // WeakMap so a recycled engine's entry GCs automatically.
+    this._engineLastDownloaded = new WeakMap();
     this._metadataSaveCount = 0;
     this._maxConcurrentDownloads = opts.maxConcurrentDownloads || DEFAULT_MAX_CONCURRENT_DOWNLOADS;
     this._items = new Map();       // id -> library item
@@ -1981,6 +2037,13 @@ class LibraryManager {
       const sw = engine.swarm;
       const speed = sw ? sw.downloadSpeed() : 0;
       const peers = sw ? sw.wires.length : 0;
+      // Dead-swarm short-circuit: when nothing landed since the last
+      // tick and no peers are connected, no piece could have verified,
+      // so the bitfield scan in computeFileProgress would return the
+      // same result it did last time. Skip it for every item that
+      // isn't already flagged near-complete (those still need a per-
+      // tick file.select() to keep prodding the piece picker).
+      const swarmStale = this._swarmStaleSinceLastTick(engine);
 
       // In sequential mode, only one file at a time is selected in the engine,
       // so attribute speed only to the currently-active item. Other "downloading"
@@ -2006,6 +2069,14 @@ class LibraryManager {
         const file = filesByName.get(item.fileName);
         if (!file) {
           // File not in this engine — leave alone, allComplete stays false
+          allComplete = false;
+          continue;
+        }
+
+        if (swarmStale && !item._nearCompleteSince) {
+          // Nothing could have just verified for this file. Don't
+          // touch item.progress — the previous value is still
+          // correct.
           allComplete = false;
           continue;
         }
@@ -3045,6 +3116,29 @@ class LibraryManager {
       if (hit) return { ...hit, source: 'dir-sibling' };
     }
     return null;
+  }
+
+  // Boolean fast-path for canRepair: returns true iff a recovery magnet
+  // exists for this item, without allocating the source-tagged object
+  // _findRecoveryMagnet returns. Called by _sanitizeItem on every
+  // incompleteOnDisk item in every getAll() — N items × N getAll() calls
+  // per second, the allocation churn shows up in V8 GC traces.
+  _hasRecoveryMagnet(brokenItem) {
+    if (!brokenItem) return false;
+    if (brokenItem.magnetUri && brokenItem.infoHash) return true;
+    const now = Date.now();
+    if (!this._recoveryIndex || now - this._recoveryIndexBuiltAt > 30000) {
+      // Cold cache — defer to the full method so the rebuild logic
+      // stays single-sourced. The full method also returns a boolean
+      // truthy/null shape that maps cleanly to our return type.
+      return !!this._findRecoveryMagnet(brokenItem);
+    }
+    if (brokenItem.packId && this._recoveryIndex.byPackId.has(brokenItem.packId)) return true;
+    if (brokenItem.filePath) {
+      const rootDir = String(brokenItem.filePath).split('/')[0];
+      if (rootDir && this._recoveryIndex.byRootDir.has(rootDir)) return true;
+    }
+    return false;
   }
 
   // Invalidate the recovery index when we add/remove items or mutate magnet
@@ -4203,6 +4297,29 @@ class LibraryManager {
         item.downloadSpeed = sw ? sw.downloadSpeed() : 0;
         item.numPeers = sw ? sw.wires.length : 0;
 
+        // Dead-swarm short-circuit (see pack timer for rationale).
+        // _checkEngineStall below still tracks its own counters on
+        // engine.swarm.downloaded, so the long-stall watchdog keeps
+        // working even when we skip the bitfield scan.
+        if (this._swarmStaleSinceLastTick(engine)) {
+          const stall = this._checkEngineStall(engine, `dl ${item.infoHash.slice(0, 8)}`);
+          if (stall.stalled) {
+            if (this._shouldRecycleOnStall(item)) {
+              console.log(`[Library] Recycling engine for "${item.name}" (stall recycle #${item._stallRecycles})`);
+              clearInterval(progressTimer);
+              this._stopDownload(id);
+              setTimeout(() => { if (item.status === 'downloading') this._startDownload(id); }, 1000);
+            } else {
+              console.warn(`[Library] Giving up on "${item.name}" — too many stall recycles`);
+              clearInterval(progressTimer);
+              this._stopDownload(id);
+              this._saveMetadata();
+              this._processQueue();
+            }
+          }
+          return;
+        }
+
         // Use bitfield for progress, NOT fs.statSync — see computeFileProgress()
         // for why. Briefly: torrent-stream writes pieces in-place at their byte
         // offsets, so the on-disk file size is unrelated to actual progress.
@@ -4321,6 +4438,11 @@ class LibraryManager {
       const sw = engine.swarm;
       item.downloadSpeed = sw ? sw.downloadSpeed() : 0;
       item.numPeers = sw ? sw.wires.length : 0;
+
+      // Dead-swarm short-circuit: no bytes landed, no peers, so no
+      // track could have just verified. Leave item.progress alone and
+      // skip the bitfield scan across every audio file.
+      if (this._swarmStaleSinceLastTick(engine)) return;
 
       let completedBytes = 0;
       let allComplete = true;
@@ -4990,6 +5112,25 @@ class LibraryManager {
       this._engineStallState.set(engine, st);
     }
     return st;
+  }
+
+  // Returns true when the swarm has zero peers AND no new bytes landed
+  // since the previous tick. The progress timers use this to skip the
+  // per-file bitfield scan in computeFileProgress, since no piece
+  // could possibly have just verified. Updates the last-seen counter
+  // as a side effect so consecutive calls give a correct delta.
+  //
+  // Returns false on the first tick after engine creation (no baseline
+  // yet) so the timer always runs at least once before short-circuiting.
+  _swarmStaleSinceLastTick(engine) {
+    if (!engine || !engine.swarm) return false;
+    const sw = engine.swarm;
+    const peers = sw.wires ? sw.wires.length : 0;
+    const downloaded = sw.downloaded || 0;
+    const prev = this._engineLastDownloaded.get(engine);
+    this._engineLastDownloaded.set(engine, downloaded);
+    if (prev === undefined) return false;
+    return peers === 0 && downloaded === prev;
   }
 
   _checkEngineStall(engine, label, opts = {}) {
@@ -7606,7 +7747,7 @@ class LibraryManager {
       // event loop on large libraries and surfaces as buffering.
       canRepair: item.status !== 'downloading' &&
         (!!(item.magnetUri && item.infoHash) ||
-          (!!item.incompleteOnDisk && !!this._findRecoveryMagnet(item))),
+          (!!item.incompleteOnDisk && this._hasRecoveryMagnet(item))),
       // Broken-state flag + ratio, set by the probe sweep when stat.blocks
       // says < 90% of the file is actually on disk. Used by the UI to show
       // an "Incomplete" badge so the user knows what to act on.

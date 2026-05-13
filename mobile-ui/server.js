@@ -3761,6 +3761,25 @@ app.post('/api/library/:id/repair', rateLimit, (req, res) => {
   res.json({ success: true, queued: !!result.queued });
 });
 
+// POST /api/library/:id/relink-magnet — last-resort recovery for true
+// orphans. Item has no own magnet, no pack/dir sibling magnet, and no
+// _packCatalog rescue available, so the existing /repair endpoint
+// returns "no magnet available". The user pastes a fresh magnet URI
+// (typically from re-searching for the same content) and we re-link
+// the item — preserving any partial bytes on disk — then retry. For
+// pack items, every other episode in the pack gets the same magnet
+// because they share one engine.
+app.post('/api/library/:id/relink-magnet', rateLimit, express.json({ limit: '4kb' }), (req, res) => {
+  const magnetUri = req.body && req.body.magnetUri;
+  if (typeof magnetUri !== 'string' || !magnetUri.startsWith('magnet:?')) {
+    return res.status(400).json({ error: 'magnetUri (string starting with magnet:?) is required' });
+  }
+  const result = library.relinkItemMagnet(req.params.id, magnetUri);
+  if (!result.ok) return res.status(400).json({ error: result.reason });
+  _libraryVersion++;
+  res.json({ success: true, queued: !!result.queued, infoHash: result.infoHash, name: result.name });
+});
+
 // POST /api/library/repair-all-incomplete — scan every 'complete' item and
 // queue a repair re-download for the sparse ones. Returns counts so the UI
 // can surface a meaningful toast ("Re-downloading 12 items") instead of a

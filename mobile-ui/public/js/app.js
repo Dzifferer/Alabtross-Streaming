@@ -3855,15 +3855,28 @@
         ? Math.round(item.completenessRatio * 100)
         : null;
       const pctText = pct !== null ? `${pct}% downloaded` : 'Incomplete download';
-      const actionHint = item.canRepair ? ' &middot; tap to repair' : ' &middot; re-import needed';
-      overlayHtml = `
-        <div class="library-card-overlay failed">Broken &middot; ${pctText}</div>
-        ${item.canRepair ? `
+      const actionHint = item.canRepair ? ' &middot; tap to repair' : ' &middot; tap to re-link magnet';
+      // When the item is repairable from a sibling/own magnet, show the
+      // refresh-arrow overlay that fires the standard /repair endpoint.
+      // When it's a true orphan (no recoverable magnet anywhere) show
+      // a chain-link overlay that prompts the user for a fresh magnet
+      // URI and re-links the item — preserving partial bytes on disk.
+      const repairOverlay = item.canRepair
+        ? `
         <div class="library-card-play library-card-repair-overlay" data-id="${escapeHTML(item.id)}">
           <div class="library-card-play-circle">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10"/><path d="M20.49 15a9 9 0 01-14.85 3.36L1 14"/></svg>
           </div>
-        </div>` : ''}`;
+        </div>`
+        : `
+        <div class="library-card-play library-card-relink-magnet-overlay" data-id="${escapeHTML(item.id)}">
+          <div class="library-card-play-circle">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>
+          </div>
+        </div>`;
+      overlayHtml = `
+        <div class="library-card-overlay failed">Broken &middot; ${pctText}</div>
+        ${repairOverlay}`;
       metaHtml = `<div class="library-card-meta failed">${pctText}${actionHint}</div>`;
     } else if (item.status === 'complete') {
       const size = item.fileSize ? formatSize(item.fileSize) : item.size || '';
@@ -4113,7 +4126,10 @@
         ${item.canRepair ? `
         <button class="library-episode-repair" data-id="${escapeHTML(item.id)}" title="Repair / re-download">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10"/><path d="M20.49 15a9 9 0 01-14.85 3.36L1 14"/></svg>
-        </button>` : ''}
+        </button>` : (item.incompleteOnDisk ? `
+        <button class="library-episode-relink-magnet" data-id="${escapeHTML(item.id)}" title="Re-link by magnet URI (orphan — no sibling magnet available)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>
+        </button>` : '')}
         <button class="library-episode-remove" data-id="${escapeHTML(item.id)}" title="Remove">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
         </button>
@@ -4168,6 +4184,43 @@
           showToast('Repair queued — re-downloading missing pieces…');
           loadLibrary();
         } catch { showToast('Repair request failed'); }
+      });
+    }
+
+    // Orphan episode (incompleteOnDisk + !canRepair): re-link by magnet
+    // URI. Re-linking any episode in a pack auto-applies the new magnet
+    // to every other episode in that pack so the shared engine stays
+    // consistent (see relinkItemMagnet in library-manager.js).
+    const relinkMagnetBtn = row.querySelector('.library-episode-relink-magnet');
+    if (relinkMagnetBtn) {
+      relinkMagnetBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = relinkMagnetBtn.dataset.id;
+        const magnet = window.prompt(
+          'Paste a magnet URI for this title.\n\n'
+          + 'Existing bytes on disk are kept; torrent-stream will hash them '
+          + 'against the new torrent and download whatever is missing. '
+          + 'For pack episodes, the new magnet applies to the entire pack.',
+        );
+        if (!magnet) return;
+        if (!magnet.startsWith('magnet:?')) {
+          showToast('Re-link failed: not a valid magnet URI');
+          return;
+        }
+        try {
+          const r = await fetch(`/api/library/${encodeURIComponent(id)}/relink-magnet`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ magnetUri: magnet }),
+          });
+          const j = await r.json().catch(() => ({}));
+          if (!r.ok) {
+            showToast(j.error ? `Re-link failed: ${j.error}` : 'Re-link failed');
+            return;
+          }
+          showToast('Re-linked — verifying on-disk bytes against new torrent…');
+          loadLibrary();
+        } catch { showToast('Re-link request failed'); }
       });
     }
   }
@@ -4812,6 +4865,42 @@
           showToast(msg);
           loadLibrary();
         } catch { showToast('Repair request failed'); }
+      });
+    });
+
+    // Orphan recovery: incompleteOnDisk items whose canRepair is false
+    // (no own magnet, no pack/dir sibling magnet) show this overlay
+    // instead of the standard refresh-arrow. Prompt the user for a fresh
+    // magnet URI and POST to /relink-magnet, which preserves the partial
+    // bytes already on disk and kicks off a verify-then-fill download.
+    container.querySelectorAll('.library-card-relink-magnet-overlay').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = btn.dataset.id;
+        const magnet = window.prompt(
+          'Paste a magnet URI for this title.\n\n'
+          + 'The existing bytes on disk are kept; torrent-stream will hash them '
+          + 'against the new torrent and download whatever is missing.',
+        );
+        if (!magnet) return;
+        if (!magnet.startsWith('magnet:?')) {
+          showToast('Re-link failed: not a valid magnet URI');
+          return;
+        }
+        try {
+          const r = await fetch(`/api/library/${encodeURIComponent(id)}/relink-magnet`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ magnetUri: magnet }),
+          });
+          const j = await r.json().catch(() => ({}));
+          if (!r.ok) {
+            showToast(j.error ? `Re-link failed: ${j.error}` : 'Re-link failed');
+            return;
+          }
+          showToast('Re-linked — verifying on-disk bytes against new torrent…');
+          loadLibrary();
+        } catch { showToast('Re-link request failed'); }
       });
     });
 

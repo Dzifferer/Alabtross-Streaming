@@ -439,6 +439,17 @@ class LibraryManager {
       this._scanCompleteItemsForConversion().catch(err => {
         console.error('[Library] Conversion sweep failed:', err);
       });
+      // Bulk repair sweep: scan every 'complete' item, flip the sparse
+      // ones (<90% of expected bytes on disk) back into the download
+      // pipeline. The per-item auto-repair inside _checkAndConvert is
+      // gated by a once-per-item-lifetime flag, so without this startup
+      // sweep an item whose first auto-repair attempt failed would sit
+      // broken until the user manually clicked Repair. Fire-and-forget;
+      // yields between scans and respects the same concurrency caps as
+      // any other download.
+      this.repairAllIncomplete().catch(err => {
+        console.error('[Library] Startup repair sweep failed:', err);
+      });
       // Drop .torrent metadata files for items the user has since deleted
       // so the cache doesn't grow forever. Only touches files older than
       // the safety window to avoid racing an active download.
@@ -2820,6 +2831,93 @@ class LibraryManager {
     console.log(`[Library] Repair requested for "${item.name}" (was ${prevStatus}, magnet source: ${recovery.source})`);
     const queued = this.retryItem(id);
     return { ok: true, queued: !!queued, magnetSource: recovery.source };
+  }
+
+  /**
+   * Last-resort recovery for true orphans: items whose own magnet is gone
+   * AND no pack/dir sibling has one AND no _packCatalog entry rescued it.
+   * The user supplies a fresh magnet URI (typically by searching for the
+   * same content again) and we write it onto the existing library entry
+   * — preserving any partial bytes already on disk — then kick off a
+   * retry. torrent-stream's verify pass will hash whatever is on disk
+   * against the new torrent's piece map and fill in the rest.
+   *
+   * Inputs:
+   *   id         — library item id (single OR pack episode)
+   *   magnetUri  — magnet URI string starting with "magnet:?"
+   *
+   * Returns:
+   *   { ok: true,  queued: bool, infoHash, name }
+   *   { ok: false, reason: string }
+   */
+  relinkItemMagnet(id, magnetUri) {
+    const item = this._items.get(id);
+    if (!item) return { ok: false, reason: 'item not found' };
+
+    if (typeof magnetUri !== 'string' || !magnetUri.startsWith('magnet:?')) {
+      return { ok: false, reason: 'magnet URI must start with magnet:?' };
+    }
+
+    // Accept either hex (40) or Base32 (32) info hashes — same parser
+    // shape as POST /api/torrents (server.js) so users can paste either
+    // format without surprise.
+    let infoHash = null;
+    const hexMatch = magnetUri.match(/xt=urn:btih:([a-f0-9]{40})/i);
+    if (hexMatch) {
+      infoHash = hexMatch[1].toLowerCase();
+    } else {
+      const b32Match = magnetUri.match(/xt=urn:btih:([A-Za-z2-7]{32})/);
+      if (b32Match) {
+        try { infoHash = Buffer.from(b32Match[1], 'base32').toString('hex').toLowerCase(); } catch { /* ignore */ }
+      }
+    }
+    if (!infoHash || !/^[0-9a-f]{40}$/.test(infoHash)) {
+      return { ok: false, reason: 'could not extract a valid info hash from the magnet URI' };
+    }
+
+    // If this item is part of a pack, every episode shares one engine
+    // keyed by packId. Re-linking a single episode to a *different*
+    // infoHash than its siblings would silently break the shared engine
+    // (the engine's torrent doesn't have the file the new magnet
+    // promises). Either re-link the whole pack at once, or refuse and
+    // tell the user.
+    if (item.packId) {
+      const siblings = [...this._items.values()].filter(i => i.packId === item.packId && i.id !== id);
+      const conflictingSibling = siblings.find(i => i.infoHash && i.infoHash.toLowerCase() !== infoHash);
+      if (conflictingSibling) {
+        return {
+          ok: false,
+          reason: 'this item is part of a pack — re-link via "Restart pack" with the new magnet instead of a single episode',
+        };
+      }
+      // Sweep the rest of the pack onto the new magnet too. They were
+      // all linked to the same torrent before this loss event.
+      for (const sib of siblings) {
+        sib.magnetUri = magnetUri;
+        sib.infoHash  = infoHash;
+      }
+    }
+
+    const prevInfo = item.infoHash || '(none)';
+    item.magnetUri = magnetUri;
+    item.infoHash  = infoHash;
+    // Clear repair-blocking state so retryItem doesn't bail and the
+    // next stall check doesn't insta-fail under the previous attempt's
+    // counters.
+    item.error = null;
+    item._stallRecycles = 0;
+    delete item._nearCompleteSince;
+    item._autoRepairAttempted = false;
+    if (item.packId) this._packStallRecycles.delete(item.packId);
+    // Flip to failed so retryItem accepts the request regardless of
+    // prior status (downloading-stuck, complete-but-incomplete-on-disk,
+    // queued, paused, etc.). retryItem handles the engine work.
+    item.status = 'failed';
+    this._invalidateRecoveryIndex();
+    this._saveMetadata();
+    console.log(`[Library] Re-linked "${item.name}" to new magnet (was ${prevInfo}, now ${infoHash})`);
+    const queued = this.retryItem(id);
+    return { ok: true, queued: !!queued, infoHash, name: item.name };
   }
 
   /**

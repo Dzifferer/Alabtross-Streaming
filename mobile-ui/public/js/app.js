@@ -6170,43 +6170,57 @@
       // Sort episodes within pack
       packItems.sort((a, b) => (a.season || 0) - (b.season || 0) || (a.episode || 0) - (b.episode || 0));
       const first = packItems[0];
-      const totalSize = packItems.reduce((s, i) => s + (i.fileSize || 0), 0);
-      const completedCount = packItems.filter(i => i.status === 'complete').length;
-      const failedCount = packItems.filter(i => i.status === 'failed').length;
+
+      // Single pass over the episodes computes everything we need:
+      // size totals, weighted progress numerator, status counts, status
+      // presence flags, max speed/peers, converting aggregates. The
+      // previous implementation issued 7+ separate reduce/filter/some/map
+      // passes over the same array on every 3 s render — meaningful CPU
+      // on a settings panel with multi-season packs.
+      //
+      // 'complete' items always count as 100 % regardless of stored
+      // progress: bitfield-based progress can be 99 when the last piece
+      // rounds down, and older metadata may omit progress entirely.
+      let totalSize = 0;
+      let downloadedBytes = 0;
+      let effectivePctSum = 0;
+      let completedCount = 0;
+      let failedCount = 0;
+      let hasDownloading = false;
+      let hasPaused = false;
+      let hasQueued = false;
+      let convertingCount = 0;
+      let convertProgressSum = 0;
+      let speed = 0;
+      let peers = 0;
+      for (const i of packItems) {
+        const size = i.fileSize || 0;
+        totalSize += size;
+        const pct = i.status === 'complete' ? 100 : (i.progress || 0);
+        downloadedBytes += size * pct / 100;
+        effectivePctSum += pct;
+        if (i.status === 'complete') completedCount++;
+        else if (i.status === 'failed') failedCount++;
+        else if (i.status === 'downloading') hasDownloading = true;
+        else if (i.status === 'paused') hasPaused = true;
+        else if (i.status === 'queued') hasQueued = true;
+        else if (i.status === 'converting') {
+          convertingCount++;
+          convertProgressSum += i.convertProgress || 0;
+        }
+        const sp = i.downloadSpeed || 0;
+        if (sp > speed) speed = sp;
+        const pr = i.numPeers || 0;
+        if (pr > peers) peers = pr;
+      }
       // Weighted progress: aggregate by bytes actually downloaded, not by
       // episode count. A simple average under-reports progress when episode
-      // sizes differ (common — S01E01 is often a double episode) and misleads
-      // the user about how much of the pack has landed on disk. Fall back to
-      // a per-episode average only if we don't have file sizes yet.
-      // 'complete' items are always counted as 100% regardless of stored
-      // progress — the bitfield-based progress can be 99 when the last piece
-      // rounds down, and stale metadata from older sessions may be missing
-      // progress entirely.
-      const effectivePct = (i) => (i.status === 'complete' ? 100 : (i.progress || 0));
-      let totalProgress;
-      if (totalSize > 0) {
-        const downloadedBytes = packItems.reduce(
-          (s, i) => s + ((i.fileSize || 0) * effectivePct(i) / 100),
-          0,
-        );
-        totalProgress = Math.round((downloadedBytes / totalSize) * 100);
-      } else {
-        totalProgress = packItems.length > 0
-          ? Math.round(packItems.reduce((s, i) => s + effectivePct(i), 0) / packItems.length)
-          : 0;
-      }
-      // Aggregate speed/peers (shared engine, so take max — they're the same)
-      const speed = Math.max(...packItems.map(i => i.downloadSpeed || 0));
-      const peers = Math.max(...packItems.map(i => i.numPeers || 0));
-      // Determine aggregate status. Converting items have finished downloading
-      // and are post-processing on CPU/GPU — they belong in their own section,
-      // not under "Downloading" where they've been masquerading as stuck at
-      // 100%.
-      const hasDownloading = packItems.some(i => i.status === 'downloading');
-      const hasPaused = packItems.some(i => i.status === 'paused');
-      const convertingItems = packItems.filter(i => i.status === 'converting');
-      const hasConverting = convertingItems.length > 0;
-      const hasQueued = packItems.some(i => i.status === 'queued');
+      // sizes differ (S01E01 is often a double episode). Fall back to a
+      // per-episode average only when file sizes are unknown.
+      let totalProgress = totalSize > 0
+        ? Math.round((downloadedBytes / totalSize) * 100)
+        : (packItems.length > 0 ? Math.round(effectivePctSum / packItems.length) : 0);
+      const hasConverting = convertingCount > 0;
       let aggStatus = 'queued';
       if (completedCount === packItems.length) aggStatus = 'complete';
       else if (failedCount === packItems.length) aggStatus = 'failed';
@@ -6233,7 +6247,7 @@
       // Aggregate conversion progress so the pack row can show e.g.
       // "Converting 47%" instead of "100%" when downloads are done.
       const convertProgressAvg = hasConverting
-        ? Math.round(convertingItems.reduce((s, i) => s + (i.convertProgress || 0), 0) / convertingItems.length)
+        ? Math.round(convertProgressSum / convertingCount)
         : 0;
 
       // Determine season label: single season or multi-season
@@ -6256,7 +6270,7 @@
         episodes: packItems,
         completedCount,
         totalCount: packItems.length,
-        convertingCount: convertingItems.length,
+        convertingCount,
         convertProgress: convertProgressAvg,
         addedAt: first.addedAt,
       });

@@ -200,6 +200,14 @@ function buildLiveEncoderArgs() {
     '-level', '4.1',
     '-pix_fmt', 'yuv420p',
     '-crf', '23',
+    // Cap the peak bitrate. CRF alone targets constant quality with an
+    // uncapped bitrate, and ultrafast is bitrate-inefficient enough that
+    // high-motion scenes spike to 15-25 Mbps — fatter than a phone link
+    // can pull a segment in realtime, which surfaces as rebuffering.
+    // maxrate+bufsize turns this into capped-CRF so peaks stay streamable.
+    // Matches the 6 Mbps ceiling the NVENC branch above already uses.
+    '-maxrate', '6M',
+    '-bufsize', '6M',
   ];
 }
 

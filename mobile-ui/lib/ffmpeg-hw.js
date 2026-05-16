@@ -171,12 +171,39 @@ function buildScaleFilter(maxWidth, sourceCodec, sourcePixFmt) {
   return `scale='min(${maxWidth},iw)':'-2'`;
 }
 
+// The live transcode / HLS path scales the source down to at most this
+// width and never up (see the min() in buildScaleFilter). Both the scale
+// filter and the bitrate ladder key off this constant so they can't drift.
+const LIVE_MAX_OUTPUT_WIDTH = 1280;
+
+// Live-transcode peak-bitrate ladder, keyed to the width the encoder will
+// actually emit. A source narrower than LIVE_MAX_OUTPUT_WIDTH is encoded at
+// its own width, so a 480p episode lands at 480p — capping it at the 720p
+// 6 Mbps ceiling just lets the encoder spend bits a phone still has to pull
+// down with no visible return. Each threshold is an OUTPUT width in pixels.
+function _liveMaxrateKbps(sourceWidth) {
+  const w = Number.isFinite(sourceWidth) && sourceWidth > 0
+    ? Math.min(LIVE_MAX_OUTPUT_WIDTH, sourceWidth)
+    : LIVE_MAX_OUTPUT_WIDTH; // unknown source — assume the 720p ceiling
+  if (w >= 1280) return 6000; // 720p
+  if (w >= 1024) return 4000; // ~576p
+  if (w >= 854)  return 2500; // 480p
+  if (w >= 640)  return 1500; // 360p
+  return 1000;                // anything smaller
+}
+
 /**
  * Encoder args for the live transcode / HLS path — latency and wall-clock
  * over compression efficiency. libx264 uses ultrafast+zerolatency, h264_nvenc
- * uses p1+ll (lowest preset, low-latency tune).
+ * uses p1+ll (lowest preset, low-latency tune). Both get a maxrate/bufsize
+ * ceiling scaled to the output resolution (see _liveMaxrateKbps) so a
+ * low-res source never produces segments too fat for the client's link.
+ *
+ * `sourceWidth` is the probed pixel width of the input; pass null/0 when it
+ * isn't known and the ceiling falls back to the conservative 720p value.
  */
-function buildLiveEncoderArgs() {
+function buildLiveEncoderArgs(sourceWidth) {
+  const rate = `${_liveMaxrateKbps(sourceWidth)}k`;
   if (_useNvenc()) {
     return [
       '-c:v', 'h264_nvenc',
@@ -185,8 +212,8 @@ function buildLiveEncoderArgs() {
       '-rc', 'vbr',
       '-cq', '23',
       '-b:v', '0',
-      '-maxrate', '6M',
-      '-bufsize', '6M',
+      '-maxrate', rate,
+      '-bufsize', rate,
       '-profile:v', 'main',
       '-level', '4.1',
       '-pix_fmt', 'yuv420p',
@@ -202,12 +229,11 @@ function buildLiveEncoderArgs() {
     '-crf', '23',
     // Cap the peak bitrate. CRF alone targets constant quality with an
     // uncapped bitrate, and ultrafast is bitrate-inefficient enough that
-    // high-motion scenes spike to 15-25 Mbps — fatter than a phone link
-    // can pull a segment in realtime, which surfaces as rebuffering.
-    // maxrate+bufsize turns this into capped-CRF so peaks stay streamable.
-    // Matches the 6 Mbps ceiling the NVENC branch above already uses.
-    '-maxrate', '6M',
-    '-bufsize', '6M',
+    // high-motion scenes spike well past what a phone link can pull a
+    // segment in realtime — which surfaces as rebuffering. maxrate+bufsize
+    // turns this into capped-CRF; the ceiling tracks the output resolution.
+    '-maxrate', rate,
+    '-bufsize', rate,
   ];
 }
 
@@ -263,6 +289,7 @@ function describeMode() {
 module.exports = {
   FFMPEG_HWACCEL,
   FFMPEG_ENCODER,
+  LIVE_MAX_OUTPUT_WIDTH,
   buildDecodeArgs,
   buildScaleFilter,
   buildLiveEncoderArgs,

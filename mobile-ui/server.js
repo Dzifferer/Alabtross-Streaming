@@ -404,8 +404,8 @@ function _startHlsSession(itemId, filePath) {
     '-map', '0:a:0?',
     '-sn',
     '-dn',
-    ...ffmpegHw.buildLiveEncoderArgs(),
-    '-vf', ffmpegHw.buildScaleFilter(1280, probe.codec, probe.pixFmt),
+    ...ffmpegHw.buildLiveEncoderArgs(probe.width),
+    '-vf', ffmpegHw.buildScaleFilter(ffmpegHw.LIVE_MAX_OUTPUT_WIDTH, probe.codec, probe.pixFmt),
     '-g', String(gop),
     '-keyint_min', String(gop),
     '-sc_threshold', '0',
@@ -4381,8 +4381,8 @@ app.get('/api/library/:id/stream/transcode', rateLimit, transcodeGate, async (re
     '-sn',
     '-dn',
 
-    ...ffmpegHw.buildLiveEncoderArgs(),
-    '-vf', ffmpegHw.buildScaleFilter(1280, probe.codec, probe.pixFmt),
+    ...ffmpegHw.buildLiveEncoderArgs(probe.width),
+    '-vf', ffmpegHw.buildScaleFilter(ffmpegHw.LIVE_MAX_OUTPUT_WIDTH, probe.codec, probe.pixFmt),
     // Short GOP so we get an IDR — and therefore a flushable fragment —
     // within ~2 seconds regardless of the source's native keyframe
     // interval. This is the single biggest knob for first-byte latency

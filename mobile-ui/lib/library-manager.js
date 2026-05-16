@@ -3845,6 +3845,8 @@ class LibraryManager {
     return {
       codec:  item._probeVideoCodec || null,
       pixFmt: item._probePixFmt     || null,
+      width:  item._probeWidth      || null,
+      height: item._probeHeight     || null,
     };
   }
 
@@ -6330,6 +6332,16 @@ class LibraryManager {
           // to /stream/transcode instead of falsely marking them direct-play.
           const videoProfile = videoStream ? (videoStream.profile || null) : null;
           const pixFmt = videoStream ? (videoStream.pix_fmt || null) : null;
+          // Frame dimensions drive the live-transcode bitrate ladder so a
+          // low-res source isn't encoded at the 720p ceiling. `width` is the
+          // display width; fall back to `coded_width` (some MKVs only carry
+          // the coded value) and to null when neither parses.
+          const videoWidth = videoStream
+            ? (parseInt(videoStream.width, 10) || parseInt(videoStream.coded_width, 10) || null)
+            : null;
+          const videoHeight = videoStream
+            ? (parseInt(videoStream.height, 10) || parseInt(videoStream.coded_height, 10) || null)
+            : null;
           // Audio profile / channel layout / sample rate let us decide
           // whether the source audio is already universal enough to
           // stream-copy through the conversion (skip the AAC re-encode).
@@ -6371,6 +6383,8 @@ class LibraryManager {
             videoCodec,
             videoProfile,
             pixFmt,
+            width: videoWidth,
+            height: videoHeight,
             audioCodec,
             audioProfile,
             audioChannels,
@@ -6942,6 +6956,8 @@ class LibraryManager {
     item._probeDuration       = probe.duration;
     item._probeVideoCodec     = probe.videoCodec || null;
     item._probePixFmt         = probe.pixFmt     || null;
+    item._probeWidth          = probe.width      || null;
+    item._probeHeight         = probe.height     || null;
     item._probeAudioCodec     = probe.audioCodec || null;
     item._probeAudioProfile   = probe.audioProfile || null;
     item._probeAudioChannels  = probe.audioChannels || null;

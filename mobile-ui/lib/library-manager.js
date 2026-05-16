@@ -5742,6 +5742,7 @@ class LibraryManager {
         _needsConversion,
         _pendingConversion,
         _pendingConvertKind,
+        _conversionPriorityAt,
         _probeDuration,
         _probeVideoCodec,
         _probeAudioCodec,
@@ -6767,6 +6768,71 @@ class LibraryManager {
   }
 
   /**
+   * Convert-ahead: when an episode starts playing, promote the next few
+   * episodes of the same show to the front of the background-conversion
+   * queue. The goal is that by the time the viewer finishes the current
+   * episode the next ones are already universal MP4s and direct-play
+   * instead of needing an on-the-fly transcode (the buffering-prone path).
+   *
+   * This only REORDERS the queue and enqueues unchecked siblings — it does
+   * not bypass the live-playback / downloads / CPU gates in
+   * _processConversionQueueInner, so it can't itself cause contention with
+   * whatever is playing right now. Returns the ids it promoted.
+   */
+  convertAheadForShow(itemId, count = 3) {
+    const item = this._items.get(itemId);
+    // Only episodes have a meaningful "next" — movies and albums don't.
+    if (!item || item.episode == null) return [];
+
+    // Order key collapses (season, episode) into one sortable integer.
+    // 1000 episodes/season is comfortably more than any real show.
+    const orderKey = (x) => (x.season || 0) * 1000 + x.episode;
+    const curOrder = orderKey(item);
+
+    // Siblings = same show. A pack shares one packId (most reliable —
+    // one torrent is one show/season); episodes added individually fall
+    // back to a shared imdbId.
+    const sameShow = (x) => (item.packId && x.packId)
+      ? x.packId === item.packId
+      : (!!item.imdbId && x.imdbId === item.imdbId);
+
+    const upcoming = [...this._items.values()]
+      .filter((x) => x.id !== itemId
+        && x.episode != null
+        && sameShow(x)
+        && orderKey(x) > curOrder)
+      .sort((a, b) => orderKey(a) - orderKey(b))
+      .slice(0, count);
+
+    const promoted = [];
+    for (const ep of upcoming) {
+      // Already queued from download time — promoting is just the flag.
+      if (ep._pendingConversion) {
+        ep._conversionPriorityAt = Date.now();
+        promoted.push(ep.id);
+        continue;
+      }
+      // Mid-conversion or not a finished file — nothing to promote.
+      if (ep.status !== 'complete') continue;
+      // Already classified and not queued — it's a universal MP4 (or an
+      // already-finished conversion), so it direct-plays. Leave it alone.
+      if (ep.conversionCheckedAt) continue;
+      // Never classified — probe + enqueue. Set priority first so if the
+      // probe finds it needs conversion it lands ahead of the backlog.
+      ep._conversionPriorityAt = Date.now();
+      promoted.push(ep.id);
+      this._checkAndConvert(ep.id).catch((err) =>
+        console.error(`[Library] convert-ahead check failed for ${ep.id}: ${err.message}`));
+    }
+
+    if (promoted.length) {
+      console.log(`[Library] Convert-ahead from "${item.name}": promoted ${promoted.length} upcoming episode(s)`);
+      this._processConversionQueue().catch(() => { /* swallow */ });
+    }
+    return promoted;
+  }
+
+  /**
    * Walk every 'complete' library item that hasn't been classified for
    * conversion yet and run _checkAndConvert on it. This is the "retrofit"
    * path for libraries that existed before background transcoding was
@@ -7510,7 +7576,7 @@ class LibraryManager {
       const remoteFull = remote >= this._maxConcurrentRemoteConversions;
       if (localFull && remoteFull) return;
 
-      const pending = [...this._items.values()].find(i => {
+      const eligible = [...this._items.values()].filter(i => {
         if (!i._pendingConversion) return false;
         const wouldUseRemote = this._pendingItemWouldUseRemote(i);
         // Live-transcode gate mirrored from _startConversion: a local
@@ -7524,7 +7590,16 @@ class LibraryManager {
         }
         return wouldUseRemote ? !remoteFull : !localFull;
       });
-      if (!pending) return;
+      if (eligible.length === 0) return;
+
+      // Convert-ahead priority: episodes the viewer is heading toward
+      // (next episodes of the show being watched) carry
+      // _conversionPriorityAt and jump ahead of unrelated backlog.
+      // Most-recently-promoted first, so the show just started outranks
+      // one abandoned earlier. Array.sort is stable and the source is in
+      // Map insertion order, so unprioritized items keep their FIFO order.
+      eligible.sort((a, b) => (b._conversionPriorityAt || 0) - (a._conversionPriorityAt || 0));
+      const pending = eligible[0];
 
       const kind = pending._pendingConvertKind === 'transcode' ? 'transcode' : 'remux';
       delete pending._pendingConversion;

@@ -4749,6 +4749,13 @@ app.get('/api/library/:id/probe', async (req, res) => {
     // the permanent MP4 is being produced.
     const convState = library.getConversionState(req.params.id);
 
+    // Convert-ahead: opening an episode promotes the next few episodes of
+    // the same show to the front of the conversion queue, so a binge
+    // settles onto direct-play instead of repeatedly live-transcoding.
+    // Fire-and-forget — never let it delay or fail the probe response.
+    try { library.convertAheadForShow(req.params.id); }
+    catch (err) { console.warn(`[Library] convert-ahead failed: ${err.message}`); }
+
     res.json({
       action: decision.action,
       reason: decision.reason,

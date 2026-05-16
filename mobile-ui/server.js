@@ -404,8 +404,8 @@ function _startHlsSession(itemId, filePath) {
     '-map', '0:a:0?',
     '-sn',
     '-dn',
-    ...ffmpegHw.buildLiveEncoderArgs(),
-    '-vf', ffmpegHw.buildScaleFilter(1280, probe.codec, probe.pixFmt),
+    ...ffmpegHw.buildLiveEncoderArgs(probe.width),
+    '-vf', ffmpegHw.buildScaleFilter(ffmpegHw.LIVE_MAX_OUTPUT_WIDTH, probe.codec, probe.pixFmt),
     '-g', String(gop),
     '-keyint_min', String(gop),
     '-sc_threshold', '0',
@@ -503,6 +503,19 @@ const DISK_RESERVE_BYTES = (() => {
   return Number.isFinite(n) && n >= 0 ? n : 1 * 1024 * 1024 * 1024;
 })();
 const MAX_CONCURRENT_REMOTE_CONVERSIONS = parseInt(process.env.MAX_CONCURRENT_REMOTE_CONVERSIONS, 10) || 3;
+// Optional directory where a converted file's ORIGINAL is preserved. When
+// set, conversions move the source here (mirroring the library's relative
+// layout) instead of deleting it — typically an external/secondary drive.
+// When unset, originals are deleted after a successful conversion.
+const ORIGINALS_BACKUP_PATH = (process.env.ORIGINALS_BACKUP_PATH || '').trim() || null;
+if (ORIGINALS_BACKUP_PATH) {
+  try {
+    fs.mkdirSync(ORIGINALS_BACKUP_PATH, { recursive: true });
+    console.log(`[Config] Converted-file originals will be preserved under ${ORIGINALS_BACKUP_PATH}`);
+  } catch (err) {
+    console.error(`[Config] ORIGINALS_BACKUP_PATH ${ORIGINALS_BACKUP_PATH} is not usable: ${err.message}`);
+  }
+}
 const library = new LibraryManager({
   libraryPath: LIBRARY_PATH,
   maxConcurrentDownloads: MAX_CONCURRENT_STREAMS,
@@ -512,6 +525,7 @@ const library = new LibraryManager({
   maxConcurrentRemoteConversions: MAX_CONCURRENT_REMOTE_CONVERSIONS,
   taskPriority: TASK_PRIORITY,
   cpuProtection: CPU_PROTECTION,
+  originalsBackupPath: ORIGINALS_BACKUP_PATH,
 });
 // Separate LibraryManager instance for music with its own _metadata.json.
 // Music items are type: 'album' and take a different completion path
@@ -3795,6 +3809,23 @@ app.post('/api/library/repair-all-incomplete', rateLimit, async (req, res) => {
   }
 });
 
+// POST /api/library/convert-all — one-shot sweep that re-probes every
+// complete video item and queues a background conversion for any that
+// isn't already a universal H.264/AAC/MP4. Already-universal files are
+// skipped. Originals are preserved under ORIGINALS_BACKUP_PATH when set.
+// Returns immediately with the number of items to probe; conversions
+// then proceed through the normal queue (watch per-item convertProgress).
+app.post('/api/library/convert-all', rateLimit, (req, res) => {
+  try {
+    const result = library.convertWholeLibrary();
+    _libraryVersion++;
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('[Server] convertWholeLibrary failed:', err);
+    res.status(500).json({ error: err.message || 'library conversion sweep failed' });
+  }
+});
+
 // POST /api/library/remove-unfixable-broken — delete every library item
 // flagged incomplete that has no recoverable magnet (own, pack sibling,
 // or directory sibling). These are the "can't auto-fix" entries — the
@@ -4381,8 +4412,8 @@ app.get('/api/library/:id/stream/transcode', rateLimit, transcodeGate, async (re
     '-sn',
     '-dn',
 
-    ...ffmpegHw.buildLiveEncoderArgs(),
-    '-vf', ffmpegHw.buildScaleFilter(1280, probe.codec, probe.pixFmt),
+    ...ffmpegHw.buildLiveEncoderArgs(probe.width),
+    '-vf', ffmpegHw.buildScaleFilter(ffmpegHw.LIVE_MAX_OUTPUT_WIDTH, probe.codec, probe.pixFmt),
     // Short GOP so we get an IDR — and therefore a flushable fragment —
     // within ~2 seconds regardless of the source's native keyframe
     // interval. This is the single biggest knob for first-byte latency
@@ -4748,6 +4779,13 @@ app.get('/api/library/:id/probe', async (req, res) => {
     // "Converting X%" message instead of hammering live transcode while
     // the permanent MP4 is being produced.
     const convState = library.getConversionState(req.params.id);
+
+    // Convert-ahead: opening an episode promotes the next few episodes of
+    // the same show to the front of the conversion queue, so a binge
+    // settles onto direct-play instead of repeatedly live-transcoding.
+    // Fire-and-forget — never let it delay or fail the probe response.
+    try { library.convertAheadForShow(req.params.id); }
+    catch (err) { console.warn(`[Library] convert-ahead failed: ${err.message}`); }
 
     res.json({
       action: decision.action,

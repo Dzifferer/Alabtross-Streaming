@@ -296,6 +296,12 @@ class LibraryManager {
     // the Orin CPU and are unaffected. Maintained by server.js via
     // incrementLiveTranscodes / decrementLiveTranscodes.
     this._liveTranscodeCount = 0;
+    // Optional directory where a converted file's ORIGINAL is preserved
+    // (the library tree itself only ever holds the universal MP4). When
+    // unset, originals are deleted after a successful conversion — the
+    // historical behavior. When set, the original is moved here under the
+    // same relative path. Typically points at an external/secondary drive.
+    this._originalsBackupPath = opts.originalsBackupPath || null;
     // Free-space reserve kept below the library's current usage. New
     // downloads / conversions are refused when they would eat into this
     // headroom. 1 GB is enough for metadata.json churn, ffmpeg temp
@@ -3845,6 +3851,8 @@ class LibraryManager {
     return {
       codec:  item._probeVideoCodec || null,
       pixFmt: item._probePixFmt     || null,
+      width:  item._probeWidth      || null,
+      height: item._probeHeight     || null,
     };
   }
 
@@ -5740,6 +5748,7 @@ class LibraryManager {
         _needsConversion,
         _pendingConversion,
         _pendingConvertKind,
+        _conversionPriorityAt,
         _probeDuration,
         _probeVideoCodec,
         _probeAudioCodec,
@@ -6330,6 +6339,16 @@ class LibraryManager {
           // to /stream/transcode instead of falsely marking them direct-play.
           const videoProfile = videoStream ? (videoStream.profile || null) : null;
           const pixFmt = videoStream ? (videoStream.pix_fmt || null) : null;
+          // Frame dimensions drive the live-transcode bitrate ladder so a
+          // low-res source isn't encoded at the 720p ceiling. `width` is the
+          // display width; fall back to `coded_width` (some MKVs only carry
+          // the coded value) and to null when neither parses.
+          const videoWidth = videoStream
+            ? (parseInt(videoStream.width, 10) || parseInt(videoStream.coded_width, 10) || null)
+            : null;
+          const videoHeight = videoStream
+            ? (parseInt(videoStream.height, 10) || parseInt(videoStream.coded_height, 10) || null)
+            : null;
           // Audio profile / channel layout / sample rate let us decide
           // whether the source audio is already universal enough to
           // stream-copy through the conversion (skip the AAC re-encode).
@@ -6371,6 +6390,8 @@ class LibraryManager {
             videoCodec,
             videoProfile,
             pixFmt,
+            width: videoWidth,
+            height: videoHeight,
             audioCodec,
             audioProfile,
             audioChannels,
@@ -6753,6 +6774,71 @@ class LibraryManager {
   }
 
   /**
+   * Convert-ahead: when an episode starts playing, promote the next few
+   * episodes of the same show to the front of the background-conversion
+   * queue. The goal is that by the time the viewer finishes the current
+   * episode the next ones are already universal MP4s and direct-play
+   * instead of needing an on-the-fly transcode (the buffering-prone path).
+   *
+   * This only REORDERS the queue and enqueues unchecked siblings — it does
+   * not bypass the live-playback / downloads / CPU gates in
+   * _processConversionQueueInner, so it can't itself cause contention with
+   * whatever is playing right now. Returns the ids it promoted.
+   */
+  convertAheadForShow(itemId, count = 3) {
+    const item = this._items.get(itemId);
+    // Only episodes have a meaningful "next" — movies and albums don't.
+    if (!item || item.episode == null) return [];
+
+    // Order key collapses (season, episode) into one sortable integer.
+    // 1000 episodes/season is comfortably more than any real show.
+    const orderKey = (x) => (x.season || 0) * 1000 + x.episode;
+    const curOrder = orderKey(item);
+
+    // Siblings = same show. A pack shares one packId (most reliable —
+    // one torrent is one show/season); episodes added individually fall
+    // back to a shared imdbId.
+    const sameShow = (x) => (item.packId && x.packId)
+      ? x.packId === item.packId
+      : (!!item.imdbId && x.imdbId === item.imdbId);
+
+    const upcoming = [...this._items.values()]
+      .filter((x) => x.id !== itemId
+        && x.episode != null
+        && sameShow(x)
+        && orderKey(x) > curOrder)
+      .sort((a, b) => orderKey(a) - orderKey(b))
+      .slice(0, count);
+
+    const promoted = [];
+    for (const ep of upcoming) {
+      // Already queued from download time — promoting is just the flag.
+      if (ep._pendingConversion) {
+        ep._conversionPriorityAt = Date.now();
+        promoted.push(ep.id);
+        continue;
+      }
+      // Mid-conversion or not a finished file — nothing to promote.
+      if (ep.status !== 'complete') continue;
+      // Already classified and not queued — it's a universal MP4 (or an
+      // already-finished conversion), so it direct-plays. Leave it alone.
+      if (ep.conversionCheckedAt) continue;
+      // Never classified — probe + enqueue. Set priority first so if the
+      // probe finds it needs conversion it lands ahead of the backlog.
+      ep._conversionPriorityAt = Date.now();
+      promoted.push(ep.id);
+      this._checkAndConvert(ep.id).catch((err) =>
+        console.error(`[Library] convert-ahead check failed for ${ep.id}: ${err.message}`));
+    }
+
+    if (promoted.length) {
+      console.log(`[Library] Convert-ahead from "${item.name}": promoted ${promoted.length} upcoming episode(s)`);
+      this._processConversionQueue().catch(() => { /* swallow */ });
+    }
+    return promoted;
+  }
+
+  /**
    * Walk every 'complete' library item that hasn't been classified for
    * conversion yet and run _checkAndConvert on it. This is the "retrofit"
    * path for libraries that existed before background transcoding was
@@ -6792,6 +6878,43 @@ class LibraryManager {
     }
 
     console.log('[Library] Sweep complete');
+  }
+
+  /**
+   * One-shot "convert the whole library to universal MP4" sweep, exposed
+   * to the UI as a button. Forgets every prior conversion verdict
+   * (conversionCheckedAt) and every past failure (convertError) so each
+   * complete video item is re-probed and re-classified, then routed
+   * through the normal conversion queue. Files already in universal
+   * H.264/AAC/MP4 classify as "no conversion needed" and are skipped — so
+   * only non-universal files actually get re-encoded. Originals are
+   * handled by _retireOriginalFile (kept on the backup path when one is
+   * configured).
+   *
+   * Returns synchronously with the count of items to probe; the probing
+   * and queueing then run in the background via the existing sweep.
+   */
+  convertWholeLibrary() {
+    if (this._librarySweep && this._librarySweep.active) {
+      return { active: true, alreadyRunning: true, itemsToCheck: this._librarySweep.total };
+    }
+    let toCheck = 0;
+    for (const item of this._items.values()) {
+      if (item.status !== 'complete' || !item.filePath) continue;
+      if (item.type === 'album') continue; // audio is never video-transcoded
+      item.conversionCheckedAt = null;
+      item.convertError = null;
+      toCheck++;
+    }
+    this._librarySweep = { active: toCheck > 0, total: toCheck, startedAt: Date.now() };
+    if (toCheck > 0) {
+      this._saveMetadata();
+      this._scanCompleteItemsForConversion()
+        .catch(err => console.error(`[Library] convertWholeLibrary sweep failed: ${err.message}`))
+        .finally(() => { if (this._librarySweep) this._librarySweep.active = false; });
+    }
+    console.log(`[Library] Full-library conversion sweep started — ${toCheck} item(s) to probe`);
+    return { active: toCheck > 0, alreadyRunning: false, itemsToCheck: toCheck };
   }
 
   /**
@@ -6942,6 +7065,8 @@ class LibraryManager {
     item._probeDuration       = probe.duration;
     item._probeVideoCodec     = probe.videoCodec || null;
     item._probePixFmt         = probe.pixFmt     || null;
+    item._probeWidth          = probe.width      || null;
+    item._probeHeight         = probe.height     || null;
     item._probeAudioCodec     = probe.audioCodec || null;
     item._probeAudioProfile   = probe.audioProfile || null;
     item._probeAudioChannels  = probe.audioChannels || null;
@@ -7288,6 +7413,51 @@ class LibraryManager {
   /**
    * Handle successful conversion: rename temp file, delete original, update metadata.
    */
+  /**
+   * Retire a conversion's source file. With _originalsBackupPath set the
+   * file is MOVED into that directory under the same relative path it had
+   * in the library, so a backup drive mirrors the library layout; without
+   * it the file is deleted (historical behavior). A failed backup
+   * deliberately leaves the original in place rather than deleting it —
+   * preserving the file the operator asked to keep beats tidiness.
+   *
+   * Async, and callers fire-and-forget it: the backup path is typically
+   * an external drive, so the cross-device copy fallback can take many
+   * seconds on a multi-GB file and must not block the event loop. The
+   * converted MP4 is already in place and the item already points at it
+   * before this runs, so nothing waits on the original being gone.
+   */
+  async _retireOriginalFile(absSourcePath) {
+    if (!this._originalsBackupPath) {
+      try { await fs.promises.unlink(absSourcePath); }
+      catch (err) { console.warn(`[Library] Could not delete original ${absSourcePath}: ${err.message}`); }
+      return;
+    }
+    const rel = path.relative(this._libraryPath, absSourcePath);
+    // Refuse to "back up" anything that isn't actually inside the library.
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+      console.warn(`[Library] Original ${absSourcePath} is outside the library tree — leaving it in place`);
+      return;
+    }
+    const dest = path.join(this._originalsBackupPath, rel);
+    try {
+      await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+      try {
+        await fs.promises.rename(absSourcePath, dest);
+      } catch (err) {
+        // EXDEV: the backup path is on a different filesystem (the common
+        // case — an external drive). rename() can't cross devices, so fall
+        // back to copy-then-remove.
+        if (err.code !== 'EXDEV') throw err;
+        await fs.promises.copyFile(absSourcePath, dest);
+        await fs.promises.unlink(absSourcePath);
+      }
+      console.log(`[Library] Original preserved → ${dest}`);
+    } catch (err) {
+      console.error(`[Library] Failed to back up original ${absSourcePath}: ${err.message} — leaving it in place`);
+    }
+  }
+
   _onConversionSuccess(id, inputPath, tempOutputPath, finalOutputPath, isRemote = false) {
     const item = this._items.get(id);
     if (!item) return;
@@ -7303,9 +7473,14 @@ class LibraryManager {
       // Rename temp to final
       fs.renameSync(tempOutputPath, finalOutputPath);
 
-      // Delete original file (only if it's different from the output)
+      // Retire the original (only when the output is a genuinely different
+      // file). Moved to the backup path when one is configured, else
+      // deleted — see _retireOriginalFile. Fire-and-forget: a cross-device
+      // backup copy must not block the event loop, and nothing below
+      // depends on the original being gone.
       if (inputPath !== finalOutputPath && fs.existsSync(inputPath)) {
-        fs.unlinkSync(inputPath);
+        this._retireOriginalFile(inputPath).catch((err) =>
+          console.error(`[Library] Original retirement failed for ${inputPath}: ${err.message}`));
       }
 
       // Invalidate probe cache entries tied to the old source AND the
@@ -7494,7 +7669,7 @@ class LibraryManager {
       const remoteFull = remote >= this._maxConcurrentRemoteConversions;
       if (localFull && remoteFull) return;
 
-      const pending = [...this._items.values()].find(i => {
+      const eligible = [...this._items.values()].filter(i => {
         if (!i._pendingConversion) return false;
         const wouldUseRemote = this._pendingItemWouldUseRemote(i);
         // Live-transcode gate mirrored from _startConversion: a local
@@ -7508,7 +7683,16 @@ class LibraryManager {
         }
         return wouldUseRemote ? !remoteFull : !localFull;
       });
-      if (!pending) return;
+      if (eligible.length === 0) return;
+
+      // Convert-ahead priority: episodes the viewer is heading toward
+      // (next episodes of the show being watched) carry
+      // _conversionPriorityAt and jump ahead of unrelated backlog.
+      // Most-recently-promoted first, so the show just started outranks
+      // one abandoned earlier. Array.sort is stable and the source is in
+      // Map insertion order, so unprioritized items keep their FIFO order.
+      eligible.sort((a, b) => (b._conversionPriorityAt || 0) - (a._conversionPriorityAt || 0));
+      const pending = eligible[0];
 
       const kind = pending._pendingConvertKind === 'transcode' ? 'transcode' : 'remux';
       delete pending._pendingConversion;

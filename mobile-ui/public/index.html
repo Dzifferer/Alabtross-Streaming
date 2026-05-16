@@ -278,6 +278,13 @@
                 </div>
                 <button id="run-diagnostics-btn" class="btn-block" style="margin-top:8px">Run Diagnostics</button>
               </div>
+
+              <div class="setting-group">
+                <label>Convert Library to Universal Format</label>
+                <span class="setting-hint">One-time sweep: re-encodes every non-universal file (HEVC, 10-bit, MKV container, non-AAC audio, etc.) to H.264/AAC/MP4 so the whole library direct-plays instantly with no live transcoding. Files already in universal format are skipped. Runs in the background — watch items show "Converting".</span>
+                <button id="convert-library-btn" class="btn-block" style="margin-top:8px">Convert Library...</button>
+                <span id="convert-library-status" class="setting-hint"></span>
+              </div>
             </div>
           </div>
 

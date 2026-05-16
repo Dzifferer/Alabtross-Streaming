@@ -508,6 +508,11 @@ class LibraryManager {
       // (metadata timeout, network, tracker) get re-tried on an exponential
       // backoff so the user doesn't have to click retry on every item.
       this._startAutoRetryDaemon();
+      // Disk guard: pause active downloads before the disk fills enough
+      // for a piece write to hit ENOSPC and hard-fail them; auto-resume
+      // once space frees. Preventive counterpart to the start-time
+      // _checkFreeSpace preflight, which can't see a disk filling mid-download.
+      this._startDiskGuardDaemon();
       // Sweep the library for files that should be pre-transcoded to
       // universal H.264/AAC/MP4 so live transcoding never has to run.
       // Fire-and-forget: the sweep yields between probes and queues
@@ -4136,6 +4141,7 @@ class LibraryManager {
     }
     this._stopEngineHeartbeat();
     this._stopAutoRetryDaemon();
+    this._stopDiskGuardDaemon();
     // Flush cross-torrent peer reputation before we destroy engines
     // (engine destruction triggers peer-cache writes which may create
     // more reputation updates via their wire-close paths). stop() is
@@ -4941,6 +4947,80 @@ class LibraryManager {
     if (this._autoRetryTimer) {
       clearInterval(this._autoRetryTimer);
       this._autoRetryTimer = null;
+    }
+  }
+
+  // ─── Disk guard daemon ────────────────────────────────────────────────
+  // The start-time _checkFreeSpace preflight can't see a disk that fills
+  // up WHILE downloads run (other downloads, conversion temp output,
+  // preserved originals). When free space crosses a low-water mark this
+  // daemon pauses every active download — preserving their on-disk
+  // progress — instead of letting torrent-stream's next piece write hit
+  // ENOSPC and permanently fail the item. It auto-resumes them once free
+  // space climbs back past a higher-water mark (hysteresis prevents
+  // pause/resume flapping). Only items the daemon itself paused are
+  // auto-resumed, so a user's manual pause is never disturbed.
+  _startDiskGuardDaemon() {
+    if (this._diskGuardTimer) return;
+    if (!this._diskPausedItems) this._diskPausedItems = new Set();
+    this._diskGuardTimer = setInterval(() => {
+      this._diskGuardTick().catch((err) =>
+        console.warn(`[Library] Disk guard tick failed: ${err.message}`));
+    }, 30 * 1000);
+    this._diskGuardTimer.unref();
+  }
+
+  _stopDiskGuardDaemon() {
+    if (this._diskGuardTimer) {
+      clearInterval(this._diskGuardTimer);
+      this._diskGuardTimer = null;
+    }
+  }
+
+  async _diskGuardTick() {
+    let freeBytes;
+    try {
+      const s = await fs.promises.statfs(this._libraryPath);
+      freeBytes = Number(s.bavail) * Number(s.bsize);
+    } catch {
+      return; // statfs unavailable — can't guard; leave downloads alone
+    }
+    if (!Number.isFinite(freeBytes)) return;
+
+    // Pause well before the bare reserve: a fast download writes a lot
+    // between 30 s ticks (≈1.5 GB at 50 MB/s), so the pause threshold
+    // carries a 2 GB cushion above the reserve and resume needs a further
+    // 3 GB on top of that so we don't immediately re-pause.
+    const GB = 1024 * 1024 * 1024;
+    const pauseBelow  = this._diskReserveBytes + 2 * GB;
+    const resumeAbove = this._diskReserveBytes + 5 * GB;
+
+    if (freeBytes < pauseBelow) {
+      const active = [...this._items.values()].filter(i => i.status === 'downloading');
+      if (active.length === 0) return;
+      console.warn(
+        `[Library] Disk guard: only ${(freeBytes / 1e9).toFixed(2)} GB free — `
+        + `pausing ${active.length} download(s) to avoid ENOSPC failures`,
+      );
+      for (const item of active) {
+        if (this.pauseItem(item.id)) this._diskPausedItems.add(item.id);
+      }
+    } else if (freeBytes > resumeAbove && this._diskPausedItems.size > 0) {
+      console.log(
+        `[Library] Disk guard: ${(freeBytes / 1e9).toFixed(2)} GB free — `
+        + `resuming ${this._diskPausedItems.size} disk-paused download(s)`,
+      );
+      for (const id of [...this._diskPausedItems]) {
+        this._diskPausedItems.delete(id);
+        const item = this._items.get(id);
+        // Resume only if still paused — the user may have removed or
+        // manually resumed it, or it may have completed another way.
+        if (item && item.status === 'paused') {
+          try { this.resumeItem(id); } catch (err) {
+            console.warn(`[Library] Disk guard: resume of "${id}" failed: ${err.message}`);
+          }
+        }
+      }
     }
   }
 

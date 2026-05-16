@@ -150,6 +150,7 @@ sudo docker run -d \
   "${NVIDIA_RUNTIME_ARGS[@]}" \
   --restart unless-stopped \
   --net=host \
+  --ulimit nofile=65536:65536 \
   -e PORT=8080 \
   -e STREMIO_SERVER="http://${BIND_IP}:11470" \
   -e TORRENT_CACHE="/app/torrent-cache" \

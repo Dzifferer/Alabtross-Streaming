@@ -2346,6 +2346,10 @@ class LibraryManager {
 
     engine.on('error', (err) => {
       tm.clear();
+      const code = err && err.code ? ` code=${err.code}` : '';
+      const syscall = err && err.syscall ? ` syscall=${err.syscall}` : '';
+      console.error(`[Library] Pack download error (${packId}): ${err.message}${code}${syscall}`);
+      this._logResourceSnapshot('pack-download-error');
       for (const [, item] of this._items) {
         if (item.packId === packId && item.status === 'downloading') {
           item.status = 'failed';
@@ -4399,7 +4403,13 @@ class LibraryManager {
 
     engine.on('error', (err) => {
       tm.clear();
-      console.error(`[Library] Download error for "${item.name}": ${err.message}`);
+      const code = err && err.code ? ` code=${err.code}` : '';
+      const syscall = err && err.syscall ? ` syscall=${err.syscall}` : '';
+      console.error(`[Library] Download error for "${item.name}": ${err.message}${code}${syscall}`);
+      // Snapshot resources at the moment of failure — for the "ran fine
+      // for hours then just failed" reports, this line names the cause
+      // (fd ceiling, heap cap, full disk) that err.message alone often won't.
+      this._logResourceSnapshot('download-error');
       item.status = 'failed';
       item.error = err.message;
       this._stopDownload(id);
@@ -4804,6 +4814,7 @@ class LibraryManager {
 
   _logEngineHeartbeat() {
     if (this._engines.size === 0) return;
+    this._logResourceSnapshot('heartbeat');
     for (const [engineKey, engine] of this._engines) {
       if (!engine || !engine.swarm) {
         console.log(`[Library] heartbeat ${engineKey}: engine alive but swarm not ready yet`);
@@ -4860,6 +4871,38 @@ class LibraryManager {
       clearInterval(this._engineHeartbeatTimer);
       this._engineHeartbeatTimer = null;
     }
+  }
+
+  /**
+   * Log a one-line process resource snapshot. Called every heartbeat while
+   * downloads are active, and again from each engine-error handler. The
+   * point is diagnosing the "ran fine for hours then just failed" class of
+   * bug without a reproduction: a download that dies from resource
+   * exhaustion gives no useful error on its own, but the snapshot trend
+   * leading up to it does. Watch for any of these creeping toward a limit:
+   *   - heap toward 2048 MB (the --max-old-space-size cap) → OOM imminent
+   *   - open fds toward the process ulimit → EMFILE imminent
+   *   - disk free toward 0 → ENOSPC imminent
+   * Wrapped so a diagnostics failure can never disrupt a download.
+   */
+  _logResourceSnapshot(tag = 'heartbeat') {
+    try {
+      const mu = process.memoryUsage();
+      const heapMB = Math.round(mu.heapUsed / 1048576);
+      const heapTotMB = Math.round(mu.heapTotal / 1048576);
+      const rssMB = Math.round(mu.rss / 1048576);
+      let fds = '?';
+      try { fds = String(fs.readdirSync('/proc/self/fd').length); } catch { /* non-Linux */ }
+      let diskFree = '?';
+      try {
+        const st = fs.statfsSync(this._libraryPath);
+        diskFree = ((st.bavail * st.bsize) / 1e9).toFixed(2) + ' GB';
+      } catch { /* statfs unavailable */ }
+      console.log(
+        `[Library] resources (${tag}): heap ${heapMB}/${heapTotMB} MB · rss ${rssMB} MB`
+        + ` · open fds ${fds} · disk free ${diskFree}`,
+      );
+    } catch { /* diagnostics must never throw */ }
   }
 
   // ─── Auto-retry daemon ────────────────────────────────────────────────

@@ -113,6 +113,14 @@ const STALE_WATCH_MS = 5 * 60 * 1000;
 // How often to log a summary line. 0 = never.
 const SUMMARY_LOG_INTERVAL_MS = 60000;
 
+// Upper bound on the long-lived per-engine tracking collections (_connected
+// and _state). A multi-hour download churns through thousands of unique
+// peer addresses; neither collection is otherwise pruned until the engine
+// is destroyed, so without a cap they grow without bound and leak memory on
+// exactly the long-running downloads that matter most. Both are best-effort
+// hints, so evicting the oldest entries past the cap is harmless.
+const MAX_TRACKED_ADDRS = 4000;
+
 class PeerManager {
   /**
    * @param {object} engine - torrent-stream engine
@@ -359,6 +367,34 @@ class PeerManager {
 
     // Pass 2: scan handshook wires for unproductive ones holding our slots.
     this._sweepLiveWires();
+
+    // Pass 3: keep the long-lived tracking collections bounded.
+    this._pruneTracking();
+  }
+
+  /**
+   * Bound _connected and _state so a multi-hour download can't leak memory
+   * through them. Both survive a peer's disappearance by design (so
+   * re-announced peers accumulate strikes rather than resetting), which is
+   * also why they need an explicit cap — nothing else ever shrinks them.
+   *
+   *   _connected — a pure dedupe hint for the watch list. No per-entry
+   *     metadata to LRU on, and re-watching a peer is harmless, so when it
+   *     overflows we just drop it wholesale and let it refill.
+   *   _state — strike history keyed by addr. Evict the oldest-firstSeen
+   *     entries; the worst case is a long-absent bad peer getting a fresh
+   *     slate, which it would have to re-earn strikes for anyway.
+   */
+  _pruneTracking() {
+    if (this._connected.size > MAX_TRACKED_ADDRS) {
+      this._connected.clear();
+    }
+    if (this._state.size > MAX_TRACKED_ADDRS) {
+      const entries = [...this._state.entries()]
+        .sort((a, b) => a[1].firstSeen - b[1].firstSeen);
+      const dropCount = entries.length - MAX_TRACKED_ADDRS;
+      for (let i = 0; i < dropCount; i++) this._state.delete(entries[i][0]);
+    }
   }
 
   /**

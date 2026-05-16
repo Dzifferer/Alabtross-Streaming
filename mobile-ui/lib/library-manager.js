@@ -4965,11 +4965,18 @@ class LibraryManager {
     const s = errStr.toLowerCase();
     // Permanent / user-actionable — never auto-retry.
     if (s.includes('insufficient disk space')) return false;
+    if (s.includes('enospc') || s.includes('no space left')) return false; // disk full — retrying just spams the same failure
     if (s.includes('file not found on disk')) return false;
     if (s.includes('disallowed')) return false;
     if (s.includes('not a safe file')) return false;
     if (s.includes('invalid magnet')) return false;
     // Transient — safe to retry.
+    // EMFILE: the process hit its file-descriptor ceiling. Tearing the
+    // engine down (which the error handler already does before failing the
+    // item) releases that engine's sockets and piece-file handles, so a
+    // retry gets a clean slate. Without this an fd spike on a long download
+    // permanently fails it even though the condition is self-clearing.
+    if (s.includes('emfile') || s.includes('too many open files')) return true;
     if (s.includes('metadata timeout')) return true;
     if (s.includes('tracker')) return true;
     if (s.includes('dht')) return true;

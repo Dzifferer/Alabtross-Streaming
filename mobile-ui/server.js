@@ -5526,3 +5526,21 @@ async function shutdown() {
 
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
+
+// Last-resort safety net. A stray error from a peer socket, a torrent-stream
+// internal, or an unhandled promise must NOT take the whole server down: a
+// process exit drops every in-progress download and conversion, the
+// container restarts, and a long-running download that was minutes from
+// completing is forced to resume from a cold engine — the exact way an
+// 8-hour download "fails" without any single component reporting a fault.
+// The realistic uncaught errors here are benign socket teardowns
+// (ECONNRESET / EPIPE) from the dozens of churning BitTorrent peers, so the
+// pragmatic choice for a long-lived media server is to log loudly and stay
+// up. A genuinely fatal fault (OOM) still aborts the process on its own;
+// SIGTERM / SIGINT above remain the only clean shutdown paths.
+process.on('uncaughtException', (err) => {
+  console.error(`[Server] Uncaught exception (kept alive): ${(err && err.stack) || err}`);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error(`[Server] Unhandled promise rejection (kept alive): ${(reason && reason.stack) || reason}`);
+});

@@ -4996,13 +4996,20 @@ class LibraryManager {
     const resumeAbove = this._diskReserveBytes + 5 * GB;
 
     if (freeBytes < pauseBelow) {
-      const active = [...this._items.values()].filter(i => i.status === 'downloading');
-      if (active.length === 0) return;
+      // Pause queued items as well as downloading ones. pauseItem() frees a
+      // concurrency slot and kicks _processQueue, which would otherwise
+      // start a queued download straight into the _checkFreeSpace preflight
+      // and permanently fail it on "Insufficient disk space". Snapshotting
+      // both states up front means the queue has nothing left to start.
+      const toPause = [...this._items.values()].filter(
+        i => i.status === 'downloading' || i.status === 'queued',
+      );
+      if (toPause.length === 0) return;
       console.warn(
         `[Library] Disk guard: only ${(freeBytes / 1e9).toFixed(2)} GB free — `
-        + `pausing ${active.length} download(s) to avoid ENOSPC failures`,
+        + `pausing ${toPause.length} active/queued download(s) to avoid ENOSPC failures`,
       );
-      for (const item of active) {
+      for (const item of toPause) {
         if (this.pauseItem(item.id)) this._diskPausedItems.add(item.id);
       }
     } else if (freeBytes > resumeAbove && this._diskPausedItems.size > 0) {

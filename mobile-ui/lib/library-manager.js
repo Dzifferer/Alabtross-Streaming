@@ -296,6 +296,12 @@ class LibraryManager {
     // the Orin CPU and are unaffected. Maintained by server.js via
     // incrementLiveTranscodes / decrementLiveTranscodes.
     this._liveTranscodeCount = 0;
+    // Optional directory where a converted file's ORIGINAL is preserved
+    // (the library tree itself only ever holds the universal MP4). When
+    // unset, originals are deleted after a successful conversion — the
+    // historical behavior. When set, the original is moved here under the
+    // same relative path. Typically points at an external/secondary drive.
+    this._originalsBackupPath = opts.originalsBackupPath || null;
     // Free-space reserve kept below the library's current usage. New
     // downloads / conversions are refused when they would eat into this
     // headroom. 1 GB is enough for metadata.json churn, ffmpeg temp
@@ -6875,6 +6881,43 @@ class LibraryManager {
   }
 
   /**
+   * One-shot "convert the whole library to universal MP4" sweep, exposed
+   * to the UI as a button. Forgets every prior conversion verdict
+   * (conversionCheckedAt) and every past failure (convertError) so each
+   * complete video item is re-probed and re-classified, then routed
+   * through the normal conversion queue. Files already in universal
+   * H.264/AAC/MP4 classify as "no conversion needed" and are skipped — so
+   * only non-universal files actually get re-encoded. Originals are
+   * handled by _retireOriginalFile (kept on the backup path when one is
+   * configured).
+   *
+   * Returns synchronously with the count of items to probe; the probing
+   * and queueing then run in the background via the existing sweep.
+   */
+  convertWholeLibrary() {
+    if (this._librarySweep && this._librarySweep.active) {
+      return { active: true, alreadyRunning: true, itemsToCheck: this._librarySweep.total };
+    }
+    let toCheck = 0;
+    for (const item of this._items.values()) {
+      if (item.status !== 'complete' || !item.filePath) continue;
+      if (item.type === 'album') continue; // audio is never video-transcoded
+      item.conversionCheckedAt = null;
+      item.convertError = null;
+      toCheck++;
+    }
+    this._librarySweep = { active: toCheck > 0, total: toCheck, startedAt: Date.now() };
+    if (toCheck > 0) {
+      this._saveMetadata();
+      this._scanCompleteItemsForConversion()
+        .catch(err => console.error(`[Library] convertWholeLibrary sweep failed: ${err.message}`))
+        .finally(() => { if (this._librarySweep) this._librarySweep.active = false; });
+    }
+    console.log(`[Library] Full-library conversion sweep started — ${toCheck} item(s) to probe`);
+    return { active: toCheck > 0, alreadyRunning: false, itemsToCheck: toCheck };
+  }
+
+  /**
    * Get the temp file path used during conversion.
    */
   _getConvertTempPath(inputPath) {
@@ -7370,6 +7413,51 @@ class LibraryManager {
   /**
    * Handle successful conversion: rename temp file, delete original, update metadata.
    */
+  /**
+   * Retire a conversion's source file. With _originalsBackupPath set the
+   * file is MOVED into that directory under the same relative path it had
+   * in the library, so a backup drive mirrors the library layout; without
+   * it the file is deleted (historical behavior). A failed backup
+   * deliberately leaves the original in place rather than deleting it —
+   * preserving the file the operator asked to keep beats tidiness.
+   *
+   * Async, and callers fire-and-forget it: the backup path is typically
+   * an external drive, so the cross-device copy fallback can take many
+   * seconds on a multi-GB file and must not block the event loop. The
+   * converted MP4 is already in place and the item already points at it
+   * before this runs, so nothing waits on the original being gone.
+   */
+  async _retireOriginalFile(absSourcePath) {
+    if (!this._originalsBackupPath) {
+      try { await fs.promises.unlink(absSourcePath); }
+      catch (err) { console.warn(`[Library] Could not delete original ${absSourcePath}: ${err.message}`); }
+      return;
+    }
+    const rel = path.relative(this._libraryPath, absSourcePath);
+    // Refuse to "back up" anything that isn't actually inside the library.
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+      console.warn(`[Library] Original ${absSourcePath} is outside the library tree — leaving it in place`);
+      return;
+    }
+    const dest = path.join(this._originalsBackupPath, rel);
+    try {
+      await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+      try {
+        await fs.promises.rename(absSourcePath, dest);
+      } catch (err) {
+        // EXDEV: the backup path is on a different filesystem (the common
+        // case — an external drive). rename() can't cross devices, so fall
+        // back to copy-then-remove.
+        if (err.code !== 'EXDEV') throw err;
+        await fs.promises.copyFile(absSourcePath, dest);
+        await fs.promises.unlink(absSourcePath);
+      }
+      console.log(`[Library] Original preserved → ${dest}`);
+    } catch (err) {
+      console.error(`[Library] Failed to back up original ${absSourcePath}: ${err.message} — leaving it in place`);
+    }
+  }
+
   _onConversionSuccess(id, inputPath, tempOutputPath, finalOutputPath, isRemote = false) {
     const item = this._items.get(id);
     if (!item) return;
@@ -7385,9 +7473,14 @@ class LibraryManager {
       // Rename temp to final
       fs.renameSync(tempOutputPath, finalOutputPath);
 
-      // Delete original file (only if it's different from the output)
+      // Retire the original (only when the output is a genuinely different
+      // file). Moved to the backup path when one is configured, else
+      // deleted — see _retireOriginalFile. Fire-and-forget: a cross-device
+      // backup copy must not block the event loop, and nothing below
+      // depends on the original being gone.
       if (inputPath !== finalOutputPath && fs.existsSync(inputPath)) {
-        fs.unlinkSync(inputPath);
+        this._retireOriginalFile(inputPath).catch((err) =>
+          console.error(`[Library] Original retirement failed for ${inputPath}: ${err.message}`));
       }
 
       // Invalidate probe cache entries tied to the old source AND the

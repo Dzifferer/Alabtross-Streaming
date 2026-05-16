@@ -5920,6 +5920,35 @@
       });
     }
 
+    // ─── Convert Library Button ───────────────────
+    $('#convert-library-btn')?.addEventListener('click', async () => {
+      if (!confirm('Re-encode every non-universal file in the library to H.264/AAC/MP4? Already-universal files are skipped. This runs in the background and can take a long time on a large library.')) return;
+      const btn = $('#convert-library-btn');
+      const status = $('#convert-library-status');
+      btn.disabled = true;
+      try {
+        const r = await fetch('/api/library/convert-all', { method: 'POST' });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || 'request failed');
+        if (data.alreadyRunning) {
+          if (status) status.textContent = `A conversion sweep is already running (${data.itemsToCheck} items).`;
+          showToast('Conversion sweep already in progress');
+        } else if (data.itemsToCheck > 0) {
+          if (status) status.textContent = `Sweep started — probing ${data.itemsToCheck} item(s). Non-universal files will convert in the background.`;
+          showToast(`Library conversion started (${data.itemsToCheck} items)`);
+        } else {
+          if (status) status.textContent = 'Nothing to convert — the library has no completed video items.';
+          showToast('Nothing to convert');
+        }
+        loadLibrary();
+      } catch (e) {
+        if (status) status.textContent = 'Failed to start: ' + e.message;
+        showToast('Convert failed: ' + e.message);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
     dom.settingsToggle.addEventListener('click', () => {
       navigateTo('settings');
       renderAddonList();

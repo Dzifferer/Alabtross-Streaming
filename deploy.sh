@@ -137,6 +137,14 @@ echo "==> Starting container (bind IP: $BIND_IP)..."
 # Nano has no NVENC hardware. On an Orin NX / AGX Orin (or when you migrate
 # to one), set FFMPEG_ENCODER=h264_nvenc in .env to move the encode side
 # onto the GPU too. Only compatible with FFMPEG_HWACCEL=cuda.
+#
+# ORIGINALS_BACKUP_PATH (optional) — when set, a converted file's ORIGINAL
+# is moved here instead of being deleted, so the library holds only
+# universal MP4s while the source rips are preserved. Point it at a path
+# inside the container that maps to a secondary/external drive, e.g. add
+#   -v "/mnt/backup/originals:/app/originals" \
+# below and set ORIGINALS_BACKUP_PATH=/app/originals in .env. Leave unset
+# to keep the historical behavior (originals deleted after conversion).
 sudo docker run -d \
   --name alabtross-mobile \
   "${NVIDIA_RUNTIME_ARGS[@]}" \
@@ -151,6 +159,7 @@ sudo docker run -d \
   -e WORKER_SECRET="${WORKER_SECRET:-}" \
   -e FFMPEG_HWACCEL="${FFMPEG_HWACCEL:-$FFMPEG_HWACCEL_DEFAULT}" \
   -e FFMPEG_ENCODER="${FFMPEG_ENCODER:-}" \
+  -e ORIGINALS_BACKUP_PATH="${ORIGINALS_BACKUP_PATH:-}" \
   -v "/mnt/movies/torrent-cache:/app/torrent-cache" \
   alabtross-mobile
 

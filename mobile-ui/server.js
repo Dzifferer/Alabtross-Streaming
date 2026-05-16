@@ -503,6 +503,19 @@ const DISK_RESERVE_BYTES = (() => {
   return Number.isFinite(n) && n >= 0 ? n : 1 * 1024 * 1024 * 1024;
 })();
 const MAX_CONCURRENT_REMOTE_CONVERSIONS = parseInt(process.env.MAX_CONCURRENT_REMOTE_CONVERSIONS, 10) || 3;
+// Optional directory where a converted file's ORIGINAL is preserved. When
+// set, conversions move the source here (mirroring the library's relative
+// layout) instead of deleting it — typically an external/secondary drive.
+// When unset, originals are deleted after a successful conversion.
+const ORIGINALS_BACKUP_PATH = (process.env.ORIGINALS_BACKUP_PATH || '').trim() || null;
+if (ORIGINALS_BACKUP_PATH) {
+  try {
+    fs.mkdirSync(ORIGINALS_BACKUP_PATH, { recursive: true });
+    console.log(`[Config] Converted-file originals will be preserved under ${ORIGINALS_BACKUP_PATH}`);
+  } catch (err) {
+    console.error(`[Config] ORIGINALS_BACKUP_PATH ${ORIGINALS_BACKUP_PATH} is not usable: ${err.message}`);
+  }
+}
 const library = new LibraryManager({
   libraryPath: LIBRARY_PATH,
   maxConcurrentDownloads: MAX_CONCURRENT_STREAMS,
@@ -512,6 +525,7 @@ const library = new LibraryManager({
   maxConcurrentRemoteConversions: MAX_CONCURRENT_REMOTE_CONVERSIONS,
   taskPriority: TASK_PRIORITY,
   cpuProtection: CPU_PROTECTION,
+  originalsBackupPath: ORIGINALS_BACKUP_PATH,
 });
 // Separate LibraryManager instance for music with its own _metadata.json.
 // Music items are type: 'album' and take a different completion path
@@ -3792,6 +3806,23 @@ app.post('/api/library/repair-all-incomplete', rateLimit, async (req, res) => {
   } catch (err) {
     console.error('[Server] repairAllIncomplete failed:', err);
     res.status(500).json({ error: err.message || 'bulk repair failed' });
+  }
+});
+
+// POST /api/library/convert-all — one-shot sweep that re-probes every
+// complete video item and queues a background conversion for any that
+// isn't already a universal H.264/AAC/MP4. Already-universal files are
+// skipped. Originals are preserved under ORIGINALS_BACKUP_PATH when set.
+// Returns immediately with the number of items to probe; conversions
+// then proceed through the normal queue (watch per-item convertProgress).
+app.post('/api/library/convert-all', rateLimit, (req, res) => {
+  try {
+    const result = library.convertWholeLibrary();
+    _libraryVersion++;
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('[Server] convertWholeLibrary failed:', err);
+    res.status(500).json({ error: err.message || 'library conversion sweep failed' });
   }
 });
 

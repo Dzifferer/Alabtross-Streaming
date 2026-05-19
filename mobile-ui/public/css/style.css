@@ -5483,3 +5483,56 @@ body.music-player-open .music-player-bar { display: none; }
 
 .discover-search-btn:hover { background: rgba(124, 92, 252, 0.1); }
 
+/* ============================================================
+   TV / Fire TV remote mode
+   Activated by html.tv-mode (see js/tv-nav.js). The .tv-focus
+   class is moved onto whichever element the D-pad currently
+   targets, giving a clear on-screen highlight in the absence
+   of a mouse pointer.
+   ============================================================ */
+html.tv-mode,
+html.tv-mode body {
+  cursor: none;
+}
+
+/* Suppress the browser's default focus outline — the .tv-focus
+   highlight below replaces it so plain <div> cards and native
+   controls share one consistent look. */
+html.tv-mode *:focus {
+  outline: none;
+}
+
+html.tv-mode .tv-focus {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+  box-shadow: 0 0 0 5px var(--accent-glow), 0 8px 28px rgba(0, 0, 0, 0.55);
+  position: relative;
+  z-index: 20;
+  transition: outline-color 0.12s ease, box-shadow 0.12s ease,
+              transform 0.12s ease;
+}
+
+/* Poster / card style elements lift slightly when focused so the
+   highlight reads clearly across a room. */
+html.tv-mode .card.tv-focus,
+html.tv-mode .channel-card.tv-focus,
+html.tv-mode .library-card.tv-focus,
+html.tv-mode .library-group-tile.tv-focus,
+html.tv-mode .music-card.tv-focus,
+html.tv-mode .artist-card.tv-focus,
+html.tv-mode .release-card.tv-focus,
+html.tv-mode .lib-card.tv-focus {
+  transform: scale(1.06);
+}
+
+/* Pill / chip / nav-style controls just glow — no scaling, so the
+   row layout stays put. */
+html.tv-mode .filter-chip.tv-focus,
+html.tv-mode .channel-group-chip.tv-focus,
+html.tv-mode .genre-chip.tv-focus,
+html.tv-mode .nav-btn.tv-focus,
+html.tv-mode .music-tab.tv-focus {
+  transform: none;
+}
+

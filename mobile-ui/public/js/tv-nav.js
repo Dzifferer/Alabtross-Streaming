@@ -182,28 +182,31 @@
   }
 
   // ─── Spatial navigation ─────────────────────────────────────────
-  function move(dir) {
-    const scope = currentScope();
-    const cur = currentEl();
-    if (!cur || (scope !== document && !scope.contains(cur))) {
-      const overlay = openOverlay();
-      focusEl(overlay ? collect(overlay)[0] : firstInScope());
-      return;
-    }
-    const candidates = collect(scope).filter((el) => el !== cur);
-    if (!candidates.length) return;
 
-    const cr = cur.getBoundingClientRect();
-    const cc = center(cr);
+  // Persistent chrome (top bar, search/filter bars, bottom nav, mini
+  // player) lives outside the scrollable content area. Geometrically the
+  // fixed bottom nav often sits closer to a card than the next — still
+  // off-screen — row of cards, so a naive nearest-neighbour search would
+  // jump into the nav bar instead of scrolling the content. Tracking
+  // which cluster an element belongs to lets navigation exhaust the
+  // scrollable content before crossing into the chrome.
+  const CHROME_SELECTOR =
+    '#top-bar, #search-bar, #filter-bar, #bottom-nav, #music-player-bar';
 
-    let best = null;
-    let bestScore = Infinity;
-    let bestLoose = null;
-    let bestLooseScore = Infinity;
+  function isChrome(el) {
+    return !!(el && el.closest && el.closest(CHROME_SELECTOR));
+  }
 
-    for (const el of candidates) {
-      const r = el.getBoundingClientRect();
-      const c = center(r);
+  // Best candidate from `list` in direction `dir` relative to `cur`.
+  // Prefers the tight 45-degree cone, falling back to anything in the
+  // correct half-plane so grid rows wrap cleanly.
+  function bestInDirection(cur, list, dir) {
+    const cc = center(cur.getBoundingClientRect());
+    let best = null, bestScore = Infinity;
+    let loose = null, looseScore = Infinity;
+
+    for (const el of list) {
+      const c = center(el.getBoundingClientRect());
       const dx = c.x - cc.x;
       const dy = c.y - cc.y;
 
@@ -218,16 +221,46 @@
       if (!moving) continue;
 
       const score = Math.abs(main) + cross * 3;
-      // Tight cone: the candidate lies mostly in the pressed direction.
-      if (Math.abs(main) >= cross) {
-        if (score < bestScore) { bestScore = score; best = el; }
+      if (Math.abs(main) >= cross && score < bestScore) {
+        bestScore = score; best = el;
       }
-      // Loose fallback: any element in the half-plane (handles grid wrap
-      // onto the next/previous row when nothing sits straight ahead).
-      if (score < bestLooseScore) { bestLooseScore = score; bestLoose = el; }
+      if (score < looseScore) { looseScore = score; loose = el; }
+    }
+    return best || loose;
+  }
+
+  function move(dir) {
+    const scope = currentScope();
+    const cur = currentEl();
+    if (!cur || (scope !== document && !scope.contains(cur))) {
+      const overlay = openOverlay();
+      focusEl(overlay ? collect(overlay)[0] : firstInScope());
+      return;
+    }
+    const candidates = collect(scope).filter((el) => el !== cur);
+    if (!candidates.length) return;
+
+    const content = candidates.filter((el) => !isChrome(el));
+    const chrome = candidates.filter((el) => isChrome(el));
+    const contentBest = bestInDirection(cur, content, dir);
+    const chromeBest = bestInDirection(cur, chrome, dir);
+
+    let target;
+    if (!isChrome(cur)) {
+      // Inside scrollable content: stay in the content (scrolling to
+      // off-screen rows) until it is exhausted, only then enter chrome.
+      target = contentBest || chromeBest;
+    } else {
+      // Inside chrome: pressing toward the content area dives back in;
+      // otherwise move within the chrome cluster.
+      const atBottom = !!cur.closest('#bottom-nav, #music-player-bar');
+      const towardContent = atBottom ? dir === 'up' : dir === 'down';
+      target = towardContent
+        ? (contentBest || chromeBest)
+        : (chromeBest || contentBest);
     }
 
-    focusEl(best || bestLoose);
+    focusEl(target);
   }
 
   // ─── Activation ─────────────────────────────────────────────────

@@ -31,6 +31,7 @@
     '[role="button"]',
     '.card', '.channel-card', '.channel-group-chip',
     '.library-card', '.library-group-tile', '.episode-item',
+    '.library-episode-row',
     '.cast-device-item', '.addon-item', '.source-item', '.diag-item',
     '.download-item', '.download-pack-item', '.complete-pack-item',
     '.review-card', '.music-card', '.artist-card', '.release-card',
@@ -40,6 +41,24 @@
     '[data-view]', '[data-music-tab]', '[data-selector-target]',
     '[data-filter]',
   ].join(',');
+
+  // Composite tiles act as a single focus stop: a library/catalog card or
+  // episode row carries one primary action (play it, open it), but also
+  // contains small absolutely-positioned buttons (remove, re-link, repair).
+  // Letting the D-pad land on those inner buttons fragments navigation —
+  // pressing Right off a card would catch the card's own corner button
+  // instead of the next card — and makes it hard to focus the card cleanly
+  // to start playback. So inner focusables are suppressed and OK on the
+  // tile is routed to its primary action (see activate()).
+  const COMPOSITE_SELECTOR =
+    '.card, .channel-card, .library-episode-row, .episode-item';
+
+  // Status-specific overlay actions inside a library card. When a card is
+  // not 'complete' its own click handler does nothing, so OK must be routed
+  // to whichever of these is present (resume / retry / repair / re-link).
+  const PRIMARY_ACTION_SELECTOR =
+    '.library-card-resume, .library-card-retry, ' +
+    '.library-card-repair-overlay, .library-card-relink-magnet-overlay';
 
   // Overlays/modals that, when present, should trap focus.
   const OVERLAY_SELECTOR =
@@ -118,13 +137,22 @@
   }
 
   function collect(root) {
-    return Array.prototype.slice
+    const list = Array.prototype.slice
       .call((root || document).querySelectorAll(FOCUSABLE))
       .filter(isVisible);
+    // Drop focusables nested inside a composite tile so the tile itself is
+    // the only focus stop for that card / row.
+    return list.filter((el) => {
+      const comp = el.closest(COMPOSITE_SELECTOR);
+      return !comp || comp === el;
+    });
   }
 
   // ─── Focus highlight ────────────────────────────────────────────
   let highlighted = null;
+  // data-id of the last focused tile, used to re-acquire the same item
+  // after a list re-render replaces its DOM node (see syncFocus).
+  let lastFocusId = null;
 
   function clearHighlight() {
     if (highlighted) {
@@ -153,6 +181,7 @@
     try { el.focus({ preventScroll: true }); } catch { el.focus(); }
     el.classList.add('tv-focus');
     highlighted = el;
+    lastFocusId = (el.getAttribute && el.getAttribute('data-id')) || null;
     try {
       el.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
     } catch {
@@ -181,29 +210,49 @@
     return list[0];
   }
 
+  // After a list re-render the previously focused card is a brand-new DOM
+  // node; look up the tile carrying the same data-id so focus stays put on
+  // the same item instead of snapping back to the top of the list.
+  function reacquireById(overlay) {
+    if (!lastFocusId) return null;
+    const root = overlay || activeViewEl() || document;
+    let found;
+    try {
+      const esc = (window.CSS && CSS.escape)
+        ? CSS.escape(lastFocusId) : lastFocusId;
+      found = root.querySelector('[data-id="' + esc + '"]');
+    } catch { return null; }
+    if (!found) return null;
+    const tile = (found.closest && found.closest(COMPOSITE_SELECTOR)) || found;
+    return isVisible(tile) ? tile : null;
+  }
+
   // ─── Spatial navigation ─────────────────────────────────────────
-  function move(dir) {
-    const scope = currentScope();
-    const cur = currentEl();
-    if (!cur || (scope !== document && !scope.contains(cur))) {
-      const overlay = openOverlay();
-      focusEl(overlay ? collect(overlay)[0] : firstInScope());
-      return;
-    }
-    const candidates = collect(scope).filter((el) => el !== cur);
-    if (!candidates.length) return;
 
-    const cr = cur.getBoundingClientRect();
-    const cc = center(cr);
+  // Persistent chrome (top bar, search/filter bars, bottom nav, mini
+  // player) lives outside the scrollable content area. Geometrically the
+  // fixed bottom nav often sits closer to a card than the next — still
+  // off-screen — row of cards, so a naive nearest-neighbour search would
+  // jump into the nav bar instead of scrolling the content. Tracking
+  // which cluster an element belongs to lets navigation exhaust the
+  // scrollable content before crossing into the chrome.
+  const CHROME_SELECTOR =
+    '#top-bar, #search-bar, #filter-bar, #bottom-nav, #music-player-bar';
 
-    let best = null;
-    let bestScore = Infinity;
-    let bestLoose = null;
-    let bestLooseScore = Infinity;
+  function isChrome(el) {
+    return !!(el && el.closest && el.closest(CHROME_SELECTOR));
+  }
 
-    for (const el of candidates) {
-      const r = el.getBoundingClientRect();
-      const c = center(r);
+  // Best candidate from `list` in direction `dir` relative to `cur`.
+  // Prefers the tight 45-degree cone, falling back to anything in the
+  // correct half-plane so grid rows wrap cleanly.
+  function bestInDirection(cur, list, dir) {
+    const cc = center(cur.getBoundingClientRect());
+    let best = null, bestScore = Infinity;
+    let loose = null, looseScore = Infinity;
+
+    for (const el of list) {
+      const c = center(el.getBoundingClientRect());
       const dx = c.x - cc.x;
       const dy = c.y - cc.y;
 
@@ -218,29 +267,63 @@
       if (!moving) continue;
 
       const score = Math.abs(main) + cross * 3;
-      // Tight cone: the candidate lies mostly in the pressed direction.
-      if (Math.abs(main) >= cross) {
-        if (score < bestScore) { bestScore = score; best = el; }
+      if (Math.abs(main) >= cross && score < bestScore) {
+        bestScore = score; best = el;
       }
-      // Loose fallback: any element in the half-plane (handles grid wrap
-      // onto the next/previous row when nothing sits straight ahead).
-      if (score < bestLooseScore) { bestLooseScore = score; bestLoose = el; }
+      if (score < looseScore) { looseScore = score; loose = el; }
+    }
+    return best || loose;
+  }
+
+  function move(dir) {
+    const scope = currentScope();
+    const cur = currentEl();
+    if (!cur || (scope !== document && !scope.contains(cur))) {
+      const overlay = openOverlay();
+      focusEl(overlay ? collect(overlay)[0] : firstInScope());
+      return;
+    }
+    const candidates = collect(scope).filter((el) => el !== cur);
+    if (!candidates.length) return;
+
+    const content = candidates.filter((el) => !isChrome(el));
+    const chrome = candidates.filter((el) => isChrome(el));
+    const contentBest = bestInDirection(cur, content, dir);
+    const chromeBest = bestInDirection(cur, chrome, dir);
+
+    let target;
+    if (!isChrome(cur)) {
+      // Inside scrollable content: stay in the content (scrolling to
+      // off-screen rows) until it is exhausted, only then enter chrome.
+      target = contentBest || chromeBest;
+    } else {
+      // Inside chrome: pressing toward the content area dives back in;
+      // otherwise move within the chrome cluster.
+      const atBottom = !!cur.closest('#bottom-nav, #music-player-bar');
+      const towardContent = atBottom ? dir === 'up' : dir === 'down';
+      target = towardContent
+        ? (contentBest || chromeBest)
+        : (chromeBest || contentBest);
     }
 
-    focusEl(best || bestLoose);
+    focusEl(target);
   }
 
   // ─── Activation ─────────────────────────────────────────────────
   function activate(el) {
     if (!el) return;
     const tag = el.tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA') {
-      el.focus();
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
+      el.focus(); // native open / on-screen keyboard handled by the browser
       return;
     }
-    if (tag === 'SELECT') {
-      el.focus();
-      return; // native open on key handled by the browser
+    // Composite tile: route OK to a status-specific overlay action when one
+    // is present (a paused/failed/broken library card), otherwise click the
+    // tile itself — which plays a complete item or opens a catalog card.
+    if (el.matches && el.matches(COMPOSITE_SELECTOR)) {
+      const primary = el.querySelector(PRIMARY_ACTION_SELECTOR);
+      (primary || el).click();
+      return;
     }
     el.click();
   }
@@ -367,12 +450,14 @@
       const scope = currentScope();
       const cur = currentEl();
       // Re-home focus when the highlighted element vanished (view switch,
-      // overlay open/close) or drifted outside the active scope.
+      // overlay open/close, or a list re-render that replaced the card)
+      // or drifted outside the active scope.
       if (!cur || !scope.contains(cur)) {
         const overlay = openOverlay();
-        const target = overlay
-          ? collect(overlay)[0]
-          : firstInScope();
+        let target = reacquireById(overlay);
+        if (!target) {
+          target = overlay ? collect(overlay)[0] : firstInScope();
+        }
         if (target) focusEl(target);
         else clearHighlight();
       }
@@ -382,8 +467,14 @@
   function installObservers() {
     const appEl = document.getElementById('app');
     if (appEl) {
+      // childList is watched too: list views (library, catalogs) replace
+      // their innerHTML on load and on the background progress poll, which
+      // removes the focused card from the DOM. Re-running syncFocus then
+      // re-homes the highlight onto a fresh element instead of leaving
+      // focus stranded on <body> where OK would do nothing.
       new MutationObserver(syncFocus).observe(appEl, {
-        attributes: true, subtree: true, attributeFilter: ['class'],
+        attributes: true, childList: true, subtree: true,
+        attributeFilter: ['class'],
       });
     }
     // Modals are appended as direct children of <body>.

@@ -7674,21 +7674,38 @@
       });
     }
 
-    // Keyboard controls for video player
+    // Keyboard / TV-remote controls for the video player.
+    // When an overlay is open on top of the player (up-next prompt, cast
+    // picker, playback error), the keys belong to that overlay's buttons —
+    // TV navigation drives them — so this handler steps aside.
     document.addEventListener('keydown', (e) => {
       if (state.currentView !== 'player') return;
+      const overlayOpen =
+        document.getElementById('up-next-card') ||
+        document.getElementById('player-go-back') ||
+        (dom.castDevicePicker && !dom.castDevicePicker.classList.contains('hidden'));
+      if (overlayOpen) return;
+
       const v = dom.videoPlayer;
+      // Any remote key wakes the on-screen controls.
+      showPlayerControls();
       switch (e.key) {
         case ' ':
         case 'k':
+        case 'Enter':            // Fire TV center / OK button
+        case 'MediaPlayPause':
+        case 'MediaPlay':
+        case 'MediaPause':
           e.preventDefault();
           v.paused ? v.play() : v.pause();
           break;
         case 'ArrowLeft':
+        case 'MediaRewind':
           e.preventDefault();
           v.currentTime = Math.max(0, v.currentTime - 10);
           break;
         case 'ArrowRight':
+        case 'MediaFastForward':
           e.preventDefault();
           v.currentTime = Math.min(v.duration || Infinity, v.currentTime + 10);
           break;
@@ -7700,6 +7717,14 @@
           e.preventDefault();
           v.volume = Math.max(0, v.volume - 0.1);
           break;
+        case 'MediaTrackNext': {
+          const nextBtn = document.getElementById('next-episode-btn');
+          if (nextBtn && !nextBtn.classList.contains('hidden')) {
+            e.preventDefault();
+            nextBtn.click();
+          }
+          break;
+        }
         case 'f':
         case 'F':
           e.preventDefault();
@@ -7717,6 +7742,10 @@
           v.muted = !v.muted;
           break;
         case 'Escape':
+        case 'Backspace':
+        case 'GoBack':
+        case 'BrowserBack':
+          e.preventDefault();
           goBack();
           break;
       }

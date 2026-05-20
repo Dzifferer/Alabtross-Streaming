@@ -5,4 +5,7 @@
     <color name="text">#E8E8EF</color>
     <color name="text_dim">#8888A0</color>
     <color name="accent">#6C5CE7</color>
+    <!-- Background colour baked into the logo PNG; reused as the adaptive
+         icon background so the launcher mask never reveals a seam. -->
+    <color name="icon_bg">#1B2130</color>
 </resources>

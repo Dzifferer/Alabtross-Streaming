@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive icon used on Android 8.0+ (API 26+). The system masks the
+     foreground+background into whatever shape the launcher prefers
+     (square, rounded square, circle, squircle). The inner 72×72 dp of the
+     108×108 dp canvas is the visible safe zone; the logo content is sized
+     to fit there so the system mask never clips it. -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/icon_bg" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+</adaptive-icon>

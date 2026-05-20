@@ -1,0 +1,6 @@
+// Top-level build file. The Android Gradle Plugin version below pairs with
+// Gradle 8.7 and JDK 17 — what current Android Studio (Koala / Jellyfish)
+// ships with by default. Adjust if you build on an older toolchain.
+plugins {
+    id 'com.android.application' version '8.5.2' apply false
+}

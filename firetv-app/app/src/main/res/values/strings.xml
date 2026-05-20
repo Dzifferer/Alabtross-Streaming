@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Albatross</string>
+    <string name="config_title">Albatross — Server</string>
+    <string name="config_hint">Pick which address the Fire TV should use to reach your Albatross server. Press the Menu button on your remote any time to switch.</string>
+    <string name="config_tailscale_label">Tailscale (recommended)</string>
+    <string name="config_lan_label">LAN address</string>
+    <string name="connect_tailscale">Connect via Tailscale</string>
+    <string name="connect_lan">Connect via LAN</string>
+    <string name="enter_url_first">Enter a URL first</string>
+    <string name="error_loading">Couldn\'t reach the server. Press Menu to change the address.</string>
+</resources>

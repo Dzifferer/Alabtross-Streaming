@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- The app only ever loads the user-configured server URL on their own
+         network. LAN connections are HTTP-only (the Jetson does not present
+         a public TLS cert on its private IP); Tailscale Serve adds HTTPS for
+         the tailnet hostname. Allowing cleartext globally for this single
+         WebView is the simplest correct policy here. -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

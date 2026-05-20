@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Fire TV launcher banner (320×180 dp). Shown as the app's tile on the
+     Fire TV home row. Kept as a vector so no PNGs need to live in the repo. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+
+    <path
+        android:fillColor="#0A0A0F"
+        android:pathData="M0,0 L320,0 L320,180 L0,180 Z" />
+
+    <!-- Stylised "A" mark -->
+    <path
+        android:fillColor="#6C5CE7"
+        android:pathData="M160,40 L200,140 L178,140 L171,120 L149,120 L142,140 L120,140 Z M156,100 L164,100 L160,84 Z" />
+
+    <!-- Accent underline -->
+    <path
+        android:fillColor="#6C5CE7"
+        android:pathData="M120,150 L200,150 L200,154 L120,154 Z" />
+</vector>

@@ -1,0 +1,86 @@
+name: Fire TV APK
+
+# Builds a debug-signed APK of the Fire TV WebView wrapper whenever a change
+# under firetv-app/ lands on main, and uploads it as a workflow artifact you
+# can download from the Actions tab and sideload onto your Fire Stick — no
+# local Android Studio / JDK needed. Also runnable on-demand from the
+# Actions tab via "Run workflow".
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'firetv-app/**'
+      - '.github/workflows/firetv-apk.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Installs the Android command-line tools, accepts the SDK licenses,
+      # and installs the specific platform + build-tools the project pins
+      # so AGP doesn't try to download them mid-build (which fails on CI
+      # without an interactive licence prompt).
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-34 build-tools;34.0.0 platform-tools'
+
+      # AGP 8.5.2 requires Gradle 8.7+. The project does not yet ship a
+      # Gradle wrapper, so we install Gradle explicitly. The action caches
+      # the Gradle home + ~/.gradle automatically across runs.
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      - name: Build debug APK
+        working-directory: firetv-app
+        run: gradle --no-daemon --stacktrace assembleDebug
+
+      - name: Summarise APK
+        if: always()
+        working-directory: firetv-app
+        run: |
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          if [ -f "$APK" ]; then
+            SIZE=$(du -h "$APK" | cut -f1)
+            SHA=$(sha256sum "$APK" | cut -d' ' -f1)
+            {
+              echo "### Fire TV APK"
+              echo ""
+              echo "| Field   | Value |"
+              echo "| ------- | ----- |"
+              echo "| Path    | \`firetv-app/$APK\` |"
+              echo "| Size    | $SIZE |"
+              echo "| SHA-256 | \`$SHA\` |"
+              echo ""
+              echo "Download the **\`albatross-firetv-debug-apk\`** artifact below to sideload."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::APK not produced at $APK"
+          fi
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: albatross-firetv-debug-apk
+          path: firetv-app/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 90

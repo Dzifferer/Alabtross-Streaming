@@ -31,6 +31,22 @@ cd firetv-app
 ./gradlew assembleDebug
 ```
 
+### Or grab a pre-built APK from CI
+
+If you don't want to install Android Studio at all, the
+[Fire TV APK workflow](../.github/workflows/firetv-apk.yml) builds the same
+APK on every push to `main` that touches `firetv-app/`. To download it:
+
+1. Open the repo on GitHub → **Actions** tab → pick the latest **Fire TV
+   APK** run.
+2. Scroll to **Artifacts** at the bottom → download
+   **`albatross-firetv-debug-apk`** (a zip containing `app-debug.apk`).
+3. Unzip and continue with the sideload steps below.
+
+You can also rebuild on demand from the same Actions page via the **Run
+workflow** button — useful for the first install before any changes have
+landed.
+
 ---
 
 ## Install on Fire TV
